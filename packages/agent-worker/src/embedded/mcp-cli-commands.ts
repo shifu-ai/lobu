@@ -27,6 +27,8 @@ import {
 } from "../shared/tool-implementations";
 import { isDirectPackageInstallCommand } from "../openclaw/tool-policy";
 import { toolIdentityKey } from "../openclaw/tool-descriptor";
+import { isExplicitPersonalReminderAttempt } from "../openclaw/mcp-execution-contract";
+import type { TurnExecutionIntent } from "../openclaw/turn-execution-intent";
 
 const logger = createLogger("mcp-cli");
 
@@ -64,6 +66,13 @@ export interface McpRuntimeState {
   turnEligibleToolKeys?: readonly string[];
   /** Canonical identities blocked until the user resolves write ambiguity. */
   clarificationBlockedToolKeys?: readonly string[];
+  /** Immutable intent derived from the external message at turn start. */
+  turnExecutionIntent?: TurnExecutionIntent;
+  /** Immutable release behavior state for personal reminder creation. */
+  personalReminderDeliveryBlockedReason?:
+    | "capability_inactive"
+    | "snapshot_missing"
+    | "snapshot_expired";
 }
 
 export interface McpRuntimeRef {
@@ -213,7 +222,12 @@ function expectedMcpIdentityFor(
 }
 
 function blockedToolResult(
-  error: "not_allowed" | "clarification_required",
+  error:
+    | "not_allowed"
+    | "clarification_required"
+    | "capability_inactive"
+    | "snapshot_missing"
+    | "snapshot_expired",
   mcpId: string,
   toolName: string
 ): { stdout: string; stderr: string; exitCode: number } {
@@ -315,6 +329,22 @@ export function buildMcpServerHandler(
     if (!parsed.ok) {
       return { stdout: "", stderr: `${parsed.error}\n`, exitCode: 2 };
     }
+    if (
+      state.personalReminderDeliveryBlockedReason &&
+      state.turnExecutionIntent &&
+      isExplicitPersonalReminderAttempt({
+        intent: state.turnExecutionIntent,
+        mcpId,
+        toolName: subcommand,
+        args: parsed.payload,
+      })
+    ) {
+      return blockedToolResult(
+        state.personalReminderDeliveryBlockedReason,
+        mcpId,
+        subcommand
+      );
+    }
 
     try {
       const expectedMcpIdentity = expectedMcpIdentityFor(mcpId, state);
@@ -372,6 +402,9 @@ async function refreshRef(
         clarificationBlockedToolKeys:
           fresh.clarificationBlockedToolKeys ??
           ref.current.clarificationBlockedToolKeys,
+        turnExecutionIntent: ref.current.turnExecutionIntent,
+        personalReminderDeliveryBlockedReason:
+          ref.current.personalReminderDeliveryBlockedReason,
       };
     }
   } catch (err) {

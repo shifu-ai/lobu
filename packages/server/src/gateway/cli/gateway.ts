@@ -8,10 +8,15 @@ import { secureHeaders } from "hono/secure-headers";
 import type { AgentMetadata } from "../auth/agent-metadata-store.js";
 import {
   buildPendingToolExecutionOptions,
-  takePendingTool,
+  getPendingTool,
+  pendingToolContinuationDigest,
+  takePendingToolIfUnchanged,
 } from "../auth/mcp/pending-tool-store.js";
 import { setEnvResolver } from "../auth/mcp/string-substitution.js";
-import { createToolApprovalService } from "../auth/mcp/tool-approval-service.js";
+import {
+  createToolApprovalService,
+  validatePendingToolContinuation,
+} from "../auth/mcp/tool-approval-service.js";
 import { OAuthClient } from "../auth/oauth/client.js";
 import { CLAUDE_PROVIDER } from "../auth/oauth/providers.js";
 import { createAuthProfileLabel } from "../auth/settings/auth-profiles-manager.js";
@@ -26,6 +31,7 @@ import { createImageRoutes } from "../routes/internal/images.js";
 import { createInteractionRoutes } from "../routes/internal/interactions.js";
 import { createToolApprovalRoutes } from "../routes/internal/tool-approvals.js";
 import { createWorkStateRoutes } from "../routes/internal/work-state.js";
+import { orgContext } from "../../lobu/stores/org-context.js";
 import { registerAutoOpenApiRoutes } from "../routes/openapi-auto.js";
 import { createAgentApi } from "../routes/public/agent.js";
 import { createAgentConfigRoutes } from "../routes/public/agent-config.js";
@@ -65,6 +71,7 @@ interface CreateGatewayAppOptions {
     | null;
   /** Custom auth provider for embedded mode. When set, gateway delegates auth to this function instead of using cookie-based sessions. */
   authProvider?: import("../routes/public/settings-auth.js").AuthProvider;
+  approvalContinuationValidator?: typeof validatePendingToolContinuation;
 }
 
 /**
@@ -82,6 +89,7 @@ export function createGatewayApp(
     interactionService,
     platformRegistry,
     coreServices,
+    approvalContinuationValidator,
     chatInstanceManager,
     authProvider,
   } = options;
@@ -320,56 +328,159 @@ export function createGatewayApp(
         agentMetadataStore: coreServices.getAgentMetadataStore(),
         platformRegistry,
         transcriptionService: coreServices.getTranscriptionService(),
-        approveToolCall: async (requestId: string, decision: string) => {
+        approveToolCall: async (
+          requestId: string,
+          decision: string,
+          caller: { userId?: string; organizationId?: string; agentId?: string },
+        ) => {
           // DELETE ... RETURNING atomically claims the pending invocation
           // so a retry of POST /api/v1/agents/approve (CLI re-tries,
           // double-clicks, Slack webhook retries) cannot double-execute the
           // tool. The Slack/Telegram interaction-bridge path uses the same
           // helper.
-          const pending = await takePendingTool(requestId);
+          const candidate = await getPendingTool(requestId);
+          if (!candidate)
+            return { success: false, error: "Request not found or expired" };
+          if (
+            !caller.userId ||
+            candidate.userId !== caller.userId ||
+            !caller.organizationId ||
+            !candidate.organizationId ||
+            candidate.organizationId !== caller.organizationId ||
+            (caller.agentId !== undefined && candidate.agentId !== caller.agentId)
+          ) {
+            return {
+              success: false,
+              error: "Approval identity mismatch",
+              status: 403,
+            };
+          }
+          const candidateDigest = pendingToolContinuationDigest(candidate);
+          const organizationId = candidate.organizationId;
+          if (candidate.releaseBinding) {
+            if (!organizationId || !approveMcpProxy) {
+              return { success: false, error: "approval_inventory_stale" };
+            }
+            const validation = await (
+              approvalContinuationValidator ?? validatePendingToolContinuation
+            )(
+              candidate,
+              organizationId,
+              { mcpProxy: approveMcpProxy },
+            );
+            if (!validation.valid) {
+              await takePendingToolIfUnchanged(
+                requestId,
+                candidate,
+                candidateDigest,
+              );
+              return { success: false, error: validation.diagnosticCode };
+            }
+          }
+          const pending = await takePendingToolIfUnchanged(
+            requestId,
+            candidate,
+            candidateDigest,
+          );
           if (!pending)
             return { success: false, error: "Request not found or expired" };
+          if (
+            pending.releaseBinding ||
+            pending.releaseState?.status === "active"
+          ) {
+            if (!organizationId || !approveMcpProxy) {
+              return { success: false, error: "approval_inventory_stale" };
+            }
+            const validation = await (
+              approvalContinuationValidator ?? validatePendingToolContinuation
+            )(
+              pending,
+              organizationId,
+              { mcpProxy: approveMcpProxy },
+            );
+            if (!validation.valid) {
+              return { success: false, error: validation.diagnosticCode };
+            }
+          }
           const pattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;
           const expiresMap: Record<string, number | null> = {
             "1h": Date.now() + 3_600_000,
             "24h": Date.now() + 86_400_000,
             always: null,
           };
-          if (decision === "deny") {
-            await approveGrantStore?.grant(
-              pending.agentId,
-              pattern,
-              null,
-              true
+          const continueApproval = async () => {
+            if (decision === "deny") {
+              await approveGrantStore?.grant(
+                pending.agentId,
+                pattern,
+                null,
+                true
+              );
+              return { success: true };
+            }
+            const requiresEgressAuthorization = Boolean(
+              pending.releaseBinding || pending.releaseState?.status === "active"
             );
+            if (!requiresEgressAuthorization) {
+              await approveGrantStore?.grant(
+                pending.agentId,
+                pattern,
+                decision in expiresMap ? expiresMap[decision]! : null
+              );
+            }
+            if (approveMcpProxy) {
+              const baseOptions = buildPendingToolExecutionOptions(pending);
+              let grantStored = false;
+              const options = baseOptions && requiresEgressAuthorization
+                ? {
+                    ...baseOptions,
+                    approvalReplayAuthorization: {
+                      revalidate: async () => (await (
+                        approvalContinuationValidator ??
+                        validatePendingToolContinuation
+                      )(
+                        pending,
+                        organizationId,
+                        { mcpProxy: approveMcpProxy },
+                      )).valid,
+                      onExecutionCompleted: approveGrantStore
+                        ? async () => {
+                            if (grantStored) return;
+                            await approveGrantStore.grant(
+                              pending.agentId,
+                              pattern,
+                              decision in expiresMap ? expiresMap[decision]! : null,
+                            );
+                            grantStored = true;
+                          }
+                        : undefined,
+                    },
+                  }
+                : baseOptions;
+              const result = options
+                ? await approveMcpProxy.executeToolDirect(
+                    pending.agentId,
+                    pending.userId,
+                    pending.mcpId,
+                    pending.toolName,
+                    pending.args,
+                    options
+                  )
+                : await approveMcpProxy.executeToolDirect(
+                    pending.agentId,
+                    pending.userId,
+                    pending.mcpId,
+                    pending.toolName,
+                    pending.args
+                  );
+              if (result.diagnosticCode === "approval_inventory_stale") {
+                return { success: false, error: "approval_inventory_stale" };
+              }
+              return { success: true, result } as any;
+            }
             return { success: true };
-          }
-          await approveGrantStore?.grant(
-            pending.agentId,
-            pattern,
-            decision in expiresMap ? expiresMap[decision]! : null
-          );
-          if (approveMcpProxy) {
-            const options = buildPendingToolExecutionOptions(pending);
-            const result = options
-              ? await approveMcpProxy.executeToolDirect(
-                  pending.agentId,
-                  pending.userId,
-                  pending.mcpId,
-                  pending.toolName,
-                  pending.args,
-                  options
-                )
-              : await approveMcpProxy.executeToolDirect(
-                  pending.agentId,
-                  pending.userId,
-                  pending.mcpId,
-                  pending.toolName,
-                  pending.args
-                );
-            return { success: true, result } as any;
-          }
-          return { success: true };
+          };
+          return orgContext.run({ organizationId }, continueApproval);
         },
       });
       app.route("", agentApi);

@@ -65,7 +65,33 @@ export interface WorkerTokenData {
     /** Required (including explicit null) for course run tokens. */
     activeSpecializedSkill?: "opp-coach" | null;
   };
+  /** Explicit release enrollment state on every per-run token. */
+  releaseState?: ReleaseCapabilityState;
+  /** Request-local metadata accepted only after authenticating a RUN token. */
+  effectiveToolInventoryFingerprint?: string;
+  effectiveToolRouterMode?: "semantic";
 }
+
+/** Server-resolved, short-lived release capability provenance. */
+export interface ReleaseCapabilityClaim {
+  environment: "staging" | "production";
+  toolboxUserId: string;
+  agentId: string;
+  releaseId: string;
+  releaseSequence: number;
+  snapshotDigest: string;
+  expiresAt: string;
+  capabilityIds: string[];
+}
+
+export type ReleaseCapabilityState =
+  | { status: "legacy_unenrolled" }
+  | {
+      status: "enrolled_inactive";
+      environment: "staging" | "production";
+      reason: "receipt_invalid" | "snapshot_unavailable" | "capability_expired";
+    }
+  | { status: "active"; claim: ReleaseCapabilityClaim };
 
 export function generateWorkerToken(
   userId: string,
@@ -94,6 +120,7 @@ export function generateWorkerToken(
     trustedPlatformContext?: boolean;
     executionMode?: WorkerTokenData["executionMode"];
     courseToolScope?: WorkerTokenData["courseToolScope"];
+    releaseState?: ReleaseCapabilityState;
   }
 ): string {
   if (!options.channelId) {
@@ -121,6 +148,10 @@ export function generateWorkerToken(
     trustedPlatformContext: options.trustedPlatformContext,
     executionMode: options.executionMode,
     courseToolScope: options.courseToolScope,
+    releaseState:
+      options.tokenKind === "run"
+        ? (options.releaseState ?? { status: "legacy_unenrolled" })
+        : options.releaseState,
   };
 
   return encrypt(JSON.stringify(payload));
@@ -200,6 +231,88 @@ export function verifyWorkerToken(token: string): WorkerTokenData | null {
         !scope.courseEntityId
       )
         return null;
+    }
+    if (data.tokenKind === "run" && data.releaseState === undefined) {
+      logger.error("Worker run token rejected: missing release state");
+      return null;
+    }
+    if (data.releaseState !== undefined) {
+      const state = data.releaseState;
+      if (
+        data.tokenKind !== "run" ||
+        !Number.isInteger(data.runId) ||
+        (data.runId ?? 0) <= 0 ||
+        !state ||
+        typeof state !== "object" ||
+        (state.status !== "legacy_unenrolled" &&
+          state.status !== "enrolled_inactive" &&
+          state.status !== "active")
+      ) {
+        logger.error("Worker token rejected: invalid release state binding");
+        return null;
+      }
+      if (state.status === "legacy_unenrolled") {
+        if (Object.keys(state).length !== 1) return null;
+      } else if (state.status === "enrolled_inactive") {
+        if (
+          Object.keys(state).length !== 3 ||
+          (state.environment !== "staging" &&
+            state.environment !== "production") ||
+          (state.reason !== "receipt_invalid" &&
+            state.reason !== "snapshot_unavailable" &&
+            state.reason !== "capability_expired")
+        )
+          return null;
+      } else {
+        const claim = state.claim;
+        const expiresAt = Date.parse(claim?.expiresAt);
+        if (
+          Object.keys(state).length !== 2 ||
+          !claim ||
+          (claim.environment !== "staging" &&
+            claim.environment !== "production") ||
+          typeof claim.toolboxUserId !== "string" ||
+          !claim.toolboxUserId ||
+          claim.toolboxUserId !== data.userId ||
+          typeof claim.agentId !== "string" ||
+          !claim.agentId ||
+          claim.agentId !== data.agentId ||
+          typeof claim.releaseId !== "string" ||
+          !claim.releaseId ||
+          !Number.isInteger(claim.releaseSequence) ||
+          claim.releaseSequence <= 0 ||
+          typeof claim.snapshotDigest !== "string" ||
+          !/^sha256:[0-9a-f]{64}$/.test(claim.snapshotDigest) ||
+          typeof claim.expiresAt !== "string" ||
+          !Number.isFinite(expiresAt) ||
+          expiresAt >
+            data.timestamp +
+              60_000 +
+              parsePositiveIntEnv(
+                "WORKER_TOKEN_CLOCK_SKEW_MS",
+                30 * 1000,
+                true
+              ) ||
+          !Array.isArray(claim.capabilityIds) ||
+          claim.capabilityIds.length < 1 ||
+          claim.capabilityIds.length > 64 ||
+          claim.capabilityIds.some(
+            (id) => typeof id !== "string" || !id || id.length > 200
+          )
+        ) {
+          logger.error(
+            "Worker token rejected: invalid release capability binding"
+          );
+          return null;
+        }
+        if (expiresAt <= Date.now()) {
+          data.releaseState = {
+            status: "enrolled_inactive",
+            environment: claim.environment,
+            reason: "capability_expired",
+          };
+        }
+      }
     }
     if (data.executionMode !== undefined) {
       if (

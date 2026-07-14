@@ -3,6 +3,7 @@ import {
   applyMcpToolFilter,
   createLogger,
   emitAgentObsEvent,
+  generateWorkerToken,
   type GuardrailRegistry,
   isReservedAutomationToolName,
   type McpToolFilter,
@@ -11,6 +12,7 @@ import {
 } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
+
 import { getOrgId, orgContext } from "../../../lobu/stores/org-context.js";
 import { resolveAgentGuardrails } from "../../guardrails/aggregator.js";
 import { recordGuardrailTrip } from "../../guardrails/audit.js";
@@ -40,13 +42,46 @@ import { getRevokedTokenStore } from "../revoked-token-store.js";
 import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
 import { computeMcpConfigDigest } from "./config-service.js";
 import { startAuthCodeFlow } from "./oauth-flow.js";
-import { storePendingTool } from "./pending-tool-store.js";
+import {
+	stableReleaseAuthorizationDigest,
+	stableToolEligibilityDigest,
+	storePendingTool,
+} from "./pending-tool-store.js";
 import { McpServerHealth } from "./server-health.js";
 import type { CachedMcpServer, McpTool, McpToolCache } from "./tool-cache.js";
 
+export function isToolNameAllowedByToolsConfig(
+  toolName: string,
+  toolsConfig: import("@lobu/core").ToolsConfig | undefined,
+  globalPolicy: {
+    allowedTools?: string[];
+    disallowedTools?: string[];
+  } = {},
+): boolean {
+  const matches = (rawPattern: string) => {
+    const pattern = rawPattern.trim().toLowerCase();
+    if (!pattern) return false;
+    const normalizedToolName = toolName.trim().toLowerCase();
+    if (pattern === "*") return true;
+    if (pattern.endsWith("*")) {
+      return normalizedToolName.startsWith(pattern.slice(0, -1));
+    }
+    return normalizedToolName === pattern;
+  };
+  const denied = [
+    ...(toolsConfig?.deniedTools ?? []),
+    ...(globalPolicy.disallowedTools ?? []),
+  ];
+  if (denied.some(matches)) return false;
+  const allowed = [
+    ...(toolsConfig?.allowedTools ?? []),
+    ...(globalPolicy.allowedTools ?? []),
+  ];
+  return toolsConfig?.strictMode !== true || allowed.some(matches);
+}
+
 const logger = createLogger("mcp-proxy");
-const PERSONAL_REMINDER_DELIVERY_CONTRACT =
-  "personal_reminder_delivery.v1";
+const PERSONAL_REMINDER_DELIVERY_CONTRACT = "personal_reminder_delivery.v1";
 
 export function trustedPersonalReminderForwardHeaders(input: {
   mcpId: string;
@@ -768,6 +803,85 @@ function extractSessionToken(c: Context): string | null {
 }
 
 export class McpProxy {
+  async revalidatePendingToolEligibility(
+    pending: import("./pending-tool-store.js").PendingToolInvocation,
+  ): Promise<boolean> {
+    if (
+      !pending.organizationId ||
+      !this.agentSettingsStore ||
+      !this.guardrailRegistry ||
+      !this.globalToolPolicyResolver
+    ) return false;
+    let settings;
+    try {
+      settings = await this.agentSettingsStore.getSettings(pending.agentId);
+    } catch {
+      return false;
+    }
+    if (!settings) return false;
+    let globalToolPolicy;
+    try {
+      globalToolPolicy = this.globalToolPolicyResolver();
+    } catch {
+      return false;
+    }
+    if (!isToolNameAllowedByToolsConfig(
+      pending.toolName,
+      settings.toolsConfig,
+      globalToolPolicy,
+    )) return false;
+    const pattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;
+    if (
+      !this.grantStore ||
+      await this.grantStore.isDenied(
+        pending.agentId,
+        pattern,
+        pending.organizationId,
+      )
+    ) return false;
+    if (await this.runPreToolGuardrails(
+      pending.agentId,
+      {
+        userId: pending.userId,
+        conversationId: pending.conversationId,
+        organizationId: pending.organizationId,
+      },
+      pending.toolName,
+      pending.args,
+    )) return false;
+    const coursePolicy = applyTrustedCourseToolPolicy(
+      pending.toolName,
+      pending.args,
+      pending.courseToolScope,
+    );
+    if (!coursePolicy.ok) return false;
+    const httpServer = await this.configService.getHttpServer(
+      pending.mcpId,
+      pending.agentId,
+    );
+    if (!httpServer) return false;
+    const scopeKey = this.computeScopeKey(
+      httpServer,
+      pending.userId,
+      pending.channelId,
+    );
+    const identityConfig = await this.bindCredentialIdentity(
+      httpServer,
+      pending.agentId,
+      scopeKey,
+    );
+    if (
+      pending.expectedMcpIdentity &&
+      !matchesExpectedMcpConfig(identityConfig, pending.expectedMcpIdentity)
+    ) return false;
+    const discovery = await this.listToolsDirect(
+      pending.agentId,
+      pending.userId,
+      pending.mcpId,
+      { bypassCache: true },
+    );
+    return discovery.tools.some((tool) => tool.name === pending.toolName);
+  }
   private readonly SESSION_TTL_SECONDS = 30 * 60; // 30 minutes
   // Tool-approval cards may sit in-thread for a long time before the user
   // actually clicks (Slack notifications, async review, etc.). The pending
@@ -792,6 +906,10 @@ export class McpProxy {
   private readonly publicGatewayUrl?: string;
   private readonly agentSettingsStore?: AgentSettingsStore;
   private readonly guardrailRegistry?: GuardrailRegistry;
+  private readonly globalToolPolicyResolver?: () => {
+    allowedTools?: string[];
+    disallowedTools?: string[];
+  };
   private readonly serverHealth = new McpServerHealth();
 
   /** Callback invoked when a tool call is blocked for approval. */
@@ -842,6 +960,11 @@ export class McpProxy {
       agentSettingsStore?: AgentSettingsStore;
       /** Shared registry of guardrails; pre-tool stage entries are queried. */
       guardrailRegistry?: GuardrailRegistry;
+      /** Current process-wide tool policy; read again when approval resumes. */
+      globalToolPolicyResolver?: () => {
+        allowedTools?: string[];
+        disallowedTools?: string[];
+      };
     },
   ) {
     this.secretStore = options.secretStore;
@@ -850,6 +973,7 @@ export class McpProxy {
     this.publicGatewayUrl = options.publicGatewayUrl;
     this.agentSettingsStore = options.agentSettingsStore;
     this.guardrailRegistry = options.guardrailRegistry;
+    this.globalToolPolicyResolver = options.globalToolPolicyResolver;
     this.app = new Hono();
     this.setupRoutes();
     logger.debug("MCP proxy initialized");
@@ -881,6 +1005,10 @@ export class McpProxy {
       platform?: string;
       courseToolScope?: TrustedCourseToolScope;
       expectedMcpIdentity?: ExpectedMcpConfigIdentity;
+			releaseState?: import("@lobu/core").ReleaseCapabilityState;
+			effectiveToolInventoryFingerprint?: string;
+			effectiveToolRouterMode?: "legacy" | "shadow" | "semantic";
+			personalReminderDeliveryIntent?: true;
     } = {},
   ): Promise<{
     status: "executed" | "blocked-notified" | "blocked-no-channel";
@@ -901,8 +1029,29 @@ export class McpProxy {
       platform: tokenContext.platform,
       courseToolScope: tokenContext.courseToolScope,
       expectedMcpIdentity: tokenContext.expectedMcpIdentity,
+			releaseState: tokenContext.releaseState,
+			effectiveToolInventoryFingerprint:
+				tokenContext.effectiveToolInventoryFingerprint,
+			effectiveToolRouterMode: tokenContext.effectiveToolRouterMode,
+			personalReminderDeliveryIntent:
+				tokenContext.personalReminderDeliveryIntent,
     };
     const token = tokenContext.token ?? "";
+		const verifiedRun = token ? verifyWorkerToken(token) : null;
+		const verifiedRunMatches = Boolean(
+			verifiedRun?.tokenKind === "run" &&
+			Number.isInteger(verifiedRun.runId) &&
+			verifiedRun.runId! > 0 &&
+			verifiedRun.userId === userId &&
+			verifiedRun.agentId === agentId &&
+			verifiedRun.conversationId === tokenContext.conversationId &&
+			verifiedRun.organizationId === tokenContext.organizationId &&
+			typeof verifiedRun.deploymentName === "string" &&
+			verifiedRun.deploymentName.length > 0,
+		);
+		if (verifiedRunMatches && verifiedRun) {
+			tokenData.releaseState = verifiedRun.releaseState;
+		}
 
     const coursePolicy = applyTrustedCourseToolPolicy(
       toolName,
@@ -976,6 +1125,13 @@ export class McpProxy {
           ? { expectedMcpIdentity: tokenData.expectedMcpIdentity }
           : {}),
         ...(tokenData.channelId ? { channelId: tokenData.channelId } : {}),
+				...(tokenData.organizationId
+					? { organizationId: tokenData.organizationId }
+					: {}),
+				...(tokenData.releaseState
+					? { releaseState: tokenData.releaseState }
+					: {}),
+				...(token ? { directAuthToken: token } : {}),
       },
     );
     return { status: "executed", ...result };
@@ -992,6 +1148,17 @@ export class McpProxy {
       courseToolScope?: TrustedCourseToolScope;
       expectedMcpIdentity?: ExpectedMcpConfigIdentity;
       channelId?: string;
+      organizationId?: string;
+			releaseState?: import("@lobu/core").ReleaseCapabilityState;
+			approvalReplay?: true;
+			originalRunIdentity?: { runId: number; deploymentName: string };
+			conversationId?: string;
+			directAuthToken?: string;
+			personalReminderDeliveryIntent?: true;
+      approvalReplayAuthorization?: {
+        revalidate(): Promise<boolean>;
+        onExecutionCompleted?(): Promise<void>;
+      };
     },
   ): Promise<{
     content: Array<{ type: string; text: string }>;
@@ -1057,6 +1224,44 @@ export class McpProxy {
         diagnosticCode: "tool_not_found",
       };
     }
+		let directAuthToken = options?.directAuthToken;
+		if (httpServer.internal && options?.approvalReplay) {
+			const original = options.originalRunIdentity;
+			const state = options.releaseState;
+			const identityValid = Boolean(
+				original &&
+				Number.isInteger(original.runId) &&
+				original.runId > 0 &&
+				original.deploymentName.length > 0 &&
+				original.deploymentName.length <= 200 &&
+				options.organizationId &&
+				options.conversationId &&
+				options.channelId &&
+				state &&
+				(state.status !== "active" ||
+					(state.claim.toolboxUserId === userId && state.claim.agentId === agentId)),
+			);
+			if (!identityValid || !original || !state) {
+				return {
+					content: [{ type: "text", text: "Approval run identity is invalid." }],
+					isError: true,
+					diagnosticCode: "APPROVAL_RUN_IDENTITY_INVALID",
+				};
+			}
+			directAuthToken = generateWorkerToken(
+				userId,
+				options.conversationId!,
+				original.deploymentName,
+				{
+					channelId: options.channelId!,
+					agentId,
+					organizationId: options.organizationId,
+					runId: original.runId,
+					tokenKind: "run",
+					releaseState: state,
+				},
+			);
+		}
     const scopeKey = this.computeScopeKey(
       httpServer,
       userId,
@@ -1133,11 +1338,55 @@ export class McpProxy {
       params: { name: toolName, arguments: args },
       id: 1,
     });
+		const replayHeaders = trustedPersonalReminderForwardHeaders({
+			mcpId,
+			toolName,
+			internal: httpServer.internal === true,
+			workerIntentHeader: options?.personalReminderDeliveryIntent
+				? PERSONAL_REMINDER_DELIVERY_CONTRACT
+				: undefined,
+		});
 
     try {
       let lastResponseStatus: number | undefined;
+      const revalidateReplayEgress = async () => {
+        if (!options?.approvalReplayAuthorization) {
+          return !(
+            options?.approvalReplay && options.releaseState?.status === "active"
+          );
+        }
+        if (!(await options.approvalReplayAuthorization.revalidate().catch(() => false))) {
+          return false;
+        }
+        return true;
+      };
+      const commitReplayGrantAfterExecution = async () => {
+        const authorization = options?.approvalReplayAuthorization;
+        if (!authorization?.onExecutionCompleted) return;
+        if (!(await revalidateReplayEgress())) return;
+        await authorization.onExecutionCompleted().catch((error) => {
+          logger.warn(
+            { agentId, mcpId, toolName, error: String(error) },
+            "Tool executed but approval grant could not be committed",
+          );
+        });
+      };
+      if (!(await revalidateReplayEgress())) {
+        return {
+          content: [{ type: "text", text: "Approval authorization changed before execution." }],
+          isError: true,
+          diagnosticCode: "approval_inventory_stale",
+        };
+      }
       if (!this.getSession(sessionKey)) {
-        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey);
+        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey, directAuthToken);
+        if (!(await revalidateReplayEgress())) {
+          return {
+            content: [{ type: "text", text: "Approval authorization changed before execution." }],
+            isError: true,
+            diagnosticCode: "approval_inventory_stale",
+          };
+        }
       }
 
       let response = await this.sendUpstreamRequest(
@@ -1147,6 +1396,8 @@ export class McpProxy {
         "POST",
         jsonRpcBody,
         scopeKey,
+			directAuthToken,
+			replayHeaders,
       );
       lastResponseStatus = response.status;
       if (
@@ -1157,7 +1408,14 @@ export class McpProxy {
         await response.body?.cancel().catch(() => {
           /* noop */
         });
-        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey);
+        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey, directAuthToken);
+        if (!(await revalidateReplayEgress())) {
+          return {
+            content: [{ type: "text", text: "Approval authorization changed before retry." }],
+            isError: true,
+            diagnosticCode: "approval_inventory_stale",
+          };
+        }
         response = await this.sendUpstreamRequest(
           httpServer,
           agentId,
@@ -1165,6 +1423,8 @@ export class McpProxy {
           "POST",
           jsonRpcBody,
           scopeKey,
+			directAuthToken,
+			replayHeaders,
         );
         lastResponseStatus = response.status;
       }
@@ -1236,6 +1496,7 @@ export class McpProxy {
         };
       }
       const result = json.result || json;
+      await commitReplayGrantAfterExecution();
       this.serverHealth.recordSuccess(healthKey);
       emitToolCallCompleted(
         result.isError ? "failed" : "ok",
@@ -1292,13 +1553,14 @@ export class McpProxy {
     agentId: string,
     userId: string,
     mcpId: string,
+    options: { bypassCache?: boolean } = {},
   ): Promise<{ tools: McpTool[]; instructions?: string }> {
     return this.fetchToolsForMcp(
       mcpId,
       agentId,
       { userId, channelId: "" },
       undefined,
-      { surfaceErrors: true },
+      { surfaceErrors: true, bypassCache: options.bypassCache },
     );
   }
 
@@ -1312,7 +1574,11 @@ export class McpProxy {
     agentId: string,
     tokenData: any,
     workerToken?: string,
-    options?: { surfaceErrors?: boolean; trace?: ShifuTraceContext },
+    options?: {
+      surfaceErrors?: boolean;
+      trace?: ShifuTraceContext;
+      bypassCache?: boolean;
+    },
   ): Promise<McpDiscoveryResult> {
     const trace = options?.trace ?? generatedMcpTrace();
     const listStartedAt = Date.now();
@@ -1438,7 +1704,7 @@ export class McpProxy {
     const healthKey = this.buildServerHealthKey(agentId, mcpId);
 
     let cached: CachedMcpServer | null = null;
-    if (this.toolCache) {
+    if (this.toolCache && !options?.bypassCache) {
       cached = this.toolCache.getServerInfo(cacheMcpId, agentId);
       if (
         cached &&
@@ -2039,6 +2305,25 @@ export class McpProxy {
       );
     }
     auth.tokenData.expectedMcpIdentity = expected.identity;
+		auth.tokenData.personalReminderDeliveryIntent =
+			c.req.header("x-lobu-personal-reminder-delivery-intent") ===
+			PERSONAL_REMINDER_DELIVERY_CONTRACT;
+	const inventoryFingerprint = c.req.header(
+		"x-lobu-effective-tool-inventory-fingerprint",
+	);
+	const effectiveToolRouterMode = c.req.header(
+		"x-lobu-effective-tool-router-mode",
+	);
+	if (
+		auth.tokenData.tokenKind === "run" &&
+		(effectiveToolRouterMode === "legacy" ||
+			effectiveToolRouterMode === "shadow" ||
+			effectiveToolRouterMode === "semantic") &&
+		/^[0-9a-f]{64}$/.test(inventoryFingerprint ?? "")
+	) {
+		auth.tokenData.effectiveToolInventoryFingerprint = inventoryFingerprint;
+		auth.tokenData.effectiveToolRouterMode = effectiveToolRouterMode;
+	}
     const healthKey = this.buildServerHealthKey(agentId, mcpId);
 
     // Parse body early so tool arguments are available for the approval message.
@@ -2996,6 +3281,18 @@ export class McpProxy {
     });
 
     if (!this.onToolBlocked) return "blocked-no-channel";
+		const verifiedRun = token ? verifyWorkerToken(token) : null;
+		const verifiedRunMatches = Boolean(
+			verifiedRun?.tokenKind === "run" &&
+			Number.isInteger(verifiedRun.runId) &&
+			verifiedRun.runId! > 0 &&
+			verifiedRun.userId === tokenData.userId &&
+			verifiedRun.agentId === agentId &&
+			verifiedRun.conversationId === tokenData.conversationId &&
+			verifiedRun.organizationId === tokenData.organizationId &&
+			typeof verifiedRun.deploymentName === "string" &&
+			verifiedRun.deploymentName.length > 0,
+		);
 
     const requestId = `ta_${randomUUID()}`;
     const originMessageId =
@@ -3026,6 +3323,59 @@ export class McpProxy {
         processedMessageIds,
         courseToolScope: tokenData.courseToolScope,
         expectedMcpIdentity: tokenData.expectedMcpIdentity,
+        organizationId: tokenData.organizationId,
+				...(verifiedRunMatches && verifiedRun?.releaseState
+					? { releaseState: verifiedRun.releaseState }
+					: {}),
+				...(verifiedRunMatches &&
+					verifiedRun?.releaseState?.status === "active" &&
+					(tokenData.effectiveToolRouterMode === "legacy" ||
+						tokenData.effectiveToolRouterMode === "shadow" ||
+						tokenData.effectiveToolRouterMode === "semantic") &&
+					/^[0-9a-f]{64}$/.test(
+						tokenData.effectiveToolInventoryFingerprint ?? "",
+					)
+					? {
+						releaseBinding: {
+							routerMode: tokenData.effectiveToolRouterMode,
+							effectiveInventoryFingerprint:
+								tokenData.effectiveToolInventoryFingerprint!,
+							releaseId: verifiedRun.releaseState.claim.releaseId,
+							releaseSequence:
+								verifiedRun.releaseState.claim.releaseSequence,
+							snapshotDigest:
+								verifiedRun.releaseState.claim.snapshotDigest,
+							authorizationExpiresAt:
+								verifiedRun.releaseState.claim.expiresAt,
+							stableAuthorizationDigest: stableReleaseAuthorizationDigest(
+								verifiedRun.releaseState.claim,
+							),
+							eligibilityBindingDigest: stableToolEligibilityDigest({
+								mcpId,
+								toolName,
+								connectionId: tokenData.connectionId,
+								expectedMcpIdentity: tokenData.expectedMcpIdentity,
+								courseToolScope: tokenData.courseToolScope,
+								effectiveInventoryFingerprint:
+									tokenData.effectiveToolInventoryFingerprint!,
+								stableAuthorizationDigest: stableReleaseAuthorizationDigest(
+									verifiedRun.releaseState.claim,
+								),
+							}),
+						},
+					}
+					: {}),
+				...(tokenData.personalReminderDeliveryIntent === true
+					? { personalReminderDeliveryIntent: true as const }
+					: {}),
+				...(verifiedRunMatches && verifiedRun
+					? {
+						originalRunIdentity: {
+							runId: verifiedRun.runId!,
+							deploymentName: verifiedRun.deploymentName,
+						},
+					}
+					: {}),
       },
       this.PENDING_TOOL_TTL,
     ).catch((err: unknown) =>

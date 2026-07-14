@@ -103,16 +103,23 @@ function fakeJobRow(overrides: Partial<ScheduledJobRow> = {}): ScheduledJobRow {
   };
 }
 
-function makeDeps(overrides: Partial<ManageSchedulesDeps> = {}): ManageSchedulesDeps {
-  return {
-    createScheduledJob: mock(async (params: any) =>
+function makeDeps(
+	overrides: Partial<ManageSchedulesDeps> = {},
+): ManageSchedulesDeps {
+	const createScheduledJob = mock(async (params: any) =>
       fakeJobRow({
         action_type: params.actionType,
         action_args: params.actionArgs,
         created_by_user: params.createdByUser,
         created_by_agent: params.createdByAgent,
-      })
-    ) as any,
+		}),
+	) as any;
+	return {
+		createScheduledJob,
+		createScheduledJobWithGuards: mock(async (params: any) => ({
+			status: "ok",
+			job: await createScheduledJob(params),
+		})) as any,
     upsertScheduledJobByExternalKeyWithQuota: mock(async (params: any) => ({
       status: "ok",
       job: fakeJobRow({
@@ -132,22 +139,34 @@ function makeDeps(overrides: Partial<ManageSchedulesDeps> = {}): ManageSchedules
     // Default: identity resolution — the given agent_id is already the bare
     // form, matching every pre-existing test in this file. Tests exercising
     // the conversation-id normalization below override this.
-    resolveWakeAgentId: mock(async (_organizationId: string, rawAgentId: string) => rawAgentId) as any,
+		resolveWakeAgentId: mock(
+			async (_organizationId: string, rawAgentId: string) => rawAgentId,
+		) as any,
     ...overrides,
   };
 }
 
-function wakeCreateArgs(agentId: string, overrides: Record<string, unknown> = {}) {
+function wakeCreateArgs(
+	agentId: string,
+	overrides: Record<string, unknown> = {},
+) {
   return {
     action: "create" as const,
     description: "wake me up",
     run_at: "2026-08-01T00:00:00Z",
-    payload: { type: "wake_agent" as const, agent_id: agentId, prompt: "check X" },
+		payload: {
+			type: "wake_agent" as const,
+			agent_id: agentId,
+			prompt: "check X",
+		},
     ...overrides,
   };
 }
 
-function notifyCreateArgs(recipients: unknown, overrides: Record<string, unknown> = {}) {
+function notifyCreateArgs(
+	recipients: unknown,
+	overrides: Record<string, unknown> = {},
+) {
   return {
     action: "create" as const,
     description: "notify",
@@ -158,6 +177,36 @@ function notifyCreateArgs(recipients: unknown, overrides: Record<string, unknown
 }
 
 describe("manage_schedules member self-scoping — create wake_agent", () => {
+  test.each(["direct call", "approval replay"])("enrolled inactive personal reminder %s rejects before quota or persistence", async () => {
+    const deps = makeDeps({
+			createScheduledJobWithGuards: mock(async () => ({
+				status: "release_inactive",
+			})) as any,
+    });
+    const conversationId = `${MEMBER_AGENT}_${MEMBER_USER}_thread-current`;
+		const result = await manageSchedules(
+			wakeCreateArgs(MEMBER_AGENT, {
+				delivery_intent: {
+					contract: "personal_reminder_delivery.v1",
+					destination: "personal_reminder",
+				},
+				payload: {
+					type: "wake_agent",
+					agent_id: MEMBER_AGENT,
+					prompt: "提醒我",
+					thread_id: conversationId,
+				},
+			}) as any,
+			{} as any,
+			memberCtx({ conversationId }),
+			deps,
+		);
+    expect(result).toEqual({ error: "personal_reminder_release_inactive" });
+    expect(deps.countActiveScheduledJobs).not.toHaveBeenCalled();
+    expect(deps.createScheduledJob).not.toHaveBeenCalled();
+		expect(deps.createScheduledJobWithGuards).toHaveBeenCalledTimes(1);
+  });
+
   test("trusted direct-auth own-thread wake persists only server-built personal reminder provenance", async () => {
     const deps = makeDeps();
     const conversationId = `${MEMBER_AGENT}_${MEMBER_USER}_thread-current`;
@@ -182,10 +231,10 @@ describe("manage_schedules member self-scoping — create wake_agent", () => {
       }) as any,
       {} as any,
       memberCtx({ conversationId }),
-      deps
+			deps,
     );
 
-    const call = (deps.createScheduledJob as any).mock.calls[0][0];
+		const call = (deps.createScheduledJobWithGuards as any).mock.calls[0][0];
     expect(call.sourceThreadId).toBe(conversationId);
     expect(call.actionArgs).toEqual({
       agent_id: MEMBER_AGENT,
@@ -223,7 +272,7 @@ describe("manage_schedules member self-scoping — create wake_agent", () => {
       }) as any,
       {} as any,
       memberCtx({ conversationId, personalReminderDeliveryIntent: false }),
-      deps
+			deps,
     );
 
     const call = (deps.createScheduledJob as any).mock.calls[0][0];
@@ -247,7 +296,7 @@ describe("manage_schedules member self-scoping — create wake_agent", () => {
       }) as any,
       {} as any,
       memberCtx({ conversationId }),
-      deps
+			deps,
     );
 
     const call = (deps.createScheduledJob as any).mock.calls[0][0];
@@ -272,7 +321,7 @@ describe("manage_schedules member self-scoping — create wake_agent", () => {
       }) as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
 
     const call = (deps.createScheduledJob as any).mock.calls[0][0];
@@ -290,7 +339,7 @@ describe("manage_schedules member self-scoping — create wake_agent", () => {
       wakeCreateArgs("shifu-u-other") as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(result.error).toMatch(/own/i);
     expect(deps.createScheduledJob).not.toHaveBeenCalled();
@@ -302,14 +351,18 @@ describe("manage_schedules member self-scoping — create wake_agent", () => {
       wakeCreateArgs(MEMBER_AGENT) as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(result.error).toBeUndefined();
     expect(result.schedule).toBeDefined();
     expect(deps.createScheduledJob).toHaveBeenCalledTimes(1);
     const call = (deps.createScheduledJob as any).mock.calls[0][0];
     expect(call.createdByAgent).toBe(MEMBER_AGENT);
-    expect(deps.agentOwnedByUser).toHaveBeenCalledWith(ORG, MEMBER_USER, MEMBER_AGENT);
+		expect(deps.agentOwnedByUser).toHaveBeenCalledWith(
+			ORG,
+			MEMBER_USER,
+			MEMBER_AGENT,
+		);
   });
 });
 
@@ -323,8 +376,9 @@ describe("manage_schedules — wake_agent conversation-id normalization", () => 
   const CONVERSATION_ID = `${MEMBER_AGENT}_${MEMBER_USER}_thread-abc`;
 
   test("member sends conversation-id form of their OWN agent → ownership check sees the resolved bare id; persisted agent_id is bare", async () => {
-    const resolveWakeAgentId = mock(async (_organizationId: string, rawAgentId: string) =>
-      rawAgentId === CONVERSATION_ID ? MEMBER_AGENT : null
+		const resolveWakeAgentId = mock(
+			async (_organizationId: string, rawAgentId: string) =>
+				rawAgentId === CONVERSATION_ID ? MEMBER_AGENT : null,
     );
     const agentOwnedByUser = mock(async () => true);
     const deps = makeDeps({
@@ -335,13 +389,17 @@ describe("manage_schedules — wake_agent conversation-id normalization", () => 
       wakeCreateArgs(CONVERSATION_ID) as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(result.error).toBeUndefined();
     expect(resolveWakeAgentId).toHaveBeenCalledWith(ORG, CONVERSATION_ID);
     // The critical MS-3 guarantee: ownership is checked against the
     // RESOLVED bare id, not the raw conversation-id string.
-    expect(agentOwnedByUser).toHaveBeenCalledWith(ORG, MEMBER_USER, MEMBER_AGENT);
+		expect(agentOwnedByUser).toHaveBeenCalledWith(
+			ORG,
+			MEMBER_USER,
+			MEMBER_AGENT,
+		);
     const call = (deps.createScheduledJob as any).mock.calls[0][0];
     expect(call.actionArgs.agent_id).toBe(MEMBER_AGENT);
   });
@@ -349,8 +407,9 @@ describe("manage_schedules — wake_agent conversation-id normalization", () => 
   test("member sends conversation-id form whose bare id is NOT owned by them → still rejected (no self-scoping bypass)", async () => {
     const OTHER_AGENT = "shifu-u-other";
     const otherConversationId = `${OTHER_AGENT}_someone-else_thread-xyz`;
-    const resolveWakeAgentId = mock(async (_organizationId: string, rawAgentId: string) =>
-      rawAgentId === otherConversationId ? OTHER_AGENT : null
+		const resolveWakeAgentId = mock(
+			async (_organizationId: string, rawAgentId: string) =>
+				rawAgentId === otherConversationId ? OTHER_AGENT : null,
     );
     const agentOwnedByUser = mock(async () => false);
     const deps = makeDeps({
@@ -361,12 +420,16 @@ describe("manage_schedules — wake_agent conversation-id normalization", () => 
       wakeCreateArgs(otherConversationId) as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(result.error).toMatch(/own/i);
     // A member cannot launder access to someone else's agent by wrapping its
     // bare id inside a conversation-id-shaped string.
-    expect(agentOwnedByUser).toHaveBeenCalledWith(ORG, MEMBER_USER, OTHER_AGENT);
+		expect(agentOwnedByUser).toHaveBeenCalledWith(
+			ORG,
+			MEMBER_USER,
+			OTHER_AGENT,
+		);
     expect(deps.createScheduledJob).not.toHaveBeenCalled();
   });
 
@@ -382,7 +445,7 @@ describe("manage_schedules — wake_agent conversation-id normalization", () => 
       wakeCreateArgs(unknownId) as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(result.error).toMatch(/own/i);
     expect(agentOwnedByUser).toHaveBeenCalledWith(ORG, MEMBER_USER, unknownId);
@@ -390,20 +453,23 @@ describe("manage_schedules — wake_agent conversation-id normalization", () => 
 
   test("admin (privileged, no ownership check) also gets agent_id normalized before persisting", async () => {
     const adminConversationId = "shifu-u-admin-agent_user-admin_thread-1";
-    const resolveWakeAgentId = mock(async (_organizationId: string, rawAgentId: string) =>
-      rawAgentId === adminConversationId ? "shifu-u-admin-agent" : null
+		const resolveWakeAgentId = mock(
+			async (_organizationId: string, rawAgentId: string) =>
+				rawAgentId === adminConversationId ? "shifu-u-admin-agent" : null,
     );
     const deps = makeDeps({
       resolveWakeAgentId: resolveWakeAgentId as any,
       agentOwnedByUser: mock(async () => {
-        throw new Error("agentOwnedByUser must not be called for privileged roles");
+				throw new Error(
+					"agentOwnedByUser must not be called for privileged roles",
+				);
       }) as any,
     });
     const result = await manageSchedules(
       wakeCreateArgs(adminConversationId) as any,
       {} as any,
       adminCtx(),
-      deps
+			deps,
     );
     expect(result.error).toBeUndefined();
     const call = (deps.createScheduledJob as any).mock.calls[0][0];
@@ -418,7 +484,7 @@ describe("manage_schedules member self-scoping — create send_notification", ()
       notifyCreateArgs("all") as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(result.error).toBeDefined();
     expect(deps.createScheduledJob).not.toHaveBeenCalled();
@@ -430,7 +496,7 @@ describe("manage_schedules member self-scoping — create send_notification", ()
       notifyCreateArgs("admins") as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(result.error).toBeDefined();
     expect(deps.createScheduledJob).not.toHaveBeenCalled();
@@ -442,7 +508,7 @@ describe("manage_schedules member self-scoping — create send_notification", ()
       notifyCreateArgs(["user-other"]) as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(result.error).toBeUndefined();
     expect(deps.createScheduledJob).toHaveBeenCalledTimes(1);
@@ -453,24 +519,28 @@ describe("manage_schedules member self-scoping — create send_notification", ()
 
 describe("manage_schedules member self-scoping — quota", () => {
   test("21st active schedule (count mock returns 20) → error mentioning quota, nothing persisted", async () => {
-    const deps = makeDeps({ countActiveScheduledJobs: mock(async () => 20) as any });
+		const deps = makeDeps({
+			countActiveScheduledJobs: mock(async () => 20) as any,
+		});
     const result = await manageSchedules(
       wakeCreateArgs(MEMBER_AGENT) as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(result.error).toMatch(/quota/i);
     expect(deps.createScheduledJob).not.toHaveBeenCalled();
   });
 
   test("under quota (count mock returns 19) → success", async () => {
-    const deps = makeDeps({ countActiveScheduledJobs: mock(async () => 19) as any });
+		const deps = makeDeps({
+			countActiveScheduledJobs: mock(async () => 19) as any,
+		});
     const result = await manageSchedules(
       wakeCreateArgs(MEMBER_AGENT) as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(result.error).toBeUndefined();
     expect(deps.createScheduledJob).toHaveBeenCalledTimes(1);
@@ -481,10 +551,14 @@ describe("manage_schedules member self-scoping — list", () => {
   test("member list is forced to createdByUser=ctx.userId, ignoring caller-supplied user_id/agent_id", async () => {
     const deps = makeDeps();
     await manageSchedules(
-      { action: "list", user_id: "someone-else", agent_id: "shifu-u-other" } as any,
+			{
+				action: "list",
+				user_id: "someone-else",
+				agent_id: "shifu-u-other",
+			} as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(deps.listScheduledJobs).toHaveBeenCalledTimes(1);
     const call = (deps.listScheduledJobs as any).mock.calls[0][0];
@@ -497,14 +571,17 @@ describe("manage_schedules member self-scoping — pause/cancel ownership", () =
   test("pause a job not owned by the member → not-found error (no existence leak), pauseScheduledJob not called", async () => {
     const deps = makeDeps({
       getScheduledJob: mock(async () =>
-        fakeJobRow({ created_by_user: "user-other", created_by_agent: "shifu-u-other" })
+				fakeJobRow({
+					created_by_user: "user-other",
+					created_by_agent: "shifu-u-other",
+				}),
       ) as any,
     });
     const result = await manageSchedules(
       { action: "pause", id: "11111111-1111-1111-1111-111111111111" } as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(result.error).toMatch(/not found/i);
     expect(deps.pauseScheduledJob).not.toHaveBeenCalled();
@@ -513,14 +590,14 @@ describe("manage_schedules member self-scoping — pause/cancel ownership", () =
   test("pause a job owned by the member (created_by_user match) → succeeds", async () => {
     const deps = makeDeps({
       getScheduledJob: mock(async () =>
-        fakeJobRow({ created_by_user: MEMBER_USER, created_by_agent: null })
+				fakeJobRow({ created_by_user: MEMBER_USER, created_by_agent: null }),
       ) as any,
     });
     const result = await manageSchedules(
       { action: "pause", id: "11111111-1111-1111-1111-111111111111" } as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
     expect(result.error).toBeUndefined();
     expect(deps.pauseScheduledJob).toHaveBeenCalledTimes(1);
@@ -532,19 +609,22 @@ describe("manage_schedules member self-scoping — pause/cancel ownership", () =
       { action: "cancel", id: "22222222-2222-2222-2222-222222222222" } as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
 
     const deps2 = makeDeps({
       getScheduledJob: mock(async () =>
-        fakeJobRow({ created_by_user: "user-other", created_by_agent: "shifu-u-other" })
+				fakeJobRow({
+					created_by_user: "user-other",
+					created_by_agent: "shifu-u-other",
+				}),
       ) as any,
     });
     const notFoundOthers = await manageSchedules(
       { action: "cancel", id: "22222222-2222-2222-2222-222222222222" } as any,
       {} as any,
       memberCtx(),
-      deps2
+			deps2,
     );
 
     expect(notFoundMissing.error).toBe(notFoundOthers.error);
@@ -556,14 +636,16 @@ describe("manage_schedules admin/owner regression — unrestricted", () => {
   test("admin can wake an agent it doesn't own, without any DB ownership check", async () => {
     const deps = makeDeps({
       agentOwnedByUser: mock(async () => {
-        throw new Error("agentOwnedByUser must not be called for privileged roles");
+				throw new Error(
+					"agentOwnedByUser must not be called for privileged roles",
+				);
       }) as any,
     });
     const result = await manageSchedules(
       wakeCreateArgs("shifu-u-someone-elses-agent") as any,
       {} as any,
       adminCtx(),
-      deps
+			deps,
     );
     expect(result.error).toBeUndefined();
     expect(deps.agentOwnedByUser).not.toHaveBeenCalled();
@@ -573,14 +655,16 @@ describe("manage_schedules admin/owner regression — unrestricted", () => {
   test("admin is not subject to the quota check", async () => {
     const deps = makeDeps({
       countActiveScheduledJobs: mock(async () => {
-        throw new Error("countActiveScheduledJobs must not be called for privileged roles");
+				throw new Error(
+					"countActiveScheduledJobs must not be called for privileged roles",
+				);
       }) as any,
     });
     const result = await manageSchedules(
       wakeCreateArgs("shifu-u-anything") as any,
       {} as any,
       adminCtx(),
-      deps
+			deps,
     );
     expect(result.error).toBeUndefined();
     expect(deps.countActiveScheduledJobs).not.toHaveBeenCalled();
@@ -592,7 +676,7 @@ describe("manage_schedules admin/owner regression — unrestricted", () => {
       notifyCreateArgs("all") as any,
       {} as any,
       adminCtx(),
-      deps
+			deps,
     );
     expect(result.error).toBeUndefined();
     const call = (deps.createScheduledJob as any).mock.calls[0][0];
@@ -601,7 +685,12 @@ describe("manage_schedules admin/owner regression — unrestricted", () => {
 
   test("admin list is unfiltered by default (no forced createdByUser)", async () => {
     const deps = makeDeps();
-    await manageSchedules({ action: "list" } as any, {} as any, adminCtx(), deps);
+		await manageSchedules(
+			{ action: "list" } as any,
+			{} as any,
+			adminCtx(),
+			deps,
+		);
     const call = (deps.listScheduledJobs as any).mock.calls[0][0];
     expect(call.createdByUser).toBeNull();
     expect(call.createdByAgent).toBeNull();
@@ -610,14 +699,17 @@ describe("manage_schedules admin/owner regression — unrestricted", () => {
   test("admin can pause any org schedule regardless of created_by_user/agent", async () => {
     const deps = makeDeps({
       getScheduledJob: mock(async () =>
-        fakeJobRow({ created_by_user: "user-other", created_by_agent: "shifu-u-other" })
+				fakeJobRow({
+					created_by_user: "user-other",
+					created_by_agent: "shifu-u-other",
+				}),
       ) as any,
     });
     const result = await manageSchedules(
       { action: "pause", id: "33333333-3333-3333-3333-333333333333" } as any,
       {} as any,
       adminCtx(),
-      deps
+			deps,
     );
     expect(result.error).toBeUndefined();
     expect(deps.pauseScheduledJob).toHaveBeenCalledTimes(1);
@@ -631,7 +723,7 @@ describe("manage_schedules attribution regression — all roles stamp createdByA
       wakeCreateArgs("shifu-u-anything") as any,
       {} as any,
       adminCtx({ agentId: "shifu-u-admin-agent" }),
-      deps
+			deps,
     );
     const call = (deps.createScheduledJob as any).mock.calls[0][0];
     expect(call.createdByAgent).toBe("shifu-u-admin-agent");
@@ -643,7 +735,7 @@ describe("manage_schedules attribution regression — all roles stamp createdByA
       wakeCreateArgs("shifu-u-anything") as any,
       {} as any,
       adminCtx({ agentId: null }),
-      deps
+			deps,
     );
     const call = (deps.createScheduledJob as any).mock.calls[0][0];
     expect(call.createdByAgent).toBeNull();
@@ -662,11 +754,13 @@ describe("manage_schedules creation_key routing", () => {
       }) as any,
       {} as any,
       trustedAdminPatCtx(),
-      deps
+			deps,
     );
 
     expect(result.error).toBeUndefined();
-    expect((deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0]).toMatchObject({
+		expect(
+			(deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0],
+		).toMatchObject({
       externalKey: "toolbox:schedule:bounded",
       untilAt: new Date("2030-06-30T09:00:00.000Z"),
     });
@@ -679,28 +773,36 @@ describe("manage_schedules creation_key routing", () => {
       wakeCreateArgs(MEMBER_AGENT) as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
 
     expect(result.error).toBeUndefined();
     expect(deps.createScheduledJob).toHaveBeenCalledTimes(1);
-    expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
+		expect(
+			deps.upsertScheduledJobByExternalKeyWithQuota,
+		).not.toHaveBeenCalled();
   });
 
   test("create trims creation_key and uses full-payload external-key upsert", async () => {
     const deps = makeDeps();
 
     const result = await manageSchedules(
-      wakeCreateArgs(MEMBER_AGENT, { creation_key: "  toolbox:schedule:42  " }) as any,
+			wakeCreateArgs(MEMBER_AGENT, {
+				creation_key: "  toolbox:schedule:42  ",
+			}) as any,
       {} as any,
       trustedAdminPatCtx(),
-      deps
+			deps,
     );
 
     expect(result.error).toBeUndefined();
     expect(deps.createScheduledJob).not.toHaveBeenCalled();
-    expect(deps.upsertScheduledJobByExternalKeyWithQuota).toHaveBeenCalledTimes(1);
-    expect((deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0]).toMatchObject({
+		expect(deps.upsertScheduledJobByExternalKeyWithQuota).toHaveBeenCalledTimes(
+			1,
+		);
+		expect(
+			(deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0],
+		).toMatchObject({
       externalKey: "toolbox:schedule:42",
       changeDetection: "full",
       createdByUser: "toolbox-adapter",
@@ -713,15 +815,19 @@ describe("manage_schedules creation_key routing", () => {
     const deps = makeDeps();
 
     const result = await manageSchedules(
-      wakeCreateArgs(MEMBER_AGENT, { creation_key: "toolbox:schedule:42" }) as any,
+			wakeCreateArgs(MEMBER_AGENT, {
+				creation_key: "toolbox:schedule:42",
+			}) as any,
       {} as any,
       adminCtx({ userId: null }),
-      deps
+			deps,
     );
 
     expect(result.error).toMatch(/creation_key.*user/i);
     expect(deps.createScheduledJob).not.toHaveBeenCalled();
-    expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
+		expect(
+			deps.upsertScheduledJobByExternalKeyWithQuota,
+		).not.toHaveBeenCalled();
   });
 
   test("blank creation_key is rejected by internal create validation", async () => {
@@ -731,35 +837,47 @@ describe("manage_schedules creation_key routing", () => {
       wakeCreateArgs(MEMBER_AGENT, { creation_key: "   " }) as any,
       {} as any,
       memberCtx(),
-      deps
+			deps,
     );
 
     expect(result.error).toMatch(/creation_key/i);
     expect(deps.createScheduledJob).not.toHaveBeenCalled();
-    expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
+		expect(
+			deps.upsertScheduledJobByExternalKeyWithQuota,
+		).not.toHaveBeenCalled();
   });
 
-  test.each(["toolbox:schedule:new", "toolbox:schedule:existing"])(
-    "member receives the same rejection for organization creation_key %s",
-    async (creationKey) => {
+	test.each([
+		"toolbox:schedule:new",
+		"toolbox:schedule:existing",
+	])("member receives the same rejection for organization creation_key %s", async (creationKey) => {
       const deps = makeDeps();
 
       const result = await manageSchedules(
         wakeCreateArgs(MEMBER_AGENT, { creation_key: creationKey }) as any,
         {} as any,
         memberCtx(),
-        deps
+			deps,
       );
 
-      expect(result).toEqual({ error: "Schedule creation keys require trusted access." });
+		expect(result).toEqual({
+			error: "Schedule creation keys require trusted access.",
+		});
       expect(deps.createScheduledJob).not.toHaveBeenCalled();
-      expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
-    }
-  );
+		expect(
+			deps.upsertScheduledJobByExternalKeyWithQuota,
+		).not.toHaveBeenCalled();
+	});
 
   test.each([
-    ["session", memberCtx({ tokenType: "session", scopes: ["mcp:write", "mcp:admin"] })],
-    ["oauth", memberCtx({ tokenType: "oauth", scopes: ["mcp:write", "mcp:admin"] })],
+		[
+			"session",
+			memberCtx({ tokenType: "session", scopes: ["mcp:write", "mcp:admin"] }),
+		],
+		[
+			"oauth",
+			memberCtx({ tokenType: "oauth", scopes: ["mcp:write", "mcp:admin"] }),
+		],
     [
       "unauthenticated PAT",
       memberCtx({
@@ -776,15 +894,21 @@ describe("manage_schedules creation_key routing", () => {
     });
 
     const result = await manageSchedules(
-      wakeCreateArgs(MEMBER_AGENT, { creation_key: "toolbox:schedule:private" }) as any,
+			wakeCreateArgs(MEMBER_AGENT, {
+				creation_key: "toolbox:schedule:private",
+			}) as any,
       {} as any,
       ctx,
-      deps
+			deps,
     );
 
-    expect(result).toEqual({ error: "Schedule creation keys require trusted access." });
+		expect(result).toEqual({
+			error: "Schedule creation keys require trusted access.",
+		});
     expect(deps.createScheduledJob).not.toHaveBeenCalled();
-    expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
+		expect(
+			deps.upsertScheduledJobByExternalKeyWithQuota,
+		).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -810,7 +934,7 @@ describe("manage_schedules creation_key routing", () => {
       }) as any,
       {} as any,
       ctx,
-      deps
+			deps,
     );
 
     expect(result.error).toBeUndefined();
@@ -820,7 +944,8 @@ describe("manage_schedules creation_key routing", () => {
       created_by_user: "user-original",
     });
     expect(
-      (deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0].activeQuota
+			(deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0]
+				.activeQuota,
     ).toBeUndefined();
   });
 
@@ -844,13 +969,14 @@ describe("manage_schedules creation_key routing", () => {
       }) as any,
       {} as any,
       trustedAdminPatCtx(),
-      deps
+			deps,
     );
 
     expect(result.error).toBeUndefined();
     expect(result.schedule?.id).toBe("job-pat-shared");
     expect(
-      (deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0].activeQuota
+			(deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0]
+				.activeQuota,
     ).toBeUndefined();
   });
 
@@ -858,13 +984,18 @@ describe("manage_schedules creation_key routing", () => {
     const deps = makeDeps();
 
     const result = await manageSchedules(
-      wakeCreateArgs(MEMBER_AGENT, { creation_key: "toolbox:schedule:admin" }) as any,
+			wakeCreateArgs(MEMBER_AGENT, {
+				creation_key: "toolbox:schedule:admin",
+			}) as any,
       {} as any,
       adminCtx(),
-      deps
+			deps,
     );
 
     expect(result.error).toBeUndefined();
-    expect((deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0].activeQuota).toBeUndefined();
+		expect(
+			(deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0]
+				.activeQuota,
+		).toBeUndefined();
   });
 });

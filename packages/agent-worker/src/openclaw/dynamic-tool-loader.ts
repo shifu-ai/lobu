@@ -15,7 +15,8 @@ export {
   type RuntimeToolCatalogEntry,
 } from "./tool-catalog-dispatcher";
 
-import { toolIdentityKey } from "./tool-descriptor";
+import { qualifiedToolKey, toolIdentityKey } from "./tool-descriptor";
+import { isExplicitPersonalReminderAttempt } from "./mcp-execution-contract";
 import {
   classifyToolIntent,
   hasCalendarDateIntent,
@@ -27,6 +28,13 @@ import {
   type ToolCandidateScore,
   type ToolRouteDecision,
 } from "./tool-router";
+import { deriveTurnExecutionIntent } from "./turn-execution-intent";
+import type { ToolRouterCacheContext } from "./tool-router-memory-budget";
+
+export type PersonalReminderDeliveryBlockedReason =
+  | "capability_inactive"
+  | "snapshot_missing"
+  | "snapshot_expired";
 
 export interface DynamicToolSelectionTrace {
   routerMode: ToolRouterMode;
@@ -34,6 +42,7 @@ export interface DynamicToolSelectionTrace {
   selectionDiverged: boolean;
   semanticClarificationRequired: boolean;
   semanticComputed: boolean;
+  semanticLookupSkippedReason?: "definite_non_tool";
   primaryIntent: ToolIntent;
   budget: number;
   totalTools: number;
@@ -54,7 +63,27 @@ export interface DynamicToolSelectionTrace {
   clarificationChoices?: string[];
   candidates: ToolCandidateScore[];
   fallback: ToolRouteDecision["fallback"];
-  inventoryFingerprint: string;
+  /** Descriptor/retrieval-index fingerprint, not the final eligibility set. */
+  inventoryFingerprint?: string;
+  /** Final turn-local eligibility/release fingerprint, when projected by the worker. */
+  effectiveToolInventoryFingerprint?: string;
+  effectiveReleaseStatus?: "legacy_unenrolled" | "enrolled_inactive" | "active";
+  effectiveReleaseReason?: string;
+  configuredRouterMode?: ToolRouterMode;
+  routerGateReason?: string;
+  releaseEnvironment?: string;
+  releaseAgentId?: string;
+  releaseId?: string;
+  releaseSequence?: number;
+  releaseSnapshotDigest?: string;
+  releaseSnapshotExpiresAt?: string;
+  releaseSnapshotExpired?: boolean;
+  executionIntent?: string;
+  executionClarificationRequired?: boolean;
+  routerStageCorrelationStatus?: "not_available_at_router_stage";
+  effectiveAllowedToolCount?: number;
+  effectiveBlockedToolCount?: number;
+  effectiveBlockedReasons?: string[];
   cacheHit: boolean;
   estimatedIndexBytes: number;
   cacheEvictionCount: number;
@@ -72,6 +101,8 @@ export interface SelectMcpToolsForTurnParams {
   isToolAllowed?: (toolName: string, mcpId: string) => boolean;
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
+  personalReminderDeliveryBlockedReason?: PersonalReminderDeliveryBlockedReason;
+  cacheContext?: ToolRouterCacheContext;
 }
 
 export interface SelectMcpToolsForTurnResult {
@@ -88,6 +119,8 @@ export interface SelectGroupedMcpToolsForTurnParams {
   isToolAllowed?: (toolName: string, mcpId: string) => boolean;
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
+  personalReminderDeliveryBlockedReason?: PersonalReminderDeliveryBlockedReason;
+  cacheContext?: ToolRouterCacheContext;
 }
 
 export interface SelectGroupedMcpToolsForTurnResult {
@@ -104,6 +137,26 @@ export interface SelectMcpToolsByMcpForTurnParams {
   isToolAllowed?: (toolName: string, mcpId: string) => boolean;
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
+  personalReminderDeliveryBlockedReason?: PersonalReminderDeliveryBlockedReason;
+  cacheContext?: ToolRouterCacheContext;
+}
+
+function blocksPersonalReminderTool(
+  params: {
+    message: string;
+    personalReminderDeliveryBlockedReason?: PersonalReminderDeliveryBlockedReason;
+  },
+  mcpId: string,
+  toolName: string
+): boolean {
+  return (
+    params.personalReminderDeliveryBlockedReason !== undefined &&
+    isExplicitPersonalReminderAttempt({
+      intent: deriveTurnExecutionIntent(params.message),
+      mcpId,
+      toolName,
+    })
+  );
 }
 
 export interface SelectMcpToolsByMcpForTurnResult {
@@ -358,6 +411,21 @@ interface SharedToolSelection {
   routerMode: ToolRouterMode;
 }
 
+/** Only skip retrieval for high-confidence non-tool turns; unknown prose routes. */
+function isDefiniteNonToolTurn(message: string): boolean {
+  const normalized = message.trim().toLocaleLowerCase();
+  if (!normalized) return true;
+  if (
+    /^(?:(?:ok|okay|thanks|thank you|got it|收到|好的|好|謝謝|谢谢|感謝|感谢|了解です|ありがとう|ありがとうございます|확인|알겠습니다|감사합니다)[,.，、!！。 ]*)+$/.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+  const reaction = normalized.replace(/[\uFE0E\uFE0F\s]/gu, "");
+  return /^(?:👍|🙏|❤|❤️|👏|🙌|👌|✅|🙂|😊|🎉)+$/u.test(reaction);
+}
+
 function selectEntriesForTurn(
   entries: ToolCatalogEntry[],
   message: string,
@@ -366,7 +434,8 @@ function selectEntriesForTurn(
   routerMode: ToolRouterMode = "shadow",
   provenanceById?: McpCatalogProvenanceById,
   trustedOrigins?: ReadonlySet<string>,
-  calendarAssist = false
+  calendarAssist = false,
+  cacheContext?: ToolRouterCacheContext
 ): SharedToolSelection {
   const normalizedAllowedToolNames =
     allowedToolNames === undefined ? undefined : [...allowedToolNames];
@@ -383,6 +452,28 @@ function selectEntriesForTurn(
     trustedOrigins,
     calendarAssist
   );
+  if (!message.trim()) {
+    return {
+      primaryIntent,
+      selectedEntries: [],
+      eligibleEntries,
+      pinnedBudgetOverflow: [],
+      routerMode,
+      route: {
+        routerVersion: "semantic-v1",
+        inventoryFingerprint: "empty-query",
+        cacheHit: false,
+        estimatedIndexBytes: 0,
+        cacheEvictionCount: 0,
+        timingMs: { build: 0, retrieve: 0, rank: 0 },
+        selectedEntries: [],
+        candidates: [],
+        explicitDestinations: [],
+        fallback: "empty_query",
+        semanticLookupSkippedReason: "definite_non_tool",
+      },
+    };
+  }
   if (routerMode === "legacy") {
     return {
       primaryIntent,
@@ -401,6 +492,27 @@ function selectEntriesForTurn(
         candidates: [],
         explicitDestinations: [],
         fallback: null,
+      },
+    };
+  }
+  if (isDefiniteNonToolTurn(message)) {
+    return {
+      primaryIntent,
+      selectedEntries: legacySelection.selectedEntries,
+      eligibleEntries,
+      pinnedBudgetOverflow: legacySelection.pinnedBudgetOverflow,
+      routerMode,
+      route: {
+        routerVersion: "semantic-v1",
+        cacheHit: false,
+        estimatedIndexBytes: 0,
+        cacheEvictionCount: 0,
+        timingMs: { build: 0, retrieve: 0, rank: 0 },
+        selectedEntries: legacySelection.selectedEntries,
+        candidates: [],
+        explicitDestinations: [],
+        fallback: "empty_query",
+        semanticLookupSkippedReason: "definite_non_tool",
       },
     };
   }
@@ -437,6 +549,7 @@ function selectEntriesForTurn(
     budget,
     reservedEntries,
     allowedToolNames: normalizedAllowedToolNames,
+    cacheContext,
   });
   return {
     primaryIntent,
@@ -479,6 +592,7 @@ function routeTraceFields(
   | "selectionDiverged"
   | "semanticClarificationRequired"
   | "semanticComputed"
+  | "semanticLookupSkippedReason"
 > {
   const selectedToolNames = selectedEntries.map(displayToolName);
   const semanticSelectedToolNames = route.selectedEntries.map(displayToolName);
@@ -492,7 +606,10 @@ function routeTraceFields(
         (name, index) => name !== semanticSelectedToolNames[index]
       ),
     semanticClarificationRequired: route.clarification !== undefined,
-    semanticComputed: routerMode !== "legacy",
+    semanticComputed:
+      routerMode !== "legacy" &&
+      route.semanticLookupSkippedReason === undefined,
+    semanticLookupSkippedReason: route.semanticLookupSkippedReason,
     routerVersion: route.routerVersion,
     explicitDestinations: route.explicitDestinations,
     clarificationRequired:
@@ -545,6 +662,8 @@ export function selectMcpToolsForTurn(
       isToolAllowed: params.isToolAllowed,
       mcpProvenanceById: params.mcpProvenanceById,
       trustedShifuToolboxOrigins: params.trustedShifuToolboxOrigins,
+      personalReminderDeliveryBlockedReason:
+        params.personalReminderDeliveryBlockedReason,
     });
     return {
       selected: result.selectedTools,
@@ -576,6 +695,18 @@ export function selectMcpToolsForTurn(
     )
     .filter(
       (entry) =>
+        !blocksPersonalReminderTool(
+          {
+            message: params.message,
+            personalReminderDeliveryBlockedReason:
+              params.personalReminderDeliveryBlockedReason,
+          },
+          entry.mcpId,
+          entry.name
+        )
+    )
+    .filter(
+      (entry) =>
         (intentForEligibility === "automation" ||
           entry.domain !== "automation") &&
         (intentForEligibility === "calendar" ||
@@ -597,7 +728,8 @@ export function selectMcpToolsForTurn(
     params.routerMode,
     params.mcpProvenanceById,
     params.trustedShifuToolboxOrigins,
-    calendarAssist
+    calendarAssist,
+    params.cacheContext
   );
   const selectedKeys = new Set(
     selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))
@@ -632,7 +764,7 @@ function catalogToolKey(mcpId: string, toolName: string): string {
 }
 
 function displayToolName(entry: ToolCatalogEntry): string {
-  return entry.mcpId ? `${entry.mcpId}/${entry.name}` : entry.name;
+  return entry.mcpId ? qualifiedToolKey(entry.mcpId, entry.name) : entry.name;
 }
 
 export function selectMcpToolsByMcpForTurn(
@@ -663,6 +795,7 @@ export function selectMcpToolsByMcpForTurn(
         })
       )
         continue;
+      if (blocksPersonalReminderTool(params, mcpId, entry.name)) continue;
       if (
         intentForEligibility !== "automation" &&
         entry.domain === "automation"
@@ -693,7 +826,8 @@ export function selectMcpToolsByMcpForTurn(
     params.routerMode,
     params.mcpProvenanceById,
     params.trustedShifuToolboxOrigins,
-    calendarAssist
+    calendarAssist,
+    params.cacheContext
   );
   const selectedKeys = new Set(
     selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))

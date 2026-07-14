@@ -10,7 +10,9 @@ import {
   type McpStatus,
   type McpToolDef,
   type ResolvedCourseExecutionContext,
+  type ReleaseCapabilityState,
   type TrustedExecutionScope,
+  verifyWorkerToken,
 } from "@lobu/core";
 import type { WorkerShifuTraceContext } from "../shared/journey-trace";
 import { shifuTraceHeaders } from "../shared/journey-trace";
@@ -259,6 +261,7 @@ const DEFAULT_SESSION_CONTEXT = {
   toolboxPersonalAgentTools: [] as ToolboxPersonalAgentToolGroup[],
   userId: "",
   agentId: "",
+  releaseState: { status: "legacy_unenrolled" } as ReleaseCapabilityState,
 } as const;
 
 // Module-level cache for session context
@@ -273,8 +276,11 @@ let cachedResult: {
   toolboxPersonalAgentTools: ToolboxPersonalAgentToolGroup[];
   userId: string;
   agentId: string;
+  releaseState: ReleaseCapabilityState;
   mcpExposure: "tools" | "cli";
   cachedAt: number;
+  authorizationKey: string;
+  authorizationExpiresAt: number;
 } | null = null;
 
 /**
@@ -436,29 +442,6 @@ function optionalShifuTraceHeaders(
   return trace ? shifuTraceHeaders(trace) : {};
 }
 
-function buildToolboxPersonalAgentToolInstructions(
-  toolboxPersonalAgentTools: ToolboxPersonalAgentToolGroup[]
-): string {
-  const entries = toolboxPersonalAgentTools
-    .map((group) => {
-      const toolNames = group.tools
-        .map((tool) => tool.name)
-        .filter((name) => name.trim().length > 0);
-      if (toolNames.length === 0) return null;
-      return `- ${group.connectorKey}: ${toolNames.map((name) => `\`${name}\``).join(", ")}`;
-    })
-    .filter((entry): entry is string => Boolean(entry));
-
-  if (entries.length === 0) return "";
-
-  return [
-    "## LINE Personal Agent Toolbox Sources",
-    "These Toolbox personal-agent tools are registered as first-class tools for this LINE user. Use the exact tool names below; do not call generic tools such as `search` or unlisted names.",
-    ...entries,
-    "If a source is not listed here, say it is not connected to this LINE personal agent and continue with the listed sources.",
-  ].join("\n");
-}
-
 /**
  * Fetch session context from gateway for OpenClaw worker.
  * Returns gateway instructions and dynamic provider configuration.
@@ -469,6 +452,8 @@ export async function getOpenClawSessionContext(
   opts: {
     mcpExposure?: "tools" | "cli";
     shifuTrace?: WorkerShifuTraceContext;
+    /** Per-run token preferred by session-runner over the deployment token. */
+    workerToken?: string;
   } = {}
 ): Promise<{
   /**
@@ -489,21 +474,49 @@ export async function getOpenClawSessionContext(
   toolboxPersonalAgentTools: ToolboxPersonalAgentToolGroup[];
   userId: string;
   agentId: string;
+  releaseState: ReleaseCapabilityState;
 }> {
   const mcpExposure: "tools" | "cli" = opts.mcpExposure ?? "tools";
+  const workerToken = opts.workerToken ?? process.env.WORKER_TOKEN;
+  const verifiedToken = workerToken ? verifyWorkerToken(workerToken) : null;
+  const releaseState: ReleaseCapabilityState = verifiedToken?.releaseState ?? {
+    status: "legacy_unenrolled",
+  };
+  const capability =
+    releaseState.status === "active" ? releaseState.claim : undefined;
+  const authorizationKey = capability
+    ? [
+        capability.snapshotDigest,
+        capability.releaseId,
+        capability.releaseSequence,
+        capability.toolboxUserId,
+        capability.agentId,
+      ].join("\0")
+    : `${releaseState.status}:${releaseState.status === "enrolled_inactive" ? `${releaseState.environment}:${releaseState.reason}` : ""}:${verifiedToken?.userId ?? ""}:${verifiedToken?.agentId ?? ""}:${workerToken ?? ""}`;
+  const configuredCacheTtl = Number.parseInt(
+    process.env.SESSION_CONTEXT_CACHE_TTL_MS ?? "",
+    10
+  );
+  const cacheTtl =
+    Number.isFinite(configuredCacheTtl) && configuredCacheTtl > 0
+      ? Math.min(configuredCacheTtl, CACHE_TTL_MS)
+      : CACHE_TTL_MS;
+  const authorizationExpiresAt = capability
+    ? Date.parse(capability.expiresAt)
+    : Number.POSITIVE_INFINITY;
 
   if (
     cachedResult &&
     cachedResult.mcpExposure === mcpExposure &&
-    Date.now() - cachedResult.cachedAt < CACHE_TTL_MS
+    cachedResult.authorizationKey === authorizationKey &&
+    Date.now() - cachedResult.cachedAt < cacheTtl &&
+    Date.now() < cachedResult.authorizationExpiresAt
   ) {
     logger.debug("Returning cached session context");
     return cachedResult;
   }
 
   const dispatcherUrl = process.env.DISPATCHER_URL;
-  const workerToken = process.env.WORKER_TOKEN;
-
   if (!dispatcherUrl || !workerToken) {
     logger.warn("Missing dispatcher URL or worker token for session context");
     return { ...DEFAULT_SESSION_CONTEXT };
@@ -549,13 +562,7 @@ export async function getOpenClawSessionContext(
     const mcpServerInstructions = buildMcpServerInstructions(
       data.mcpInstructions || {}
     );
-    const mcpToolInventoryInstructions = buildMcpToolInventoryInstructions(
-      data.mcpTools || {},
-      data.mcpStatus || []
-    );
     const toolboxPersonalAgentTools = data.toolboxPersonalAgentTools || [];
-    const toolboxPersonalAgentToolInstructions =
-      buildToolboxPersonalAgentToolInstructions(toolboxPersonalAgentTools);
     const mcpCliInstructions =
       mcpExposure === "cli" ? buildMcpCliInstructions(data.mcpStatus) : "";
 
@@ -569,8 +576,6 @@ export async function getOpenClawSessionContext(
       data.skillsInstructions,
       mcpCliInstructions,
       mcpSetupInstructions,
-      mcpToolInventoryInstructions,
-      toolboxPersonalAgentToolInstructions,
       mcpServerInstructions,
     ]
       .filter(Boolean)
@@ -579,7 +584,7 @@ export async function getOpenClawSessionContext(
     const mcpTools = data.mcpTools || {};
 
     logger.info(
-      `Built gateway instructions: agent (${agentInstructions.length} chars, prepended) + platform (${data.platformInstructions.length} chars) + network (${data.networkInstructions.length} chars) + skills (${(data.skillsInstructions || "").length} chars) + MCP setup (${mcpSetupInstructions.length} chars) + MCP inventory (${mcpToolInventoryInstructions.length} chars) + Toolbox personal-agent tools (${toolboxPersonalAgentToolInstructions.length} chars) + MCP server instructions (${mcpServerInstructions.length} chars), mcpTools: ${Object.keys(mcpTools).length} servers`
+      `Built gateway instructions: agent (${agentInstructions.length} chars, prepended) + platform (${data.platformInstructions.length} chars) + network (${data.networkInstructions.length} chars) + skills (${(data.skillsInstructions || "").length} chars) + MCP setup (${mcpSetupInstructions.length} chars) + deferred MCP/toolbox inventory + MCP server instructions (${mcpServerInstructions.length} chars), mcpTools: ${Object.keys(mcpTools).length} servers`
     );
 
     const mcpContext = data.mcpContext || {};
@@ -595,6 +600,7 @@ export async function getOpenClawSessionContext(
       toolboxPersonalAgentTools,
       userId: data.userId || "",
       agentId: data.agentId || "",
+      releaseState,
     };
 
     // Don't cache if any authenticated MCP returned no tools — likely a
@@ -603,7 +609,13 @@ export async function getOpenClawSessionContext(
       (mcp) => mcp.authenticated && !toolMcpIds.has(mcp.id)
     );
     if (!hasEmptyAuthenticatedMcp) {
-      cachedResult = { ...result, mcpExposure, cachedAt: Date.now() };
+      cachedResult = {
+        ...result,
+        mcpExposure,
+        cachedAt: Date.now(),
+        authorizationKey,
+        authorizationExpiresAt,
+      };
     } else {
       logger.warn(
         "Skipping session context cache — authenticated MCP(s) returned no tools",

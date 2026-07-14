@@ -11,34 +11,47 @@
  * so authenticated sessions can recover across restarts and replica hops.
  */
 
-import { randomUUID } from 'node:crypto';
-import { MCP_PROTOCOL_VERSION } from '@lobu/core';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import type { Context } from 'hono';
-import { bindRequestAbortToStream, type AbortableStream } from './events/sse-abort-bridge';
-import { OAuthClientsStore } from './auth/oauth/clients';
-import { isDirectAuthMemberScheduleWrite, isPublicReadable } from './auth/tool-access';
-import { createDbClientFromEnv } from './db/client';
-import type { Env } from './index';
-import { agentExistsInOrganization, isValidAgentId, touchAgentLastUsed } from './lobu/stores/postgres-stores';
-import { McpSessionStore, type PersistedMcpSession } from './mcp-session-store';
+import { randomUUID } from "node:crypto";
+import { MCP_PROTOCOL_VERSION } from "@lobu/core";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import {
+	CallToolRequestSchema,
+	ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import type { Context } from "hono";
+import {
+	bindRequestAbortToStream,
+	type AbortableStream,
+} from "./events/sse-abort-bridge";
+import { OAuthClientsStore } from "./auth/oauth/clients";
+import {
+	isDirectAuthMemberScheduleWrite,
+	isPublicReadable,
+} from "./auth/tool-access";
+import { createDbClientFromEnv } from "./db/client";
+import type { Env } from "./index";
+import {
+	agentExistsInOrganization,
+	isValidAgentId,
+	touchAgentLastUsed,
+} from "./lobu/stores/postgres-stores";
+import { McpSessionStore, type PersistedMcpSession } from "./mcp-session-store";
 import {
   clearInMemoryMcpSessionsForTests as clearInMemoryMcpSessionsForTestsShared,
   mcpSessionMap,
-} from './mcp-session-state';
+} from "./mcp-session-state";
 import {
   type AuthContext,
   executeTool,
   extractAuthContext,
   MEMBER_INTERNAL_TOOL_WHITELIST,
-} from './tools/execute';
-import { getAllTools, getTool } from './tools/registry';
-import { formatToolResult } from './utils/markdown-formatter';
-import { getConfiguredPublicOrigin } from './utils/public-origin';
-import { buildWorkspaceInstructions } from './utils/workspace-instructions';
-import { authorizeMemoryAgentOwner } from './tools/memory-read-scope';
+} from "./tools/execute";
+import { getAllTools, getTool } from "./tools/registry";
+import { formatToolResult } from "./utils/markdown-formatter";
+import { getConfiguredPublicOrigin } from "./utils/public-origin";
+import { buildWorkspaceInstructions } from "./utils/workspace-instructions";
+import { authorizeMemoryAgentOwner } from "./tools/memory-read-scope";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -86,16 +99,20 @@ export async function cleanupExpiredMcpSessions(): Promise<void> {
 // Re-export the test-only clearer; the actual implementation lives in
 // `./mcp-session-state` so callers can clear sessions without statically
 // loading this file (and its `@lobu/connector-sdk`-dependent tool registry).
-export const clearInMemoryMcpSessionsForTests = clearInMemoryMcpSessionsForTestsShared;
+export const clearInMemoryMcpSessionsForTests =
+	clearInMemoryMcpSessionsForTestsShared;
 
 export async function revokeInMemoryMcpSessionsForClient(
   clientId: string,
-  organizationId: string
+	organizationId: string,
 ): Promise<string[]> {
   const revokedSessionIds: string[] = [];
 
   for (const [sessionId, entry] of sessions.entries()) {
-    if (entry.authCtx.clientId !== clientId || entry.authCtx.organizationId !== organizationId) {
+		if (
+			entry.authCtx.clientId !== clientId ||
+			entry.authCtx.organizationId !== organizationId
+		) {
       continue;
     }
 
@@ -117,11 +134,11 @@ const formatRef = { rawJson: false };
 
 function createServerForContext(env: Env, authCtx: SessionAuthContext): Server {
   const server = new Server(
-    { name: 'lobu-mcp', version: '0.2.0' },
+		{ name: "lobu-mcp", version: "0.2.0" },
     {
       capabilities: { tools: {} },
       ...(authCtx.instructions && { instructions: authCtx.instructions }),
-    }
+		},
   );
 
   // tools/list — return our TypeBox JSON Schemas
@@ -130,23 +147,23 @@ function createServerForContext(env: Env, authCtx: SessionAuthContext): Server {
     const includeInternalTools = authCtx.allowInternalTools === true;
     const publicOnly = !!authCtx.organizationId && !authCtx.memberRole;
     const roleAccessLevel = !authCtx.memberRole
-      ? 'read'
-      : authCtx.memberRole === 'owner' || authCtx.memberRole === 'admin'
-        ? 'admin'
-        : 'write';
+			? "read"
+			: authCtx.memberRole === "owner" || authCtx.memberRole === "admin"
+				? "admin"
+				: "write";
     const scopeAccessLevel = !authCtx.scopes
-      ? 'admin'
-      : authCtx.scopes.includes('mcp:admin')
-        ? 'admin'
-        : authCtx.scopes.includes('mcp:write')
-          ? 'write'
-          : 'read';
+			? "admin"
+			: authCtx.scopes.includes("mcp:admin")
+				? "admin"
+				: authCtx.scopes.includes("mcp:write")
+					? "write"
+					: "read";
     const maxAccessLevel =
-      roleAccessLevel === 'read' || scopeAccessLevel === 'read'
-        ? 'read'
-        : roleAccessLevel === 'write' || scopeAccessLevel === 'write'
-          ? 'write'
-          : 'admin';
+			roleAccessLevel === "read" || scopeAccessLevel === "read"
+				? "read"
+				: roleAccessLevel === "write" || scopeAccessLevel === "write"
+					? "write"
+					: "admin";
     const staticTools = getAllTools({
       includeInternalTools,
       publicOnly,
@@ -160,7 +177,8 @@ function createServerForContext(env: Env, authCtx: SessionAuthContext): Server {
     // already computed above rather than re-deriving from `authCtx` a second
     // time. Doesn't touch `getAllTools`'s own memoize cache; this filters its
     // already-computed output per request.
-    const isPrivileged = roleAccessLevel === 'admin' || scopeAccessLevel === 'admin';
+		const isPrivileged =
+			roleAccessLevel === "admin" || scopeAccessLevel === "admin";
     const memberScoped = includeInternalTools && !isPrivileged;
     let staticToolsFiltered = memberScoped
       ? staticTools.filter((t) => {
@@ -189,18 +207,18 @@ function createServerForContext(env: Env, authCtx: SessionAuthContext): Server {
     if (
       includeInternalTools &&
       isDirectAuthMemberScheduleWrite(
-        'manage_schedules',
+				"manage_schedules",
         authCtx.memberRole,
         authCtx.agentId,
-        authCtx.scopes
+				authCtx.scopes,
       ) &&
-      !staticToolsFiltered.some((t) => t.name === 'manage_schedules')
+			!staticToolsFiltered.some((t) => t.name === "manage_schedules")
     ) {
       const scheduleEntry = getAllTools({
         includeInternalTools: true,
         publicOnly,
-        maxAccessLevel: 'admin',
-      }).find((t) => t.name === 'manage_schedules');
+				maxAccessLevel: "admin",
+			}).find((t) => t.name === "manage_schedules");
       if (scheduleEntry) {
         staticToolsFiltered = [...staticToolsFiltered, scheduleEntry];
       }
@@ -230,10 +248,15 @@ function createServerForContext(env: Env, authCtx: SessionAuthContext): Server {
       const text = formatRef.rawJson
         ? JSON.stringify(result)
         : formatToolResult(name, result, { includeRawJson: false });
-      return { content: [{ type: 'text' as const, text }] };
+			return { content: [{ type: "text" as const, text }] };
     } catch (error: any) {
       return {
-        content: [{ type: 'text' as const, text: error.message ?? 'Tool execution failed' }],
+				content: [
+					{
+						type: "text" as const,
+						text: error.message ?? "Tool execution failed",
+					},
+				],
         isError: true,
       };
     }
@@ -247,34 +270,38 @@ function getProtectedResourceUrl(req: Request): string {
   return `${baseUrl}/.well-known/oauth-protected-resource`;
 }
 
-function buildUnauthorizedResponse(req: Request, description: string): Response {
+function buildUnauthorizedResponse(
+	req: Request,
+	description: string,
+): Response {
   return new Response(
     JSON.stringify({
-      error: 'unauthorized',
+			error: "unauthorized",
       error_description: description,
     }),
     {
       status: 401,
       headers: {
-        'Content-Type': 'application/json',
-        'WWW-Authenticate': `Bearer realm="${getProtectedResourceUrl(req)}"`,
+				"Content-Type": "application/json",
+				"WWW-Authenticate": `Bearer realm="${getProtectedResourceUrl(req)}"`,
+			},
       },
-    }
   );
 }
 
 async function readToolCall(
-  req: Request
+	req: Request,
 ): Promise<{ name: string; args: Record<string, unknown> } | null> {
   try {
     const body = await req.clone().json();
     const messages = Array.isArray(body) ? body : [body];
-    const toolCall = messages.find((m: any) => m?.method === 'tools/call');
-    if (!toolCall || typeof toolCall?.params?.name !== 'string') return null;
+		const toolCall = messages.find((m: any) => m?.method === "tools/call");
+		if (!toolCall || typeof toolCall?.params?.name !== "string") return null;
     return {
       name: toolCall.params.name,
       args:
-        toolCall.params.arguments && typeof toolCall.params.arguments === 'object'
+				toolCall.params.arguments &&
+				typeof toolCall.params.arguments === "object"
           ? toolCall.params.arguments
           : {},
     };
@@ -289,11 +316,11 @@ async function readInitializeRequest(req: Request): Promise<{
   clientInfo: Record<string, unknown> | null;
   capabilities: Record<string, unknown> | null;
 } | null> {
-  const headerAgentId = req.headers.get('x-lobu-agent-id')?.trim() || null;
+	const headerAgentId = req.headers.get("x-lobu-agent-id")?.trim() || null;
   try {
     const body = await req.clone().json();
     const messages = Array.isArray(body) ? body : [body];
-    const initialize = messages.find((m: any) => m?.method === 'initialize');
+		const initialize = messages.find((m: any) => m?.method === "initialize");
     if (!initialize) {
       return headerAgentId
         ? {
@@ -306,16 +333,19 @@ async function readInitializeRequest(req: Request): Promise<{
     }
 
     const clientInfo =
-      initialize?.params?.clientInfo && typeof initialize.params.clientInfo === 'object'
+			initialize?.params?.clientInfo &&
+			typeof initialize.params.clientInfo === "object"
         ? initialize.params.clientInfo
         : null;
     const capabilities =
-      initialize?.params?.capabilities && typeof initialize.params.capabilities === 'object'
+			initialize?.params?.capabilities &&
+			typeof initialize.params.capabilities === "object"
         ? initialize.params.capabilities
         : null;
     const bodyAgentId =
-      (typeof clientInfo?.agentId === 'string' && clientInfo.agentId.trim()) ||
-      (typeof clientInfo?.metadata?.agentId === 'string' && clientInfo.metadata.agentId.trim()) ||
+			(typeof clientInfo?.agentId === "string" && clientInfo.agentId.trim()) ||
+			(typeof clientInfo?.metadata?.agentId === "string" &&
+				clientInfo.metadata.agentId.trim()) ||
       null;
 
     return {
@@ -339,14 +369,14 @@ async function readInitializeRequest(req: Request): Promise<{
 function buildPersistedSession(
   sessionId: string,
   authCtx: SessionAuthContext,
-  lastAccessedAt: number = Date.now()
+	lastAccessedAt: number = Date.now(),
 ): PersistedMcpSession {
   return {
     sessionId,
     userId: authCtx.userId,
     // `mcp_sessions.client_id` references oauth_clients(id). PAT sessions are
     // authenticated, but their synthetic `pat_<id>` client id has no oauth row.
-    clientId: authCtx.tokenType === 'oauth' ? authCtx.clientId : null,
+		clientId: authCtx.tokenType === "oauth" ? authCtx.clientId : null,
     organizationId: authCtx.organizationId,
     memberRole: authCtx.memberRole,
     requestedAgentId: authCtx.requestedAgentId,
@@ -360,13 +390,17 @@ function buildPersistedSession(
 async function persistSessionState(
   sessionId: string | null | undefined,
   authCtx: SessionAuthContext,
-  lastAccessedAt: number = Date.now()
+	lastAccessedAt: number = Date.now(),
 ): Promise<void> {
   if (!sessionId) return;
-  await mcpSessionStore.upsertSession(buildPersistedSession(sessionId, authCtx, lastAccessedAt));
+	await mcpSessionStore.upsertSession(
+		buildPersistedSession(sessionId, authCtx, lastAccessedAt),
+	);
 }
 
-async function deletePersistedSession(sessionId: string | null | undefined): Promise<void> {
+async function deletePersistedSession(
+	sessionId: string | null | undefined,
+): Promise<void> {
   if (!sessionId) return;
   await mcpSessionStore.deleteSession(sessionId);
 }
@@ -374,7 +408,7 @@ async function deletePersistedSession(sessionId: string | null | undefined): Pro
 async function resolveMembershipRole(
   env: Env,
   organizationId: string | null,
-  userId: string | null
+	userId: string | null,
 ): Promise<string | null> {
   if (!organizationId || !userId) return null;
   const sql = createDbClientFromEnv(env);
@@ -390,7 +424,7 @@ async function resolveMembershipRole(
 
 async function recoverSessionAuthContext(
   c: Context<{ Bindings: Env }>,
-  sessionId: string
+	sessionId: string,
 ): Promise<SessionAuthContext | null> {
   const persisted = await mcpSessionStore.getSession(sessionId);
   if (!persisted) return null;
@@ -400,7 +434,8 @@ async function recoverSessionAuthContext(
   if (persisted.isAuthenticated) {
     if (!authCtx.isAuthenticated) return null;
     if (persisted.userId && persisted.userId !== authCtx.userId) return null;
-    if (persisted.clientId && persisted.clientId !== authCtx.clientId) return null;
+		if (persisted.clientId && persisted.clientId !== authCtx.clientId)
+			return null;
   }
 
   if (persisted.scopedToOrg !== authCtx.scopedToOrg) {
@@ -416,10 +451,14 @@ async function recoverSessionAuthContext(
     authCtx.memberRole = await resolveMembershipRole(
       c.env,
       persisted.organizationId,
-      authCtx.userId
+			authCtx.userId,
     );
 
-    if (persisted.isAuthenticated && persisted.organizationId && !authCtx.memberRole) {
+		if (
+			persisted.isAuthenticated &&
+			persisted.organizationId &&
+			!authCtx.memberRole
+		) {
       return null;
     }
   }
@@ -444,9 +483,9 @@ async function recordMcpClientActivity(
   initialize?: {
     clientInfo: Record<string, unknown> | null;
     capabilities: Record<string, unknown> | null;
-  } | null
+	} | null,
 ): Promise<void> {
-  if (!authCtx.clientId || authCtx.tokenType !== 'oauth') return;
+	if (!authCtx.clientId || authCtx.tokenType !== "oauth") return;
 
   const sql = createDbClientFromEnv(env);
   const clientsStore = new OAuthClientsStore(sql);
@@ -456,7 +495,7 @@ async function recordMcpClientActivity(
     organizationId: authCtx.organizationId,
     userId: authCtx.userId,
     agentId: authCtx.agentId,
-    userAgent: req.headers.get('user-agent'),
+		userAgent: req.headers.get("user-agent"),
     clientInfo: initialize?.clientInfo ?? null,
     capabilities: initialize?.capabilities ?? null,
   });
@@ -465,15 +504,15 @@ async function recordMcpClientActivity(
 function buildJsonRpcErrorResponse(
   message: string,
   id: string | number | null,
-  status: number = 400
+	status: number = 400,
 ): Response {
   return new Response(
     JSON.stringify({
-      jsonrpc: '2.0',
+			jsonrpc: "2.0",
       error: { code: -32000, message },
       id,
     }),
-    { status, headers: { 'Content-Type': 'application/json' } }
+		{ status, headers: { "Content-Type": "application/json" } },
   );
 }
 
@@ -481,28 +520,31 @@ function buildJsonRpcErrorResponse(
 // Accept header handling
 // ---------------------------------------------------------------------------
 
-const FULL_MCP_ACCEPT = 'application/json, text/event-stream';
+const FULL_MCP_ACCEPT = "application/json, text/event-stream";
 
 // Check whether the original client accepts SSE responses.
 function clientAcceptsSSE(req: Request): boolean {
-  const accept = req.headers.get('accept') ?? '';
-  return accept.includes('text/event-stream');
+	const accept = req.headers.get("accept") ?? "";
+	return accept.includes("text/event-stream");
 }
 
 // The SDK transport requires both application/json and text/event-stream in
 // Accept. Normalize so clients that omit SSE aren't rejected with 406.
 function normalizeAcceptHeader(req: Request): Request {
-  const accept = req.headers.get('accept') ?? '';
-  if (accept.includes('text/event-stream') && accept.includes('application/json')) {
+	const accept = req.headers.get("accept") ?? "";
+	if (
+		accept.includes("text/event-stream") &&
+		accept.includes("application/json")
+	) {
     return req;
   }
   const headers = new Headers(req.headers);
-  headers.set('accept', FULL_MCP_ACCEPT);
+	headers.set("accept", FULL_MCP_ACCEPT);
   return new Request(req.url, {
     method: req.method,
     headers,
     body: req.body,
-    duplex: 'half',
+		duplex: "half",
   });
 }
 
@@ -510,15 +552,15 @@ function normalizeAcceptHeader(req: Request): Request {
 // Extracts the last `data:` payload from the event stream.
 async function sseToJson(response: Response): Promise<Response> {
   const body = await response.text();
-  const lines = body.split('\n');
+	const lines = body.split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();
-    if (line.startsWith('data:')) {
+		if (line.startsWith("data:")) {
       const json = line.slice(5).trim();
       // Carry over all headers except content-type and content-length
       const headers = new Headers(response.headers);
-      headers.set('content-type', 'application/json');
-      headers.delete('content-length');
+			headers.set("content-type", "application/json");
+			headers.delete("content-length");
       return new Response(json, { status: response.status, headers });
     }
   }
@@ -531,13 +573,19 @@ async function sseToJson(response: Response): Promise<Response> {
 // -----------------------------------------------------------------------------
 const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 
-export function withSSEHeartbeat(response: Response, signal?: AbortSignal): Response {
-  if (!response.headers.get('content-type')?.includes('text/event-stream') || !response.body) {
+export function withSSEHeartbeat(
+	response: Response,
+	signal?: AbortSignal,
+): Response {
+	if (
+		!response.headers.get("content-type")?.includes("text/event-stream") ||
+		!response.body
+	) {
     return response;
   }
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const writer = writable.getWriter();
-  const heartbeat = new TextEncoder().encode(': ping\n\n');
+	const heartbeat = new TextEncoder().encode(": ping\n\n");
 
   // The heartbeat, the pipe, the source close handler, the pipe error
   // handler, AND the per-request AbortSignal can all race to terminate the
@@ -572,14 +620,16 @@ export function withSSEHeartbeat(response: Response, signal?: AbortSignal): Resp
       return terminated;
     },
     abort() {
-      abortWriter(new Error('Request aborted'));
+			abortWriter(new Error("Request aborted"));
     },
   };
   // Create the interval BEFORE binding the abort signal so that a pre-aborted
   // signal triggers abortWriter() → clearInterval(intervalId) instead of
   // leaving the timer running forever (codex audit, follow-up to #864).
   intervalId = setInterval(() => {
-    writer.write(heartbeat).catch(() => abortWriter(new Error('SSE heartbeat write failed')));
+		writer
+			.write(heartbeat)
+			.catch(() => abortWriter(new Error("SSE heartbeat write failed")));
   }, SSE_HEARTBEAT_INTERVAL_MS);
 
   const detachAbortBridge = bindRequestAbortToStream(signal, adapter);
@@ -598,14 +648,17 @@ export function withSSEHeartbeat(response: Response, signal?: AbortSignal): Resp
           detachAbortBridge();
           abortWriter(reason);
         },
-      })
+			}),
     )
     .catch(() => {
       detachAbortBridge();
-      abortWriter(new Error('Source SSE stream error'));
+			abortWriter(new Error("Source SSE stream error"));
     });
 
-  return new Response(readable, { status: response.status, headers: response.headers });
+	return new Response(readable, {
+		status: response.status,
+		headers: response.headers,
+	});
 }
 
 // Wrap transport.handleRequest: if the client didn't ask for SSE, convert the
@@ -613,10 +666,13 @@ export function withSSEHeartbeat(response: Response, signal?: AbortSignal): Resp
 async function handleAndMaybeConvert(
   transport: WebStandardStreamableHTTPServerTransport,
   req: Request,
-  wantsSSE: boolean
+	wantsSSE: boolean,
 ): Promise<Response> {
   const response = await transport.handleRequest(req);
-  if (!wantsSSE && response.headers.get('content-type')?.includes('text/event-stream')) {
+	if (
+		!wantsSSE &&
+		response.headers.get("content-type")?.includes("text/event-stream")
+	) {
     return sseToJson(response);
   }
   // Inject SSE heartbeat pings to keep the stream alive through proxies.
@@ -631,21 +687,23 @@ async function handleAndMaybeConvert(
 
 async function resolveAuthWithInstructions(
   c: Context<{ Bindings: Env }>,
-  req?: Request
+	req?: Request,
 ): Promise<AuthContext & { instructions?: string }> {
-  const authCtx: AuthContext & { instructions?: string } = extractAuthContext(c);
+	const authCtx: AuthContext & { instructions?: string } =
+		extractAuthContext(c);
   if (req) {
     const initialize = await readInitializeRequest(req);
     authCtx.requestedAgentId = initialize?.requestedAgentId ?? null;
   }
   if (authCtx.organizationId) {
-    authCtx.instructions = (await buildWorkspaceInstructions(authCtx.organizationId)) ?? undefined;
+		authCtx.instructions =
+			(await buildWorkspaceInstructions(authCtx.organizationId)) ?? undefined;
   }
   return authCtx;
 }
 
 async function syncAgentBinding(
-  authCtx: AuthContext & { instructions?: string }
+	authCtx: AuthContext & { instructions?: string },
 ): Promise<string | null> {
   // SHIFU FORK: capture the token-derived agentId BEFORE the reset below.
   // `extractAuthContext` threads it from `mcpAuthInfo.agentId`, which the
@@ -666,16 +724,19 @@ async function syncAgentBinding(
     return null;
   }
   if (!isValidAgentId(requestedAgentId)) {
-    return 'agentId must be 3-60 lowercase alphanumeric chars with hyphens, starting with a letter';
+		return "agentId must be 3-60 lowercase alphanumeric chars with hyphens, starting with a letter";
   }
   if (!authCtx.isAuthenticated) {
-    return 'Authentication required to bind MCP sessions to an agent.';
+		return "Authentication required to bind MCP sessions to an agent.";
   }
   if (!authCtx.organizationId) {
     return null;
   }
 
-  const exists = await agentExistsInOrganization(authCtx.organizationId, requestedAgentId);
+	const exists = await agentExistsInOrganization(
+		authCtx.organizationId,
+		requestedAgentId,
+	);
   if (!exists) {
     return `Agent '${requestedAgentId}' was not found in the current organization.`;
   }
@@ -683,7 +744,9 @@ async function syncAgentBinding(
   try {
     await authorizeMemoryAgentOwner(authCtx, requestedAgentId);
   } catch (error) {
-    return error instanceof Error ? error.message : 'memory_scope_mismatch: agent binding denied';
+		return error instanceof Error
+			? error.message
+			: "memory_scope_mismatch: agent binding denied";
   }
 
   // SHIFU FORK: when the token itself carries an agent identity, it wins for
@@ -701,12 +764,17 @@ async function syncAgentBinding(
 function createSessionTransport(
   env: Env,
   authCtx: SessionAuthContext,
-  sessionIdGenerator: () => string
+	sessionIdGenerator: () => string,
 ): { transport: WebStandardStreamableHTTPServerTransport; server: Server } {
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator,
     onsessioninitialized: (id) => {
-      sessions.set(id, { transport, server, authCtx, lastAccessedAt: Date.now() });
+			sessions.set(id, {
+				transport,
+				server,
+				authCtx,
+				lastAccessedAt: Date.now(),
+			});
     },
   });
   transport.onclose = () => {
@@ -722,32 +790,38 @@ function createSessionTransport(
 async function initializeRecoveredSession(
   transport: WebStandardStreamableHTTPServerTransport,
   sessionId: string,
-  url: string
+	url: string,
 ): Promise<void> {
   const initReq = new Request(url, {
-    method: 'POST',
-    headers: new Headers({ 'content-type': 'application/json', accept: FULL_MCP_ACCEPT }),
+		method: "POST",
+		headers: new Headers({
+			"content-type": "application/json",
+			accept: FULL_MCP_ACCEPT,
+		}),
     body: JSON.stringify({
-      jsonrpc: '2.0',
-      method: 'initialize',
+			jsonrpc: "2.0",
+			method: "initialize",
       params: {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: 'session-recovery', version: '1.0' },
+				clientInfo: { name: "session-recovery", version: "1.0" },
       },
-      id: '__recovery_init__',
+			id: "__recovery_init__",
     }),
   });
   await transport.handleRequest(initReq);
 
   const notifyReq = new Request(url, {
-    method: 'POST',
+		method: "POST",
     headers: new Headers({
-      'content-type': 'application/json',
+			"content-type": "application/json",
       accept: FULL_MCP_ACCEPT,
-      'mcp-session-id': sessionId,
+			"mcp-session-id": sessionId,
+		}),
+		body: JSON.stringify({
+			jsonrpc: "2.0",
+			method: "notifications/initialized",
     }),
-    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
   });
   await transport.handleRequest(notifyReq);
 }
@@ -756,11 +830,13 @@ async function initializeRecoveredSession(
 // Hono route handler – delegates to the SDK transport
 // ---------------------------------------------------------------------------
 
-export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response> {
+export async function handleMcp(
+	c: Context<{ Bindings: Env }>,
+): Promise<Response> {
   const wantsSSE = clientAcceptsSSE(c.req.raw);
   const req = normalizeAcceptHeader(c.req.raw);
-  const sessionId = req.headers.get('mcp-session-id') ?? undefined;
-  formatRef.rawJson = req.headers.get('x-mcp-format')?.toLowerCase() === 'json';
+	const sessionId = req.headers.get("mcp-session-id") ?? undefined;
+	formatRef.rawJson = req.headers.get("x-mcp-format")?.toLowerCase() === "json";
 
   // Existing session → reuse
   if (sessionId && sessions.has(sessionId)) {
@@ -778,17 +854,27 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       const freshCtx = extractAuthContext(c);
 
       if (session.authCtx.isAuthenticated) {
-        if (session.authCtx.userId && freshCtx.userId !== session.authCtx.userId) {
+				if (
+					session.authCtx.userId &&
+					freshCtx.userId !== session.authCtx.userId
+				) {
           clearSession();
           return buildJsonRpcErrorResponse(
-            'Session authentication changed. Re-initialize.',
+						"Session authentication changed. Re-initialize.",
             null,
-            400
+						400,
           );
         }
-        if (session.authCtx.clientId && freshCtx.clientId !== session.authCtx.clientId) {
+				if (
+					session.authCtx.clientId &&
+					freshCtx.clientId !== session.authCtx.clientId
+				) {
           clearSession();
-          return buildJsonRpcErrorResponse('Session client changed. Re-initialize.', null, 400);
+					return buildJsonRpcErrorResponse(
+						"Session client changed. Re-initialize.",
+						null,
+						400,
+					);
         }
       }
 
@@ -809,52 +895,56 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       // Per-call capability: always overwrite, including false, so a prior
       // reminder call cannot lend delivery authority to the next MCP call on
       // the same session.
-      session.authCtx.personalReminderDeliveryIntent =
-        freshCtx.personalReminderDeliveryIntent === true;
+      refreshPerRequestCapabilityContext(session.authCtx, freshCtx);
 
       if (session.authCtx.scopedToOrg) {
         if (freshCtx.organizationId !== session.authCtx.organizationId) {
           clearSession();
           return buildJsonRpcErrorResponse(
-            'Session organization changed. Re-initialize.',
+						"Session organization changed. Re-initialize.",
             null,
-            400
+						400,
           );
         }
         session.authCtx.memberRole = freshCtx.memberRole;
         session.authCtx.instructions = freshCtx.organizationId
-          ? ((await buildWorkspaceInstructions(freshCtx.organizationId)) ?? undefined)
+					? ((await buildWorkspaceInstructions(freshCtx.organizationId)) ??
+						undefined)
           : undefined;
       } else if (session.authCtx.organizationId && freshCtx.userId) {
         session.authCtx.memberRole = await resolveMembershipRole(
           c.env,
           session.authCtx.organizationId,
-          freshCtx.userId
+					freshCtx.userId,
         );
         if (!session.authCtx.memberRole) {
           clearSession();
           return buildJsonRpcErrorResponse(
-            'Your organization access changed. Re-initialize the session.',
+						"Your organization access changed. Re-initialize the session.",
             null,
-            400
+						400,
           );
         }
       }
     }
 
     await recordMcpClientActivity(c.env, session.authCtx, req);
-    await persistSessionState(sessionId, session.authCtx, session.lastAccessedAt);
+		await persistSessionState(
+			sessionId,
+			session.authCtx,
+			session.lastAccessedAt,
+		);
 
     // Anonymous root /mcp session: any follow-up GET or tool call must upgrade to auth.
     if (!session.authCtx.organizationId && !session.authCtx.isAuthenticated) {
-      const toolCall = req.method === 'POST' ? await readToolCall(req) : null;
-      if (req.method === 'GET' || toolCall) {
+			const toolCall = req.method === "POST" ? await readToolCall(req) : null;
+			if (req.method === "GET" || toolCall) {
         clearSession();
         return buildUnauthorizedResponse(
           req,
-          req.method === 'GET'
-            ? 'Authentication required for MCP stream access.'
-            : 'Authentication required for tool calls.'
+					req.method === "GET"
+						? "Authentication required for MCP stream access."
+						: "Authentication required for tool calls.",
         );
       }
     }
@@ -864,12 +954,15 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       session.authCtx.organizationId &&
       !session.authCtx.isAuthenticated &&
       !session.authCtx.memberRole &&
-      req.method === 'POST'
+			req.method === "POST"
     ) {
       const toolCall = await readToolCall(req);
       if (toolCall && !isPublicReadable(toolCall.name, toolCall.args)) {
         clearSession();
-        return buildUnauthorizedResponse(req, 'Authentication required for this tool.');
+				return buildUnauthorizedResponse(
+					req,
+					"Authentication required for this tool.",
+				);
       }
     }
 
@@ -877,18 +970,18 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
   }
 
   // Stale session ID with non-initialize request → require a fresh initialize.
-  if (sessionId && !sessions.has(sessionId) && req.method === 'POST') {
+	if (sessionId && !sessions.has(sessionId) && req.method === "POST") {
     try {
       const body = await req.clone().json();
       const messages = Array.isArray(body) ? body : [body];
-      const isInitialize = messages.some((m: any) => m.method === 'initialize');
+			const isInitialize = messages.some((m: any) => m.method === "initialize");
       if (!isInitialize) {
         const recoveredAuthCtx = await recoverSessionAuthContext(c, sessionId);
         if (recoveredAuthCtx) {
           const { transport, server } = createSessionTransport(
             c.env,
             recoveredAuthCtx,
-            () => sessionId
+						() => sessionId,
           );
           await server.connect(transport);
           await initializeRecoveredSession(transport, sessionId, req.url);
@@ -899,9 +992,9 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
 
         await deletePersistedSession(sessionId);
         return buildJsonRpcErrorResponse(
-          'Session not found. Send an initialize POST first.',
+					"Session not found. Send an initialize POST first.",
           null,
-          400
+					400,
         );
       }
     } catch {
@@ -910,7 +1003,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
   }
 
   // New session (initialize request)
-  if (req.method === 'POST') {
+	if (req.method === "POST") {
     const initialize = await readInitializeRequest(req);
     const authCtx = await resolveAuthWithInstructions(c, req);
 
@@ -922,35 +1015,42 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
     if (!authCtx.isAuthenticated && !authCtx.scopedToOrg) {
       return buildUnauthorizedResponse(
         req,
-        'Authentication required for the unscoped /mcp endpoint. OAuth via the resource metadata advertised in WWW-Authenticate, or connect to /mcp/{workspace-slug} for public workspace browse.'
+				"Authentication required for the unscoped /mcp endpoint. OAuth via the resource metadata advertised in WWW-Authenticate, or connect to /mcp/{workspace-slug} for public workspace browse.",
       );
     }
 
     if (
       authCtx.isAuthenticated &&
       authCtx.userId &&
-      authCtx.tokenType !== 'session' &&
-      authCtx.tokenType !== 'anonymous' &&
+			authCtx.tokenType !== "session" &&
+			authCtx.tokenType !== "anonymous" &&
       !authCtx.tokenOrganizationId
     ) {
-      const reauthOrigin = getConfiguredPublicOrigin() ?? new URL(req.url).origin;
+			const reauthOrigin =
+				getConfiguredPublicOrigin() ?? new URL(req.url).origin;
       const remediation =
-        authCtx.tokenType === 'pat'
+				authCtx.tokenType === "pat"
           ? `Reissue this PAT bound to a workspace with \`lobu token create --org <workspace>\` against ${reauthOrigin}.`
           : `Re-authorize the OAuth client and pick a workspace at ${reauthOrigin}/oauth/authorize.`;
       return buildJsonRpcErrorResponse(
         `This token has no organization binding and cannot connect to /mcp. ${remediation}`,
         initialize?.id ?? null,
-        400
+				400,
       );
     }
 
     const bindingError = await syncAgentBinding(authCtx);
     if (bindingError) {
-      return buildJsonRpcErrorResponse(bindingError, initialize?.id ?? null, 400);
+			return buildJsonRpcErrorResponse(
+				bindingError,
+				initialize?.id ?? null,
+				400,
+			);
     }
     await recordMcpClientActivity(c.env, authCtx, req, initialize);
-    const { transport, server } = createSessionTransport(c.env, authCtx, () => randomUUID());
+		const { transport, server } = createSessionTransport(c.env, authCtx, () =>
+			randomUUID(),
+		);
     await server.connect(transport);
     const response = await handleAndMaybeConvert(transport, req, wantsSSE);
     await persistSessionState(transport.sessionId, authCtx);
@@ -958,19 +1058,29 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
   }
 
   // GET without valid session
-  if (req.method === 'GET') {
+	if (req.method === "GET") {
     return new Response(
       JSON.stringify({
-        jsonrpc: '2.0',
+				jsonrpc: "2.0",
         error: {
           code: -32000,
-          message: 'Invalid or missing session. Send an initialize POST first.',
+					message: "Invalid or missing session. Send an initialize POST first.",
         },
         id: null,
       }),
-      { status: 400, headers: { 'Content-Type': 'application/json' } }
+			{ status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
 
-  return new Response('Method not allowed', { status: 405 });
+	return new Response("Method not allowed", { status: 405 });
+}
+
+/** Security-sensitive per-call fields must overwrite, including absence. */
+export function refreshPerRequestCapabilityContext(
+	current: Pick<AuthContext, "personalReminderDeliveryIntent" | "releaseState">,
+	fresh: Pick<AuthContext, "personalReminderDeliveryIntent" | "releaseState">,
+): void {
+  current.personalReminderDeliveryIntent =
+    fresh.personalReminderDeliveryIntent === true;
+	current.releaseState = fresh.releaseState;
 }

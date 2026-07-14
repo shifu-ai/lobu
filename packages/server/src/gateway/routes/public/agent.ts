@@ -465,8 +465,9 @@ export interface AgentApiConfig {
   durableCompletionLookup?: DurableCompletionLookup;
   approveToolCall?: (
     requestId: string,
-    decision: string
-  ) => Promise<{ success: boolean; error?: string }>;
+    decision: string,
+    caller: { userId?: string; organizationId?: string; agentId?: string },
+  ) => Promise<{ success: boolean; error?: string; status?: 400 | 403 }>;
 }
 
 export type DurableMessageCompletion =
@@ -1638,7 +1639,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
   if (config.approveToolCall) {
     const approveHandler = config.approveToolCall;
     app.post("/api/v1/agents/approve", async (c) => {
-      const { requestId, decision } = await c.req.json();
+      const { requestId, decision, agentId } = await c.req.json();
       if (!requestId || !decision) {
         return errorResponse(c, "Missing requestId or decision", 400);
       }
@@ -1650,9 +1651,16 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
           400
         );
       }
-      const result = await approveHandler(requestId, decision);
+      const authContext = c.get("authContext");
+      const result = await approveHandler(requestId, decision, {
+        userId: authContext?.userId,
+        organizationId:
+          (c.get("organizationId") as string | undefined) ??
+          authContext?.organizationId,
+        agentId: typeof agentId === "string" ? agentId : undefined,
+      });
       if (!result.success) {
-        return errorResponse(c, result.error || "Approval failed", 400);
+        return errorResponse(c, result.error || "Approval failed", result.status ?? 400);
       }
       return c.json({ success: true });
     });

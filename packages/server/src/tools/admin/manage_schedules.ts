@@ -18,15 +18,16 @@
  * list / pause its own schedules without holding extra state.
  */
 
-import { type Static, Type } from '@sinclair/typebox';
-import { TypeCompiler } from '@sinclair/typebox/compiler';
-import type { Env } from '../../index';
-import { isPrivilegedToolContext, routeAction } from './action-router';
-import { getDb } from '../../db/client';
+import { type Static, Type } from "@sinclair/typebox";
+import { TypeCompiler } from "@sinclair/typebox/compiler";
+import type { Env } from "../../index";
+import { isPrivilegedToolContext, routeAction } from "./action-router";
+import { getDb } from "../../db/client";
 import {
   activateScheduledJobByExternalKey,
   countActiveScheduledJobs,
   createScheduledJob,
+	createScheduledJobWithGuards,
   deleteScheduledJob,
   getScheduledJob,
   getScheduledJobByExternalKey,
@@ -36,11 +37,11 @@ import {
   stageScheduledJobByExternalKey,
   type ScheduledJobRow,
   upsertScheduledJobByExternalKeyWithQuota,
-} from '../../scheduled/scheduled-jobs-service';
-import type { ToolContext } from '../registry';
-import logger from '../../utils/logger';
-import { nextRunAt as nextCronTickAt } from '../../utils/cron';
-import { buildTrustedPersonalReminder } from '../../scheduled/personal-reminder';
+} from "../../scheduled/scheduled-jobs-service";
+import type { ToolContext } from "../registry";
+import logger from "../../utils/logger";
+import { nextRunAt as nextCronTickAt } from "../../utils/cron";
+import { buildTrustedPersonalReminder } from "../../scheduled/personal-reminder";
 
 // SHIFU FORK: member-scope-internal-tools plan, Task 3. Member-owned
 // direct-auth sessions (see 1c52bc33) can reach this tool, but must be
@@ -53,21 +54,21 @@ const MEMBER_SCHEDULE_QUOTA = 20;
 // ============================================
 
 const SendNotificationArgs = Type.Object({
-  type: Type.Literal('send_notification'),
+	type: Type.Literal("send_notification"),
   title: Type.String({ minLength: 1, maxLength: 200 }),
   body: Type.Optional(Type.String({ maxLength: 1000 })),
   recipients: Type.Optional(
     Type.Union([
-      Type.Literal('admins'),
-      Type.Literal('all'),
+			Type.Literal("admins"),
+			Type.Literal("all"),
       Type.Array(Type.String()),
-    ])
+		]),
   ),
   resource_url: Type.Optional(Type.String()),
 });
 
 const WakeAgentArgs = Type.Object({
-  type: Type.Literal('wake_agent'),
+	type: Type.Literal("wake_agent"),
   agent_id: Type.String({ minLength: 1 }),
   prompt: Type.String({ minLength: 1, maxLength: 4000 }),
   thread_id: Type.Optional(Type.String()),
@@ -75,19 +76,24 @@ const WakeAgentArgs = Type.Object({
 });
 
 const ActionUnion = Type.Union([SendNotificationArgs, WakeAgentArgs]);
-const CreationKey = Type.String({ minLength: 1, maxLength: 200, pattern: '\\S' });
+const CreationKey = Type.String({
+	minLength: 1,
+	maxLength: 200,
+	pattern: "\\S",
+});
 
 const CreateAction = Type.Object({
-  action: Type.Literal('create'),
+	action: Type.Literal("create"),
   description: Type.String({ minLength: 1, maxLength: 200 }),
   creation_key: Type.Optional(CreationKey),
-  initial_state: Type.Optional(Type.Literal('staged')),
+	initial_state: Type.Optional(Type.Literal("staged")),
   /**
    * RFC3339 timestamp for the first (or only) firing. Required.
    * For one-shot schedules this is the only firing.
    */
   run_at: Type.String({
-    description: "ISO timestamp for the first / only firing (e.g. '2026-05-15T09:00:00Z').",
+		description:
+			"ISO timestamp for the first / only firing (e.g. '2026-05-15T09:00:00Z').",
   }),
   /**
    * Cron expression. When set, the job re-fires on this cron after
@@ -95,7 +101,9 @@ const CreateAction = Type.Object({
    */
   cron: Type.Optional(Type.String()),
   until_at: Type.Optional(
-    Type.String({ description: 'ISO timestamp after which a recurring job must not fire.' })
+		Type.String({
+			description: "ISO timestamp after which a recurring job must not fire.",
+		}),
   ),
   /** Handler-specific payload. The `type` field selects the handler. */
   payload: ActionUnion,
@@ -109,7 +117,7 @@ const CreateAction = Type.Object({
 });
 
 const ListAction = Type.Object({
-  action: Type.Literal('list'),
+	action: Type.Literal("list"),
   agent_id: Type.Optional(Type.String()),
   user_id: Type.Optional(Type.String()),
   action_type: Type.Optional(Type.String()),
@@ -117,25 +125,25 @@ const ListAction = Type.Object({
 });
 
 const PauseAction = Type.Object({
-  action: Type.Literal('pause'),
-  id: Type.String({ format: 'uuid' }),
+	action: Type.Literal("pause"),
+	id: Type.String({ format: "uuid" }),
   paused: Type.Optional(Type.Boolean({ default: true })),
 });
 
 const CancelAction = Type.Object({
-  action: Type.Literal('cancel'),
-  id: Type.String({ format: 'uuid' }),
+	action: Type.Literal("cancel"),
+	id: Type.String({ format: "uuid" }),
 });
 
 const GetByCreationKeyAction = Type.Object({
-  action: Type.Literal('get_by_creation_key'),
+	action: Type.Literal("get_by_creation_key"),
   creation_key: CreationKey,
 });
 
 const ActivateAction = Type.Object({
-  action: Type.Literal('activate'),
+	action: Type.Literal("activate"),
   creation_key: CreationKey,
-  expected_schedule_id: Type.String({ format: 'uuid' }),
+	expected_schedule_id: Type.String({ format: "uuid" }),
 });
 
 /**
@@ -147,28 +155,34 @@ const ActivateAction = Type.Object({
  */
 export const ManageSchedulesSchema = Type.Object({
   action: Type.String({
-    description: "One of 'create', 'get_by_creation_key', 'activate', 'list', 'pause', 'cancel'.",
+		description:
+			"One of 'create', 'get_by_creation_key', 'activate', 'list', 'pause', 'cancel'.",
   }),
   // create
   description: Type.Optional(Type.String({ maxLength: 200 })),
   creation_key: Type.Optional(CreationKey),
   initial_state: Type.Optional(
-    Type.Literal('staged', {
-      description: 'Persist without allowing execution until a later activate action.',
-    })
+		Type.Literal("staged", {
+			description:
+				"Persist without allowing execution until a later activate action.",
+		}),
   ),
   expected_schedule_id: Type.Optional(Type.String()),
   run_at: Type.Optional(
     Type.String({
       description:
         "ISO timestamp for the first / only firing (must be in the future, e.g. '2026-05-15T09:00:00Z'). Optional when cron is set.",
-    })
+		}),
   ),
   cron: Type.Optional(
-    Type.String({ description: 'Cron expression for recurring jobs. Omit for one-shot.' })
+		Type.String({
+			description: "Cron expression for recurring jobs. Omit for one-shot.",
+		}),
   ),
   until_at: Type.Optional(
-    Type.String({ description: 'ISO timestamp after which a recurring job must not fire.' })
+		Type.String({
+			description: "ISO timestamp after which a recurring job must not fire.",
+		}),
   ),
   payload: Type.Optional(
     Type.Object(
@@ -177,20 +191,27 @@ export const ManageSchedulesSchema = Type.Object({
         additionalProperties: true,
         description:
           "Handler payload. {type:'wake_agent', agent_id, prompt} or {type:'send_notification', title, body?, recipients?}.",
-      }
-    )
+			},
+		),
   ),
   // Flattened create fields — accepted as an alternative to payload.
   action_type: Type.Optional(
-    Type.String({ description: "'wake_agent' or 'send_notification' (alternative to payload.type)." })
+		Type.String({
+			description:
+				"'wake_agent' or 'send_notification' (alternative to payload.type).",
+		}),
   ),
   agent_id: Type.Optional(
-    Type.String({ description: 'wake_agent target agent id; also the list filter.' })
+		Type.String({
+			description: "wake_agent target agent id; also the list filter.",
+		}),
   ),
-  prompt: Type.Optional(Type.String({ description: 'wake_agent prompt.' })),
+	prompt: Type.Optional(Type.String({ description: "wake_agent prompt." })),
   thread_id: Type.Optional(Type.String()),
   reason: Type.Optional(Type.String()),
-  title: Type.Optional(Type.String({ description: 'send_notification title.' })),
+	title: Type.Optional(
+		Type.String({ description: "send_notification title." }),
+	),
   body: Type.Optional(Type.String()),
   recipients: Type.Optional(Type.Unknown()),
   resource_url: Type.Optional(Type.String()),
@@ -237,6 +258,7 @@ interface ToolResult {
  */
 export interface ManageSchedulesDeps {
   createScheduledJob: typeof createScheduledJob;
+	createScheduledJobWithGuards: typeof createScheduledJobWithGuards;
   upsertScheduledJobByExternalKeyWithQuota: typeof upsertScheduledJobByExternalKeyWithQuota;
   stageScheduledJobByExternalKey: typeof stageScheduledJobByExternalKey;
   getScheduledJobByExternalKey: typeof getScheduledJobByExternalKey;
@@ -250,7 +272,7 @@ export interface ManageSchedulesDeps {
   agentOwnedByUser: (
     organizationId: string,
     userId: string | null,
-    agentId: string
+		agentId: string,
   ) => Promise<boolean>;
   /**
    * SHIFU FORK: member-scope-internal-tools plan, Task 3 follow-up. Resolve
@@ -260,13 +282,16 @@ export interface ManageSchedulesDeps {
    * value untouched in that case (existing "unknown agent" behavior, not a
    * new error path).
    */
-  resolveWakeAgentId: (organizationId: string, rawAgentId: string) => Promise<string | null>;
+	resolveWakeAgentId: (
+		organizationId: string,
+		rawAgentId: string,
+	) => Promise<string | null>;
 }
 
 async function dbAgentOwnedByUser(
   organizationId: string,
   userId: string | null,
-  agentId: string
+	agentId: string,
 ): Promise<boolean> {
   if (!userId) return false;
   const sql = getDb();
@@ -281,13 +306,14 @@ async function dbAgentOwnedByUser(
 
 async function dbResolveWakeAgentId(
   organizationId: string,
-  rawAgentId: string
+	rawAgentId: string,
 ): Promise<string | null> {
   return resolveWakeAgentId(getDb(), organizationId, rawAgentId);
 }
 
 export const defaultManageSchedulesDeps: ManageSchedulesDeps = {
   createScheduledJob,
+	createScheduledJobWithGuards,
   upsertScheduledJobByExternalKeyWithQuota,
   stageScheduledJobByExternalKey,
   getScheduledJobByExternalKey,
@@ -305,23 +331,45 @@ export async function manageSchedules(
   args: ManageSchedulesArgs,
   _env: Env,
   ctx: ToolContext,
-  deps: ManageSchedulesDeps = defaultManageSchedulesDeps
+	deps: ManageSchedulesDeps = defaultManageSchedulesDeps,
 ): Promise<ToolResult> {
-  return routeAction('manage_schedules', args.action, ctx, {
+	return routeAction("manage_schedules", args.action, ctx, {
     create: () =>
-      handleCreate(args as Extract<ManageSchedulesArgs, { action: 'create' }>, ctx, deps),
+			handleCreate(
+				args as Extract<ManageSchedulesArgs, { action: "create" }>,
+				ctx,
+				deps,
+			),
     get_by_creation_key: () =>
       handleGetByCreationKey(
-        args as Extract<ManageSchedulesArgs, { action: 'get_by_creation_key' }>,
+				args as Extract<ManageSchedulesArgs, { action: "get_by_creation_key" }>,
         ctx,
-        deps
+				deps,
       ),
     activate: () =>
-      handleActivate(args as Extract<ManageSchedulesArgs, { action: 'activate' }>, ctx, deps),
-    list: () => handleList(args as Extract<ManageSchedulesArgs, { action: 'list' }>, ctx, deps),
-    pause: () => handlePause(args as Extract<ManageSchedulesArgs, { action: 'pause' }>, ctx, deps),
+			handleActivate(
+				args as Extract<ManageSchedulesArgs, { action: "activate" }>,
+				ctx,
+				deps,
+			),
+		list: () =>
+			handleList(
+				args as Extract<ManageSchedulesArgs, { action: "list" }>,
+				ctx,
+				deps,
+			),
+		pause: () =>
+			handlePause(
+				args as Extract<ManageSchedulesArgs, { action: "pause" }>,
+				ctx,
+				deps,
+			),
     cancel: () =>
-      handleCancel(args as Extract<ManageSchedulesArgs, { action: 'cancel' }>, ctx, deps),
+			handleCancel(
+				args as Extract<ManageSchedulesArgs, { action: "cancel" }>,
+				ctx,
+				deps,
+			),
   });
 }
 
@@ -332,7 +380,7 @@ export async function manageSchedules(
  * the real error.
  */
 export function coerceSchedulePayload(payload: unknown): unknown {
-  if (typeof payload === 'string') {
+	if (typeof payload === "string") {
     try {
       return JSON.parse(payload) as unknown;
     } catch {
@@ -343,25 +391,35 @@ export function coerceSchedulePayload(payload: unknown): unknown {
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-const WAKE_AGENT_FIELDS = ['agent_id', 'prompt', 'thread_id', 'reason'] as const;
+const WAKE_AGENT_FIELDS = [
+	"agent_id",
+	"prompt",
+	"thread_id",
+	"reason",
+] as const;
 const RESERVED_WAKE_TRUST_KEYS = new Set([
-  'trustedcoursewake',
-  'trustedcoursescope',
-  'trustedcoursewakeprovenance',
-  'trustedprovenance',
-  'internaltrustedprovenance',
-  'internaltrustedcoursewake',
-  'internaltrustedcoursewakeprovenance',
-  'personalreminder',
-  'personalreminderdelivery',
-  'personalreminderprovenance',
-  'trustedpersonalreminder',
-  'deliveryintent',
+	"trustedcoursewake",
+	"trustedcoursescope",
+	"trustedcoursewakeprovenance",
+	"trustedprovenance",
+	"internaltrustedprovenance",
+	"internaltrustedcoursewake",
+	"internaltrustedcoursewakeprovenance",
+	"personalreminder",
+	"personalreminderdelivery",
+	"personalreminderprovenance",
+	"trustedpersonalreminder",
+	"deliveryintent",
 ]);
-const NOTIFICATION_FIELDS = ['title', 'body', 'recipients', 'resource_url'] as const;
+const NOTIFICATION_FIELDS = [
+	"title",
+	"body",
+	"recipients",
+	"resource_url",
+] as const;
 
 /**
  * Models flying blind on the projected schema flatten payload fields to the
@@ -369,34 +427,38 @@ const NOTIFICATION_FIELDS = ['title', 'body', 'recipients', 'resource_url'] as c
  * whatever arrived: parse string payloads, honour payload.type / action_type
  * aliases, and lift flattened fields into the payload.
  */
-export function normalizeCreateArgs(raw: Record<string, unknown>): Record<string, unknown> {
+export function normalizeCreateArgs(
+	raw: Record<string, unknown>,
+): Record<string, unknown> {
   const args = { ...raw };
-  if (typeof args.creation_key === 'string') {
+	if (typeof args.creation_key === "string") {
     args.creation_key = args.creation_key.trim();
   }
   const coerced = coerceSchedulePayload(args.payload);
-  const payload: Record<string, unknown> = isPlainRecord(coerced) ? { ...coerced } : {};
+	const payload: Record<string, unknown> = isPlainRecord(coerced)
+		? { ...coerced }
+		: {};
 
-  if (typeof payload.type !== 'string' || payload.type.length === 0) {
+	if (typeof payload.type !== "string" || payload.type.length === 0) {
     const alias = [payload.action_type, args.action_type].find(
-      (v): v is string => typeof v === 'string' && v.length > 0
+			(v): v is string => typeof v === "string" && v.length > 0,
     );
     if (alias) payload.type = alias;
   }
   delete payload.action_type;
   delete args.action_type;
 
-  if (typeof payload.type !== 'string' || payload.type.length === 0) {
-    if (typeof args.prompt === 'string' || typeof args.agent_id === 'string') {
-      payload.type = 'wake_agent';
-    } else if (typeof args.title === 'string') {
-      payload.type = 'send_notification';
+	if (typeof payload.type !== "string" || payload.type.length === 0) {
+		if (typeof args.prompt === "string" || typeof args.agent_id === "string") {
+			payload.type = "wake_agent";
+		} else if (typeof args.title === "string") {
+			payload.type = "send_notification";
     }
   }
 
-  if (payload.type === 'wake_agent') {
+	if (payload.type === "wake_agent") {
     for (const key of Object.keys(payload)) {
-      const normalizedKey = key.toLowerCase().replace(/[^a-z]/g, '');
+			const normalizedKey = key.toLowerCase().replace(/[^a-z]/g, "");
       if (RESERVED_WAKE_TRUST_KEYS.has(normalizedKey)) {
         delete payload[key];
       }
@@ -404,7 +466,9 @@ export function normalizeCreateArgs(raw: Record<string, unknown>): Record<string
   }
 
   const liftFields =
-    payload.type === 'send_notification' ? NOTIFICATION_FIELDS : WAKE_AGENT_FIELDS;
+		payload.type === "send_notification"
+			? NOTIFICATION_FIELDS
+			: WAKE_AGENT_FIELDS;
   for (const field of liftFields) {
     if (payload[field] === undefined && args[field] !== undefined) {
       payload[field] = args[field];
@@ -415,7 +479,10 @@ export function normalizeCreateArgs(raw: Record<string, unknown>): Record<string
   }
 
   // run_at omitted for a cron job: derive the first firing from the cron.
-  if ((args.run_at === undefined || args.run_at === '') && typeof args.cron === 'string') {
+	if (
+		(args.run_at === undefined || args.run_at === "") &&
+		typeof args.cron === "string"
+	) {
     try {
       args.run_at = nextCronTickAt(args.cron);
     } catch {
@@ -431,39 +498,44 @@ const CREATE_SHAPE_HINT =
   "Expected create shape: {action:'create', description, run_at:'<future ISO>', cron?, until_at?, payload:{type:'wake_agent', agent_id, prompt} | {type:'send_notification', title, body?, recipients?}}. Flattened fields (action_type/agent_id/prompt/title/body) are also accepted in place of payload.";
 
 async function handleCreate(
-  rawArgs: Extract<ManageSchedulesArgs, { action: 'create' }>,
+	rawArgs: Extract<ManageSchedulesArgs, { action: "create" }>,
   ctx: ToolContext,
-  deps: ManageSchedulesDeps
+	deps: ManageSchedulesDeps,
 ): Promise<ToolResult> {
-  const deliveryIntent = (rawArgs as unknown as Record<string, unknown>).delivery_intent;
+	const deliveryIntent = (rawArgs as unknown as Record<string, unknown>)
+		.delivery_intent;
   const hasPersonalReminderDeliveryMarker =
     isPlainRecord(deliveryIntent) &&
     Object.keys(deliveryIntent).length === 2 &&
-    deliveryIntent.contract === 'personal_reminder_delivery.v1' &&
-    deliveryIntent.destination === 'personal_reminder';
-  const sanitizedRawArgs = { ...(rawArgs as unknown as Record<string, unknown>) };
+		deliveryIntent.contract === "personal_reminder_delivery.v1" &&
+		deliveryIntent.destination === "personal_reminder";
+	const sanitizedRawArgs = {
+		...(rawArgs as unknown as Record<string, unknown>),
+	};
   delete sanitizedRawArgs.delivery_intent;
   if (isPlainRecord(sanitizedRawArgs.payload)) {
     sanitizedRawArgs.payload = { ...sanitizedRawArgs.payload };
-    delete (sanitizedRawArgs.payload as Record<string, unknown>).delivery_intent;
+		delete (sanitizedRawArgs.payload as Record<string, unknown>)
+			.delivery_intent;
   }
-  const args = normalizeCreateArgs(
-    sanitizedRawArgs
-  ) as unknown as Extract<ManageSchedulesArgs, { action: 'create' }>;
+	const args = normalizeCreateArgs(sanitizedRawArgs) as unknown as Extract<
+		ManageSchedulesArgs,
+		{ action: "create" }
+	>;
   if (!createValidator.Check(args)) {
     const errs = [...createValidator.Errors(args)];
     return {
-      error: `Invalid args: ${errs.map((e) => `${e.path} ${e.message}`).join('; ')}. ${CREATE_SHAPE_HINT}`,
+			error: `Invalid args: ${errs.map((e) => `${e.path} ${e.message}`).join("; ")}. ${CREATE_SHAPE_HINT}`,
     };
   }
-  if (args.initial_state === 'staged' && !args.creation_key) {
-    return { error: 'initial_state staged requires a creation_key.' };
+	if (args.initial_state === "staged" && !args.creation_key) {
+		return { error: "initial_state staged requires a creation_key." };
   }
   if (args.creation_key && !ctx.userId) {
-    return { error: 'creation_key requires an authenticated user.' };
+		return { error: "creation_key requires an authenticated user." };
   }
   if (args.creation_key && !isPrivilegedToolContext(ctx)) {
-    return { error: 'Schedule creation keys require trusted access.' };
+		return { error: "Schedule creation keys require trusted access." };
   }
   const runAtDate = new Date(args.run_at);
   if (Number.isNaN(runAtDate.getTime())) {
@@ -474,7 +546,7 @@ async function handleCreate(
     return { error: `until_at is not a valid ISO timestamp: ${args.until_at}` };
   }
   if (untilAtDate && untilAtDate.getTime() < runAtDate.getTime()) {
-    return { error: 'until_at must be at or after run_at.' };
+		return { error: "until_at must be at or after run_at." };
   }
   // A stale timestamp usually means the model guessed the current time.
   // Return the server clock so it can self-correct on retry.
@@ -510,18 +582,18 @@ async function handleCreate(
   // value untouched — existing "unknown agent" handling (ownership-check
   // failure for members; unchanged persist for privileged roles) applies
   // unmodified.
-  if (args.payload.type === 'wake_agent') {
+	if (args.payload.type === "wake_agent") {
     const resolvedAgentId = await deps.resolveWakeAgentId(
       ctx.organizationId,
-      args.payload.agent_id
+			args.payload.agent_id,
     );
     if (resolvedAgentId) args.payload.agent_id = resolvedAgentId;
   }
   const isDirectAuthWake =
-    args.payload.type === 'wake_agent' &&
-    ctx.clientId === 'lobu-worker' &&
+		args.payload.type === "wake_agent" &&
+		ctx.clientId === "lobu-worker" &&
     ctx.isAuthenticated &&
-    ctx.tokenType === 'pat' &&
+		ctx.tokenType === "pat" &&
     ctx.userId &&
     ctx.agentId &&
     ctx.conversationId;
@@ -529,7 +601,7 @@ async function handleCreate(
     hasPersonalReminderDeliveryMarker &&
     ctx.personalReminderDeliveryIntent === true &&
     isDirectAuthWake &&
-    args.payload.type === 'wake_agent' &&
+		args.payload.type === "wake_agent" &&
     args.payload.agent_id === ctx.agentId &&
     args.payload.thread_id === ctx.conversationId
       ? buildTrustedPersonalReminder({
@@ -539,8 +611,9 @@ async function handleCreate(
           reminderContent: args.payload.prompt,
         })
       : null;
-  if (trustedPersonalReminder && args.payload.type === 'wake_agent') {
-    (args.payload as Record<string, unknown>).personalReminder = trustedPersonalReminder;
+	if (trustedPersonalReminder && args.payload.type === "wake_agent") {
+		(args.payload as Record<string, unknown>).personalReminder =
+			trustedPersonalReminder;
   }
   // SHIFU FORK: member self-scoping (member-scope-internal-tools plan, Task
   // 3). Members reach this tool only via a member-owned direct-auth session
@@ -548,27 +621,34 @@ async function handleCreate(
   // notification recipients, and a bounded active-schedule quota. Owner/admin
   // sessions are unrestricted.
   if (!isPrivilegedToolContext(ctx)) {
-    if (args.payload.type === 'wake_agent') {
+		if (args.payload.type === "wake_agent" && !trustedPersonalReminder) {
       const owned = await deps.agentOwnedByUser(
         ctx.organizationId,
         ctx.userId,
-        args.payload.agent_id
+				args.payload.agent_id,
       );
       if (!owned) {
-        return { error: 'Members can only schedule wakes for agents they own.' };
+				return {
+					error: "Members can only schedule wakes for agents they own.",
+				};
       }
     }
-    if (args.payload.type === 'send_notification') {
+		if (args.payload.type === "send_notification") {
       const recipients = args.payload.recipients;
-      if (recipients === 'all' || recipients === 'admins') {
-        return { error: 'Members can only send scheduled notifications to themselves.' };
+			if (recipients === "all" || recipients === "admins") {
+				return {
+					error: "Members can only send scheduled notifications to themselves.",
+				};
       }
       // Force the recipient list to the caller regardless of what was
       // requested — impossible to target another user via this path.
       args.payload.recipients = ctx.userId ? [ctx.userId] : recipients;
     }
-    if (!args.creation_key) {
-      const activeCount = await deps.countActiveScheduledJobs(ctx.organizationId, ctx.userId);
+		if (!args.creation_key && !trustedPersonalReminder) {
+			const activeCount = await deps.countActiveScheduledJobs(
+				ctx.organizationId,
+				ctx.userId,
+			);
       if (activeCount >= MEMBER_SCHEDULE_QUOTA) {
         return {
           error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${activeCount}.`,
@@ -580,7 +660,10 @@ async function handleCreate(
   // action_type comes from the payload's discriminant `type`.
   const actionType = args.payload.type;
   // Strip the discriminant before persisting — handlers know their own type.
-  const { type: _omit, ...actionArgs } = args.payload as Record<string, unknown> & {
+	const { type: _omit, ...actionArgs } = args.payload as Record<
+		string,
+		unknown
+	> & {
     type: string;
   };
 
@@ -601,43 +684,70 @@ async function handleCreate(
     sourceRunId: args.source_run_id ?? null,
     sourceEventId: args.source_event_id ?? null,
     sourceThreadId:
-      trustedPersonalReminder?.conversationId ??
-      args.source_thread_id ?? null,
+			trustedPersonalReminder?.conversationId ?? args.source_thread_id ?? null,
   };
   if (args.creation_key) {
-    if (args.initial_state === 'staged') {
+		if (args.initial_state === "staged") {
       const outcome = await deps.stageScheduledJobByExternalKey({
         ...createParams,
         externalKey: args.creation_key,
-        changeDetection: 'full',
+				changeDetection: "full",
       });
-      if (outcome.status === 'conflict') {
+			if (outcome.status === "conflict") {
         return {
-          status: 'conflict',
-          error: 'A different schedule already uses this creation_key.',
+					status: "conflict",
+					error: "A different schedule already uses this creation_key.",
         };
       }
-      return { status: outcome.job.state, schedule: serializeSchedule(outcome.job) };
+			return {
+				status: outcome.job.state,
+				schedule: serializeSchedule(outcome.job),
+			};
     }
     const outcome = await deps.upsertScheduledJobByExternalKeyWithQuota({
       ...createParams,
       externalKey: args.creation_key,
-      changeDetection: 'full',
-      activeQuota: isPrivilegedToolContext(ctx) ? undefined : MEMBER_SCHEDULE_QUOTA,
+			changeDetection: "full",
+			activeQuota: isPrivilegedToolContext(ctx)
+				? undefined
+				: MEMBER_SCHEDULE_QUOTA,
     });
-    if (outcome.status === 'quota_exceeded') {
+		if (outcome.status === "quota_exceeded") {
       return {
         error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${outcome.activeCount}.`,
       };
     }
-    if (outcome.status === 'conflict') {
+		if (outcome.status === "conflict") {
       return {
-        status: 'conflict',
-        error: 'A different schedule already uses this creation_key.',
+				status: "conflict",
+				error: "A different schedule already uses this creation_key.",
       };
     }
-    if (!isPrivilegedToolContext(ctx) && outcome.job.created_by_user !== ctx.userId) {
-      return { error: 'Schedule could not be created.' };
+		if (
+			!isPrivilegedToolContext(ctx) &&
+			outcome.job.created_by_user !== ctx.userId
+		) {
+			return { error: "Schedule could not be created." };
+		}
+		return { schedule: serializeSchedule(outcome.job) };
+	}
+	if (trustedPersonalReminder) {
+		const outcome = await deps.createScheduledJobWithGuards(createParams, {
+			targetAgentId: trustedPersonalReminder.lobuAgentId,
+			userId: trustedPersonalReminder.toolboxUserId,
+			activeQuota: MEMBER_SCHEDULE_QUOTA,
+			releaseState: ctx.releaseState ?? { status: "legacy_unenrolled" },
+		});
+		if (outcome.status === "release_inactive") {
+			return { error: "personal_reminder_release_inactive" };
+		}
+		if (outcome.status === "agent_not_owned") {
+			return { error: "Members can only schedule wakes for agents they own." };
+		}
+		if (outcome.status === "quota_exceeded") {
+			return {
+				error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${outcome.activeCount}.`,
+			};
     }
     return { schedule: serializeSchedule(outcome.job) };
   }
@@ -648,56 +758,60 @@ async function handleCreate(
 function trustedStagedActionError(ctx: ToolContext): ToolResult | null {
   return isPrivilegedToolContext(ctx)
     ? null
-    : { error: 'Staged schedule actions require trusted access.' };
+		: { error: "Staged schedule actions require trusted access." };
 }
 
 async function handleGetByCreationKey(
-  args: Extract<ManageSchedulesArgs, { action: 'get_by_creation_key' }>,
+	args: Extract<ManageSchedulesArgs, { action: "get_by_creation_key" }>,
   ctx: ToolContext,
-  deps: ManageSchedulesDeps
+	deps: ManageSchedulesDeps,
 ): Promise<ToolResult> {
   const accessError = trustedStagedActionError(ctx);
   if (accessError) return accessError;
   const creationKey = args.creation_key.trim();
-  if (!creationKey) return { error: 'creation_key is required.' };
-  const job = await deps.getScheduledJobByExternalKey(ctx.organizationId, creationKey);
+	if (!creationKey) return { error: "creation_key is required." };
+	const job = await deps.getScheduledJobByExternalKey(
+		ctx.organizationId,
+		creationKey,
+	);
   return job
     ? { found: true, status: job.state, schedule: serializeSchedule(job) }
-    : { found: false, status: 'not_found' };
+		: { found: false, status: "not_found" };
 }
 
 async function handleActivate(
-  args: Extract<ManageSchedulesArgs, { action: 'activate' }>,
+	args: Extract<ManageSchedulesArgs, { action: "activate" }>,
   ctx: ToolContext,
-  deps: ManageSchedulesDeps
+	deps: ManageSchedulesDeps,
 ): Promise<ToolResult> {
   const accessError = trustedStagedActionError(ctx);
   if (accessError) return accessError;
   const creationKey = args.creation_key.trim();
-  if (!creationKey) return { error: 'creation_key is required.' };
-  if (!args.expected_schedule_id) return { error: 'expected_schedule_id is required.' };
+	if (!creationKey) return { error: "creation_key is required." };
+	if (!args.expected_schedule_id)
+		return { error: "expected_schedule_id is required." };
   const outcome = await deps.activateScheduledJobByExternalKey({
     organizationId: ctx.organizationId,
     externalKey: creationKey,
     expectedScheduleId: args.expected_schedule_id,
   });
-  return outcome.status === 'ok'
+	return outcome.status === "ok"
     ? { status: outcome.job.state, schedule: serializeSchedule(outcome.job) }
     : { status: outcome.status };
 }
 
 async function handleList(
-  args: Extract<ManageSchedulesArgs, { action: 'list' }>,
+	args: Extract<ManageSchedulesArgs, { action: "list" }>,
   ctx: ToolContext,
-  deps: ManageSchedulesDeps
+	deps: ManageSchedulesDeps,
 ): Promise<ToolResult> {
   // SHIFU FORK: members can't list org-wide or spoof another user/agent via
   // args — force the filter to themselves regardless of what was passed.
   const privileged = isPrivilegedToolContext(ctx);
   const rows = await deps.listScheduledJobs({
     organizationId: ctx.organizationId,
-    createdByAgent: privileged ? args.agent_id ?? null : null,
-    createdByUser: privileged ? args.user_id ?? null : ctx.userId ?? null,
+		createdByAgent: privileged ? (args.agent_id ?? null) : null,
+		createdByUser: privileged ? (args.user_id ?? null) : (ctx.userId ?? null),
     actionType: args.action_type ?? null,
     includePaused: args.include_paused ?? true,
   });
@@ -722,34 +836,45 @@ function memberOwnsJob(job: ScheduledJobRow | null, ctx: ToolContext): boolean {
 }
 
 async function handlePause(
-  args: Extract<ManageSchedulesArgs, { action: 'pause' }>,
+	args: Extract<ManageSchedulesArgs, { action: "pause" }>,
   ctx: ToolContext,
-  deps: ManageSchedulesDeps
+	deps: ManageSchedulesDeps,
 ): Promise<ToolResult> {
-  const notFound = { error: `Schedule '${args.id}' not found in this organization.` };
+	const notFound = {
+		error: `Schedule '${args.id}' not found in this organization.`,
+	};
   if (!isPrivilegedToolContext(ctx)) {
     const existing = await deps.getScheduledJob(ctx.organizationId, args.id);
     if (!memberOwnsJob(existing, ctx)) return notFound;
   }
-  const ok = await deps.pauseScheduledJob(ctx.organizationId, args.id, args.paused ?? true);
+	const ok = await deps.pauseScheduledJob(
+		ctx.organizationId,
+		args.id,
+		args.paused ?? true,
+	);
   if (!ok) return notFound;
   const job = await deps.getScheduledJob(ctx.organizationId, args.id);
   return { schedule: job ? serializeSchedule(job) : undefined, ok: true };
 }
 
 async function handleCancel(
-  args: Extract<ManageSchedulesArgs, { action: 'cancel' }>,
+	args: Extract<ManageSchedulesArgs, { action: "cancel" }>,
   ctx: ToolContext,
-  deps: ManageSchedulesDeps
+	deps: ManageSchedulesDeps,
 ): Promise<ToolResult> {
-  const notFound = { error: `Schedule '${args.id}' not found in this organization.` };
+	const notFound = {
+		error: `Schedule '${args.id}' not found in this organization.`,
+	};
   if (!isPrivilegedToolContext(ctx)) {
     const existing = await deps.getScheduledJob(ctx.organizationId, args.id);
     if (!memberOwnsJob(existing, ctx)) return notFound;
   }
   const ok = await deps.deleteScheduledJob(ctx.organizationId, args.id);
   if (!ok) return notFound;
-  logger.info({ schedule_id: args.id, org: ctx.organizationId }, '[manage_schedules] cancelled');
+	logger.info(
+		{ schedule_id: args.id, org: ctx.organizationId },
+		"[manage_schedules] cancelled",
+	);
   return { ok: true };
 }
 

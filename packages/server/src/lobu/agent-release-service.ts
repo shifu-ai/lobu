@@ -9,6 +9,8 @@ import {
 import { canonicalize } from "json-canonicalize";
 import { type DbClient, getDb } from "../db/client.js";
 import { parseStrictJsonBytes } from "./strict-json-parser.js";
+import type { ReleaseCapabilityClaim } from "@lobu/core";
+import type { RuntimeCapabilitySnapshot } from "../gateway/services/runtime-capability-snapshot.js";
 
 const MANAGED_SETTING_KEYS = [
 	"identityMd",
@@ -180,6 +182,99 @@ export class AgentReleaseError extends Error {
 		super(message);
 		this.name = "AgentReleaseError";
 	}
+}
+
+type ReleaseCapabilityState =
+	| { status: "legacy_unenrolled" }
+	| { status: "enrolled_inactive" }
+	| { status: "active"; claim: ReleaseCapabilityClaim };
+
+export interface ReleaseCapabilityAgentRow extends AgentSettingsRow {
+	owner_user_id: string;
+}
+
+export interface ReleaseCapabilityReceiptRow {
+	environment: AgentReleaseEnvironment;
+	desired_release_id: string;
+	desired_release_sequence: number;
+	desired_feed_sequence: number;
+	applied_release_id: string;
+	applied_release_sequence: number;
+	applied_feed_sequence: number;
+	status: string;
+	settings_hash: string;
+}
+
+export function classifyAgentReleaseCapabilityState(input: {
+	agent: ReleaseCapabilityAgentRow;
+	receipt: ReleaseCapabilityReceiptRow | null;
+	agentId: string;
+	environment: "staging" | "production";
+	snapshot: RuntimeCapabilitySnapshot | null;
+}): ReleaseCapabilityState {
+	const { agent, receipt, snapshot } = input;
+	if (!receipt) return { status: "legacy_unenrolled" };
+	if (
+		!snapshot ||
+		receipt.environment !== input.environment ||
+		receipt.status !== "applied" ||
+		receipt.settings_hash !== settingsHashFromAgent(agent) ||
+		receipt.desired_release_id !== receipt.applied_release_id ||
+		receipt.desired_release_sequence !== receipt.applied_release_sequence ||
+		receipt.desired_feed_sequence !== receipt.applied_feed_sequence ||
+		snapshot.environment !== input.environment ||
+		snapshot.toolboxUserId !== agent.owner_user_id ||
+		snapshot.agentId !== input.agentId ||
+		snapshot.appliedReleaseId !== receipt.applied_release_id ||
+		snapshot.appliedReleaseSequence !== receipt.applied_release_sequence
+	)
+		return { status: "enrolled_inactive" };
+	return {
+		status: "active",
+		claim: {
+			environment: snapshot.environment,
+			toolboxUserId: snapshot.toolboxUserId,
+			agentId: snapshot.agentId,
+			releaseId: snapshot.appliedReleaseId,
+			releaseSequence: snapshot.appliedReleaseSequence,
+			snapshotDigest: snapshot.snapshotDigest,
+			expiresAt: snapshot.expiresAt,
+			capabilityIds: [...snapshot.capabilities],
+		},
+	};
+}
+
+/** Reads durable enrollment before deciding whether a Toolbox snapshot may grant a run claim. */
+export async function readAgentReleaseCapabilityState(input: {
+	organizationId: string;
+	agentId: string;
+	environment: "staging" | "production";
+	snapshot: RuntimeCapabilitySnapshot | null;
+	sql?: DbClient;
+}): Promise<ReleaseCapabilityState> {
+	const sql = input.sql ?? getDb();
+	const rows = await sql<
+		ReleaseCapabilityReceiptRow & ReleaseCapabilityAgentRow
+	>`
+		SELECT a.owner_user_id, a.identity_md, a.soul_md, a.user_md,
+		       a.model_selection, a.tools_config, r.settings_hash, r.environment,
+		       r.desired_release_id, r.desired_release_sequence, r.desired_feed_sequence,
+		       r.applied_release_id, r.applied_release_sequence, r.applied_feed_sequence,
+		       r.status
+		FROM agent_release_applies r
+		JOIN agents a ON a.organization_id = r.organization_id AND a.id = r.agent_id
+		WHERE r.organization_id = ${input.organizationId} AND r.agent_id = ${input.agentId}
+		LIMIT 1
+	`;
+	const row = rows[0];
+	if (!row) return { status: "legacy_unenrolled" };
+	return classifyAgentReleaseCapabilityState({
+		agent: row,
+		receipt: row,
+		agentId: input.agentId,
+		environment: input.environment,
+		snapshot: input.snapshot,
+	});
 }
 
 export function createAgentReleaseService(options: {

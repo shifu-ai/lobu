@@ -17,6 +17,13 @@
  */
 
 import { getDb } from "../db/client";
+import type { DbClient } from "../db/client";
+import type { ReleaseCapabilityState } from "@lobu/core";
+import {
+	classifyAgentReleaseCapabilityState,
+	type ReleaseCapabilityAgentRow,
+	type ReleaseCapabilityReceiptRow,
+} from "../lobu/agent-release-service";
 import { nextRunAt as nextCronTickAt } from "../utils/cron";
 import { errorMessage } from "../utils/errors";
 import logger from "../utils/logger";
@@ -61,6 +68,124 @@ export interface CreateScheduledJobParams {
 	sourceRunId?: number | null;
 	sourceEventId?: number | null;
 	sourceThreadId?: string | null;
+}
+
+export type CreateScheduledJobWithGuardsOutcome =
+	| { status: "ok"; job: ScheduledJobRow }
+	| { status: "agent_not_owned" }
+	| { status: "release_inactive" }
+	| { status: "quota_exceeded"; activeCount: number };
+
+export async function createScheduledJobWithGuards(
+	params: CreateScheduledJobParams,
+	guard: {
+		targetAgentId: string;
+		userId: string;
+		activeQuota: number;
+		releaseState: ReleaseCapabilityState;
+	},
+	options: {
+		sql?: DbClient;
+		transactionHooks?: { afterReceiptLock?: () => Promise<void> };
+	} = {},
+): Promise<CreateScheduledJobWithGuardsOutcome> {
+	const sql = options.sql ?? getDb();
+	return sql.begin(async (tx) => {
+		const agents = await tx<
+			ReleaseCapabilityAgentRow & { owner_platform: string | null }
+		>`
+			SELECT owner_user_id, owner_platform, identity_md, soul_md, user_md,
+			       model_selection, tools_config
+			FROM agents
+			WHERE organization_id = ${params.organizationId}
+			  AND id = ${guard.targetAgentId}
+			FOR UPDATE
+		`;
+		const agent = agents[0];
+		if (
+			!agent ||
+			agent.owner_platform !== "toolbox" ||
+			agent.owner_user_id !== guard.userId
+		) {
+			return { status: "agent_not_owned" };
+		}
+		const receipts = await tx<ReleaseCapabilityReceiptRow>`
+			SELECT environment, desired_release_id, desired_release_sequence,
+			       desired_feed_sequence, applied_release_id, applied_release_sequence,
+			       applied_feed_sequence, status, settings_hash
+			FROM agent_release_applies
+			WHERE organization_id = ${params.organizationId}
+			  AND agent_id = ${guard.targetAgentId}
+			FOR UPDATE
+		`;
+		await options.transactionHooks?.afterReceiptLock?.();
+		const signedState = guard.releaseState;
+		const environment =
+			signedState.status === "active"
+				? signedState.claim.environment
+				: signedState.status === "enrolled_inactive"
+					? signedState.environment
+					: "production";
+		const snapshot =
+			signedState.status === "active"
+				? {
+						schemaVersion: 1 as const,
+						environment: signedState.claim.environment,
+						toolboxUserId: signedState.claim.toolboxUserId,
+						agentId: signedState.claim.agentId,
+						capabilities: signedState.claim.capabilityIds,
+						appliedReleaseId: signedState.claim.releaseId,
+						appliedReleaseSequence: signedState.claim.releaseSequence,
+						expiresAt: signedState.claim.expiresAt,
+						snapshotDigest: signedState.claim.snapshotDigest,
+					}
+				: null;
+		const durableState = classifyAgentReleaseCapabilityState({
+			agent,
+			receipt: receipts[0] ?? null,
+			agentId: guard.targetAgentId,
+			environment,
+			snapshot,
+		});
+		const releaseAllowed =
+			(signedState.status === "legacy_unenrolled" &&
+				durableState.status === "legacy_unenrolled") ||
+			(signedState.status === "active" &&
+				durableState.status === "active" &&
+				signedState.claim.capabilityIds.includes(
+					"personal_reminder_delivery.v1",
+				) &&
+				Date.parse(signedState.claim.expiresAt) > Date.now());
+		if (!releaseAllowed) return { status: "release_inactive" };
+		await tx`
+			SELECT pg_advisory_xact_lock(
+				hashtext(${`scheduled-jobs-quota:${params.organizationId}`}),
+				hashtext(${guard.userId})
+			)
+		`;
+		const [{ count: activeCount }] = await tx<{ count: number }>`
+			SELECT count(*)::int AS count FROM scheduled_jobs
+			WHERE organization_id = ${params.organizationId}
+			  AND created_by_user = ${guard.userId}
+			  AND state = 'active' AND NOT paused
+		`;
+		if (activeCount >= guard.activeQuota) {
+			return { status: "quota_exceeded", activeCount };
+		}
+		const rows = (await tx`
+			INSERT INTO scheduled_jobs (
+				organization_id, action_type, action_args, cron, until_at, next_run_at,
+				description, created_by_user, created_by_agent,
+				source_run_id, source_event_id, source_thread_id
+			) VALUES (
+				${params.organizationId}, ${params.actionType}, ${tx.json(params.actionArgs)},
+				${params.cron ?? null}, ${params.untilAt ?? null}, ${params.runAt},
+				${params.description}, ${params.createdByUser ?? null}, ${params.createdByAgent ?? null},
+				${params.sourceRunId ?? null}, ${params.sourceEventId ?? null}, ${params.sourceThreadId ?? null}
+			) RETURNING *
+		`) as unknown as ScheduledJobRow[];
+		return { status: "ok", job: rows[0] };
+	});
 }
 
 export type UpsertScheduledJobByExternalKeyParams = CreateScheduledJobParams & {

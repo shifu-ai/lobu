@@ -5,7 +5,17 @@ import {
   type GrantStore,
 } from "../../permissions/grant-store.js";
 import type { UserAgentsStore } from "../user-agents-store.js";
-import { getPendingTool, takePendingTool } from "./pending-tool-store.js";
+import { readAgentReleaseCapabilityState } from "../../../lobu/agent-release-service.js";
+import { resolveRuntimeCapabilitySnapshot } from "../../services/runtime-capability-snapshot.js";
+import type { ReleaseCapabilityState } from "@lobu/core";
+import {
+	buildPendingToolExecutionOptions,
+	getPendingTool,
+	pendingToolContinuationDigest,
+	takePendingToolIfUnchanged,
+	stableReleaseAuthorizationDigest,
+	stableToolEligibilityDigest,
+} from "./pending-tool-store.js";
 
 export { GLOBAL_TOOL_AUTO_APPROVAL_PATTERN };
 
@@ -24,6 +34,7 @@ export type ToolApprovalSubmitResult =
   | { status: "expired" }
   | { status: "forbidden" }
   | { status: "denied" }
+  | { status: "stale"; diagnosticCode: "approval_inventory_stale" }
   | {
       status: "executed";
       result: {
@@ -47,6 +58,9 @@ export interface ToolApprovalGlobalStatusInput {
 }
 
 interface McpProxyDirectExecution {
+  revalidatePendingToolEligibility?(
+    pending: import("./pending-tool-store.js").PendingToolInvocation,
+  ): Promise<boolean>;
   executeToolDirect(
     agentId: string,
     userId: string,
@@ -61,6 +75,16 @@ interface McpProxyDirectExecution {
         configDigest: string;
       };
       channelId?: string;
+      organizationId?: string;
+			releaseState?: import("@lobu/core").ReleaseCapabilityState;
+			approvalReplay?: true;
+			originalRunIdentity?: { runId: number; deploymentName: string };
+			conversationId?: string;
+      personalReminderDeliveryIntent?: true;
+      approvalReplayAuthorization?: {
+        revalidate(): Promise<boolean>;
+        onExecutionCompleted?(): Promise<void>;
+      };
     },
   ): Promise<{
     content: Array<{ type: string; text: string }>;
@@ -74,6 +98,115 @@ export interface ToolApprovalServiceDeps {
   mcpProxy: McpProxyDirectExecution;
   userAgentsStore?: Pick<UserAgentsStore, "ownsAgent">;
   organizationId?: string;
+  resolveReleaseSnapshot?: typeof resolveRuntimeCapabilitySnapshot;
+  readReleaseState?: typeof readAgentReleaseCapabilityState;
+  revalidateEligibility?: (
+    pending: import("./pending-tool-store.js").PendingToolInvocation,
+  ) => Promise<boolean>;
+}
+
+export function isPendingReleaseBindingCurrent(
+  pending: import("./pending-tool-store.js").PendingToolInvocation,
+  current: ReleaseCapabilityState,
+  now = new Date(),
+): boolean {
+  const binding = pending.releaseBinding;
+  if (!binding || current.status !== "active") return false;
+  return Date.parse(binding.authorizationExpiresAt) > now.getTime() &&
+    Date.parse(current.claim.expiresAt) > now.getTime() &&
+    current.claim.agentId === pending.agentId &&
+    current.claim.toolboxUserId === pending.userId &&
+    current.claim.releaseId === binding.releaseId &&
+    current.claim.releaseSequence === binding.releaseSequence &&
+    stableReleaseAuthorizationDigest(current.claim) ===
+      binding.stableAuthorizationDigest;
+}
+
+async function revalidateReleaseBinding(
+  pending: import("./pending-tool-store.js").PendingToolInvocation,
+  organizationId: string,
+  deps: Pick<
+    ToolApprovalServiceDeps,
+    "resolveReleaseSnapshot" | "readReleaseState"
+  > = {},
+): Promise<boolean> {
+  const binding = pending.releaseBinding;
+  const state = pending.releaseState;
+  if (!binding) return true;
+  if (state?.status !== "active") return false;
+  const claim = state.claim;
+  if (
+    Date.parse(binding.authorizationExpiresAt) <= Date.now() ||
+    Date.parse(claim.expiresAt) <= Date.now() ||
+    claim.agentId !== pending.agentId ||
+    claim.toolboxUserId !== pending.userId ||
+    claim.releaseId !== binding.releaseId ||
+    claim.releaseSequence !== binding.releaseSequence ||
+    claim.snapshotDigest !== binding.snapshotDigest ||
+    claim.expiresAt !== binding.authorizationExpiresAt ||
+    stableReleaseAuthorizationDigest(claim) !==
+      binding.stableAuthorizationDigest ||
+    stableToolEligibilityDigest({
+      mcpId: pending.mcpId,
+      toolName: pending.toolName,
+      connectionId: pending.connectionId,
+      expectedMcpIdentity: pending.expectedMcpIdentity,
+      courseToolScope: pending.courseToolScope,
+      effectiveInventoryFingerprint: binding.effectiveInventoryFingerprint,
+      stableAuthorizationDigest: binding.stableAuthorizationDigest,
+    }) !== binding.eligibilityBindingDigest
+  ) return false;
+  const snapshot = await (
+    deps.resolveReleaseSnapshot ?? resolveRuntimeCapabilitySnapshot
+  )(
+    {
+      environment: claim.environment,
+      toolboxUserId: claim.toolboxUserId,
+      agentId: claim.agentId,
+    },
+    { bypassCache: true },
+  );
+  const current = await (
+    deps.readReleaseState ?? readAgentReleaseCapabilityState
+  )({
+    organizationId,
+    agentId: pending.agentId,
+    environment: claim.environment,
+    snapshot,
+  });
+  return isPendingReleaseBindingCurrent(
+    pending,
+    current as ReleaseCapabilityState,
+  );
+}
+
+export async function validatePendingToolContinuation(
+  pending: import("./pending-tool-store.js").PendingToolInvocation,
+  organizationId: string,
+  deps: Partial<Pick<
+    ToolApprovalServiceDeps,
+    "resolveReleaseSnapshot" | "readReleaseState" | "revalidateEligibility" | "mcpProxy"
+  >> = {},
+): Promise<{ valid: true } | { valid: false; diagnosticCode: "approval_inventory_stale" }> {
+  if (!pending.releaseBinding) {
+    return pending.releaseState?.status === "active"
+      ? { valid: false, diagnosticCode: "approval_inventory_stale" }
+      : { valid: true };
+  }
+  const valid = await revalidateReleaseBinding(
+    pending,
+    organizationId,
+    deps,
+  ).catch(() => false);
+  const eligible = valid
+    ? await (
+        deps.revalidateEligibility ??
+        deps.mcpProxy?.revalidatePendingToolEligibility?.bind(deps.mcpProxy)
+      )?.(pending).catch(() => false)
+    : false;
+  return valid && eligible === true
+    ? { valid: true }
+    : { valid: false, diagnosticCode: "approval_inventory_stale" };
 }
 
 function organizationIdFor(
@@ -106,6 +239,7 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       if (!candidate) {
         return { status: "expired" };
       }
+      const candidateDigest = pendingToolContinuationDigest(candidate);
 
       if (
         candidate.agentId !== input.agentId ||
@@ -115,13 +249,53 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
         return { status: "forbidden" };
       }
 
-      const pending = await takePendingTool(input.approvalId);
+      if (candidate.releaseBinding) {
+        const organizationId = organizationIdFor(input, deps.organizationId);
+        if (!organizationId) return { status: "forbidden" };
+        const validation = await validatePendingToolContinuation(
+          candidate,
+          organizationId,
+          deps,
+        );
+        if (!validation.valid) {
+          await takePendingToolIfUnchanged(
+            input.approvalId,
+            candidate,
+            candidateDigest,
+          );
+          return {
+            status: "stale",
+            diagnosticCode: "approval_inventory_stale",
+          };
+        }
+      }
+
+      const pending = await takePendingToolIfUnchanged(
+        input.approvalId,
+        candidate,
+        candidateDigest,
+      );
       if (
         !pending ||
         pending.agentId !== candidate.agentId ||
         pending.userId !== candidate.userId
       ) {
         return { status: "expired" };
+      }
+
+      // The atomic claim closes duplicate execution, but external authority can
+      // change between the first validation and the side-effect boundary.
+      if (pending.releaseBinding || pending.releaseState?.status === "active") {
+        const claimOrganizationId = organizationIdFor(input, deps.organizationId);
+        if (!claimOrganizationId) return { status: "forbidden" };
+        const validation = await validatePendingToolContinuation(
+          pending,
+          claimOrganizationId,
+          deps,
+        );
+        if (!validation.valid) {
+          return { status: "stale", diagnosticCode: validation.diagnosticCode };
+        }
       }
 
       const specificPattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;
@@ -138,7 +312,10 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
         return { status: "denied" };
       }
 
-      if (input.action === "approve_all") {
+      const requiresEgressAuthorization = Boolean(
+        pending.releaseBinding || pending.releaseState?.status === "active",
+      );
+      if (input.action === "approve_all" && !requiresEgressAuthorization) {
         await deps.grantStore.grant(
           pending.agentId,
           GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
@@ -149,16 +326,37 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       }
 
       const execute = () => {
-        const options = {
-          ...(pending.courseToolScope
-            ? { courseToolScope: pending.courseToolScope }
-            : {}),
-          ...(pending.expectedMcpIdentity
-            ? { expectedMcpIdentity: pending.expectedMcpIdentity }
-            : {}),
-          ...(pending.channelId ? { channelId: pending.channelId } : {}),
-        };
-        return Object.keys(options).length > 0
+        const baseOptions = buildPendingToolExecutionOptions(pending);
+        let grantStored = false;
+        const approvalReplayAuthorization =
+          requiresEgressAuthorization
+            ? {
+                revalidate: async () => (await validatePendingToolContinuation(
+                  pending,
+                  organizationId!,
+                  deps,
+                )).valid,
+                onExecutionCompleted: input.action === "approve_all"
+                  ? async () => {
+                      if (grantStored) return;
+                      await deps.grantStore.grant(
+                        pending.agentId,
+                        GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
+                        null,
+                        undefined,
+                        organizationId,
+                      );
+                      grantStored = true;
+                    }
+                  : undefined,
+              }
+            : undefined;
+        const options = baseOptions
+          ? { ...baseOptions, ...(approvalReplayAuthorization
+              ? { approvalReplayAuthorization }
+              : {}) }
+          : undefined;
+        return options
           ? deps.mcpProxy.executeToolDirect(
               pending.agentId,
               pending.userId,
@@ -178,6 +376,9 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       const result = organizationId
         ? await orgContext.run({ organizationId }, execute)
         : await execute();
+      if (result.diagnosticCode === "approval_inventory_stale") {
+        return { status: "stale", diagnosticCode: "approval_inventory_stale" };
+      }
       return { status: "executed", result };
     },
 

@@ -214,6 +214,26 @@ describe("createApiAuthMiddleware — settings session cookie", () => {
     expect(res.status).toBe(200);
   });
 
+  test("settings session propagates its organization into authContext", async () => {
+    const session: SettingsTokenPayload = {
+      userId: "user-42",
+      platform: "web",
+      organizationId: "org-42",
+      exp: Date.now() + 60_000,
+    };
+    setAuthProvider(() => session);
+    const app = new Hono();
+    app.use("*", createApiAuthMiddleware({ allowSettingsSession: true }));
+    app.get("/protected", (c) => c.json(c.get("authContext")));
+
+    const res = await fetchApp(app);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      userId: "user-42",
+      organizationId: "org-42",
+    });
+  });
+
   test("settings session ignored when allowSettingsSession is not set", async () => {
     // Even if the auth provider returns a valid session, the middleware
     // must not allow it when the route didn't opt in.

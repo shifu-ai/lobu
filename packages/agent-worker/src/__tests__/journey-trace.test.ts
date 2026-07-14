@@ -1,6 +1,10 @@
 import { describe, expect, mock, test } from "bun:test";
 import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
-import { buildToolRouterJourneyEventInput } from "../openclaw/session-runner";
+import { buildEffectiveToolInventory } from "../openclaw/effective-tool-inventory";
+import {
+  buildToolRouterJourneyEventInput,
+  initializeExternalTurnToolRouting,
+} from "../openclaw/session-runner";
 import {
   emitJourneyEvent,
   journeyEvent,
@@ -273,5 +277,181 @@ describe("worker journey trace", () => {
     ]) {
       expect(serialized).not.toContain(`"${field}":null`);
     }
+  });
+
+  test("emits effective eligibility separately from the descriptor index fingerprint", () => {
+    const toolsByMcp = {
+      "lobu-memory": [
+        {
+          name: "manage_schedules",
+          description: "Manage personal schedules",
+          inputSchema: { type: "object" },
+        },
+      ],
+    };
+    const activeInventory = buildEffectiveToolInventory({
+      scopedTools: toolsByMcp,
+      releaseState: {
+        status: "active",
+        claim: {
+          environment: "production",
+          toolboxUserId: "user-1",
+          agentId: "agent-1",
+          releaseId: "release-1",
+          releaseSequence: 1,
+          snapshotDigest: "sha256:snapshot-1",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          capabilityIds: ["personal_reminder_delivery.v1"],
+        },
+      },
+    });
+    const inactiveInventory = buildEffectiveToolInventory({
+      scopedTools: toolsByMcp,
+      releaseState: {
+        status: "enrolled_inactive",
+        environment: "production",
+        reason: "snapshot_unavailable",
+      },
+    });
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp,
+      message: "list schedules",
+      budget: 1,
+    });
+    const trace = parseWorkerShifuTrace({});
+    const eventFor = (inventory: typeof activeInventory, reason?: string) =>
+      journeyEvent(
+        buildToolRouterJourneyEventInput({
+          trace,
+          selectionTrace: {
+            ...selection.trace,
+            effectiveToolInventoryFingerprint: inventory.fingerprint,
+            effectiveReleaseStatus: inventory.releaseProvenance.status,
+            effectiveReleaseReason: reason,
+          },
+          totalMs: 1,
+        })
+      );
+
+    const activeEvent = eventFor(activeInventory);
+    const inactiveEvent = eventFor(inactiveInventory, "snapshot_missing");
+    expect(activeEvent.descriptor_inventory_fingerprint).toBe(
+      inactiveEvent.descriptor_inventory_fingerprint
+    );
+    expect(activeEvent.effective_tools_fingerprint).not.toBe(
+      inactiveEvent.effective_tools_fingerprint
+    );
+    expect(inactiveEvent).toMatchObject({
+      effective_release_status: "enrolled_inactive",
+      effective_release_reason: "snapshot_missing",
+    });
+    expect(String(inactiveEvent.effective_tools_fingerprint)).toHaveLength(16);
+  });
+
+  test("emits bounded release provenance while rejecting arbitrary agent identifiers", () => {
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {},
+      message: "提醒我喝水",
+      budget: 1,
+    });
+    const trace = parseWorkerShifuTrace({
+      shifuTrace: {
+        trace_id: "tr_release_trace_1",
+        journey_id: "line_text_agent_turn",
+        turn_id: "turn-release-1",
+      },
+    });
+    const base = {
+      ...selection.trace,
+      releaseEnvironment: "production",
+      releaseAgentId: "shifu-u-safe_1",
+      releaseId: "release-17",
+      releaseSequence: 17,
+      releaseSnapshotDigest: `sha256:${"a".repeat(64)}`,
+      releaseSnapshotExpiresAt: "2099-01-01T00:00:00.000Z",
+      releaseSnapshotExpired: false,
+      executionIntent: "personal_reminder:create:explicit",
+      executionClarificationRequired: false,
+      routerStageCorrelationStatus: "not_available_at_router_stage" as const,
+    };
+    const safe = journeyEvent(
+      buildToolRouterJourneyEventInput({
+        trace,
+        selectionTrace: base,
+        totalMs: 1,
+      })
+    );
+    expect(safe).toMatchObject({
+      release_environment: "production",
+      release_agent_id: "shifu-u-safe_1",
+      release_id: "release-17",
+      release_sequence: 17,
+      release_snapshot_digest: "sha256:aaaaaaaaa",
+      release_snapshot_expired: false,
+      execution_intent: "personal_reminder:create:explicit",
+      execution_clarification_required: false,
+      reminder_correlation_status: "not_available_at_router_stage",
+      schedule_id_status: "not_available_at_router_stage",
+      wake_run_id_status: "not_available_at_router_stage",
+      line_delivery_correlation_status: "not_available_at_router_stage",
+    });
+    const unsafe = journeyEvent(
+      buildToolRouterJourneyEventInput({
+        trace,
+        selectionTrace: { ...base, releaseAgentId: "user@example.com" },
+        totalMs: 1,
+      })
+    );
+    expect(unsafe.release_agent_id).toBeUndefined();
+    const hostile = journeyEvent({
+      event: "lobu.worker.tool_router_decision",
+      trace,
+      status: "ok",
+      fields: {
+        release_id: `release\n${"x".repeat(10_000)}`,
+        release_agent_id: `agent\u0000${"x".repeat(10_000)}`,
+        release_snapshot_expires_at: `${"9".repeat(10_000)}`,
+        release_snapshot_digest: `sha256:${"a".repeat(10_000)}`,
+        execution_intent: `personal\n${"x".repeat(10_000)}`,
+      },
+    });
+    expect(hostile.release_id).toBeUndefined();
+    expect(hostile.release_agent_id).toBeUndefined();
+    expect(hostile.release_snapshot_expires_at).toBeUndefined();
+    expect(hostile.release_snapshot_digest).toBeUndefined();
+    expect(hostile.execution_intent).toBeUndefined();
+  });
+
+  test.each([
+    ["legacy", "unknown", "agent-legacy-1"],
+    ["inactive", "production", "agent-inactive-1"],
+  ])("%s external turn emits bounded provenance and unavailable delivery refs", (_state, environment, agentId) => {
+    let emitted: Record<string, unknown> | undefined;
+    initializeExternalTurnToolRouting(
+      {
+        toolsByMcp: {},
+        message: "你好",
+        budget: 1,
+        releaseTrace: { environment, agentId },
+        trace: {
+          traceId: "tr_release_nonactive_1",
+          journeyId: "line_text_agent_turn",
+          actor: "worker",
+          traceSource: "incoming",
+        },
+      },
+      {
+        emitEvent: (input) => {
+          emitted = journeyEvent(input);
+        },
+      }
+    );
+    expect(emitted).toMatchObject({
+      release_environment: environment,
+      release_agent_id: agentId,
+      reminder_correlation_status: "not_available_at_router_stage",
+      execution_clarification_required: false,
+    });
+    expect(emitted?.release_id).toBeUndefined();
   });
 });

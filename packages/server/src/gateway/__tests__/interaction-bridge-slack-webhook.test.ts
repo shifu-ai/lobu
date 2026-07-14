@@ -102,7 +102,7 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
       toolName: "create_issue",
       args: { title: "from slack" },
       agentId: "agent-1",
-      userId: "user-1",
+      userId: "U_ACTOR",
     };
     await storePendingTool("req-slack-1", pending, 24 * 60 * 60);
 
@@ -154,9 +154,9 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
       configDigest: "digest-at-discovery",
     };
     const courseToolScope = {
-      ownerUserId: "user-1",
+      ownerUserId: "U_ACTOR",
       agentId: "agent-1",
-      courseEntityId: "course:user-1:a",
+      courseEntityId: "course:U_ACTOR:a",
     };
     await storePendingTool(
       "req-slack-automation",
@@ -165,7 +165,7 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
         toolName: "create_automation",
         args: { prompt: "每隔一分鐘回報" },
         agentId: "agent-1",
-        userId: "user-1",
+        userId: "U_ACTOR",
         channelId: "C_SCOPE",
         expectedMcpIdentity,
         courseToolScope,
@@ -191,11 +191,16 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
     await waitFor(() => expect(h.executeToolDirect).toHaveBeenCalled());
     expect(h.executeToolDirect).toHaveBeenCalledWith(
       "agent-1",
-      "user-1",
+      "U_ACTOR",
       "shifu-toolbox",
       "create_automation",
       { prompt: "每隔一分鐘回報" },
-      { courseToolScope, expectedMcpIdentity, channelId: "C_SCOPE" }
+      {
+        approvalReplay: true,
+        courseToolScope,
+        expectedMcpIdentity,
+        channelId: "C_SCOPE",
+      }
     );
   });
 
@@ -212,7 +217,7 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
         toolName: "cancel_automation",
         args: { automationId: "auto-1" },
         agentId: "agent-1",
-        userId: "user-1",
+        userId: "U_ACTOR",
         channelId: "C_SCOPE",
         expectedMcpIdentity,
       },
@@ -248,11 +253,11 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
     await waitFor(() => expect(h.executeToolDirect).toHaveBeenCalled());
     expect(h.executeToolDirect).toHaveBeenCalledWith(
       "agent-1",
-      "user-1",
+      "U_ACTOR",
       "shifu-toolbox",
       "cancel_automation",
       { automationId: "auto-1" },
-      { expectedMcpIdentity, channelId: "C_SCOPE" }
+      { approvalReplay: true, expectedMcpIdentity, channelId: "C_SCOPE" }
     );
     await waitFor(() =>
       expect(h.postMessage).toHaveBeenCalledWith(

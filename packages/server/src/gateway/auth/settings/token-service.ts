@@ -22,6 +22,8 @@ export interface SettingsTokenPayload {
   agentId?: string;
   userId: string;
   platform: string;
+  /** Tenant bound at authentication time; required for approval continuations. */
+  organizationId?: string;
   exp: number; // Expiration timestamp (ms)
   /** Channel that triggered the settings link. Used for agent switching and binding. */
   channelId?: string;

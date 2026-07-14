@@ -970,7 +970,7 @@ describe("session context cache TTL", () => {
     expect(fetchCount).toBe(2);
   });
 
-  test("lists ready MCP tools in gateway instructions so unprefixed tool names are attributable", async () => {
+  test("defers raw MCP inventory from gateway instructions while retaining descriptors for effective projection", async () => {
     globalThis.fetch = async () =>
       new Response(
         JSON.stringify(
@@ -1006,10 +1006,15 @@ describe("session context cache TTL", () => {
 
     const context = await getOpenClawSessionContext();
 
-    expect(context.gatewayInstructions).toContain("## Available MCP Tools");
-    expect(context.gatewayInstructions).toContain("shifu-toolbox");
-    expect(context.gatewayInstructions).toContain("meeting_search");
-    expect(context.gatewayInstructions).toContain("transcript_list");
+    expect(context.gatewayInstructions).not.toContain("## Available MCP Tools");
+    expect(context.gatewayInstructions).not.toContain("meeting_search");
+    expect(context.gatewayInstructions).not.toContain("transcript_list");
+    expect(context.mcpTools).toEqual({
+      "shifu-toolbox": [
+        { name: "meeting_search", description: "Search meetings" },
+        { name: "transcript_list", description: "List transcripts" },
+      ],
+    });
   });
 
   test("uses provider-safe MCP auth tool names in tools-mode setup instructions", async () => {

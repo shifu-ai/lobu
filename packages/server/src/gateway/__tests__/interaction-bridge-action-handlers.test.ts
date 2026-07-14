@@ -1,5 +1,11 @@
 import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
-import { storePendingTool, type PendingToolInvocation } from "../auth/mcp/pending-tool-store.js";
+import {
+  stableReleaseAuthorizationDigest,
+  stableToolEligibilityDigest,
+  getPendingTool,
+  storePendingTool,
+  type PendingToolInvocation,
+} from "../auth/mcp/pending-tool-store.js";
 import { registerActionHandlers } from "../connections/interaction-bridge.js";
 import type { PlatformConnection } from "../connections/types.js";
 import { ensureDbForGatewayTests, resetTestDatabase } from "./helpers/db-setup.js";
@@ -24,6 +30,9 @@ function setup(
       | Error;
     withExecute?: boolean;
     withGrantStore?: boolean;
+    organizationId?: string;
+    continuationValid?: boolean;
+    continuationResults?: boolean[];
   } = {}
 ): Harness {
   const {
@@ -41,14 +50,28 @@ function setup(
   const grantStore = {
     grant: mock(async () => undefined),
   };
-  const executeToolDirect = mock(async () => {
+  const executeToolDirect = mock(async (...callArgs: any[]) => {
+    const authorization = callArgs[5]?.approvalReplayAuthorization;
+    if (authorization) {
+      if (!(await authorization.revalidate())) {
+        return {
+          content: [{ type: "text", text: "stale" }],
+          isError: true,
+          diagnosticCode: "approval_inventory_stale",
+        };
+      }
+    }
     if (executeToolResult instanceof Error) throw executeToolResult;
-    return (
+    const result = (
       executeToolResult ?? {
         content: [{ type: "text", text: "ok" }],
         isError: false,
       }
     );
+    if (authorization && await authorization.revalidate()) {
+      await authorization.onExecutionCompleted?.();
+    }
+    return result;
   });
   const post = mock(async () => undefined);
   const thread = { post };
@@ -58,15 +81,26 @@ function setup(
 
   registerActionHandlers(
     chat as any,
-    { id: "conn-1", platform: "slack" } as PlatformConnection,
+    { id: "conn-1", platform: "slack", organizationId: options.organizationId } as PlatformConnection,
     withGrantStore ? (grantStore as any) : undefined,
     withExecute ? (executeToolDirect as any) : undefined,
-    claimApprovalCard as any
+    claimApprovalCard as any,
+    undefined,
+    undefined,
+    undefined,
+    options.continuationValid === undefined && !options.continuationResults
+      ? undefined
+      : mock(async () => (options.continuationResults?.shift() ?? options.continuationValid)
+          ? ({ valid: true } as const)
+          : ({ valid: false, diagnosticCode: "approval_inventory_stale" } as const))
   );
 
   if (!captured) throw new Error("onAction handler not registered");
   return {
-    handler: captured,
+    handler: async (event) => captured!({
+      ...event,
+      user: "user" in event ? event.user : { userId: "user-1" },
+    }),
     grantStore,
     executeToolDirect,
     post,
@@ -94,6 +128,240 @@ describe("registerActionHandlers — tool approval", () => {
 
   beforeEach(async () => {
     await resetTestDatabase();
+  });
+
+  test.each([
+    ["wrong", { userId: "user-2" }],
+    ["missing", null],
+  ])("%s interaction user cannot consume another user's approval", async (_label, user) => {
+    await seedPending("req-owner-bound");
+    const harness = setup();
+    await harness.handler({
+      actionId: "tool:req-owner-bound:once",
+      thread: harness.thread,
+      user,
+    });
+
+    expect(await getPendingTool("req-owner-bound")).not.toBeNull();
+    expect(harness.grantStore.grant).not.toHaveBeenCalled();
+    expect(harness.executeToolDirect).not.toHaveBeenCalled();
+  });
+
+  test("stale semantic approval never grants or executes", async () => {
+    const claim = {
+      environment: "production" as const,
+      toolboxUserId: "user-1",
+      agentId: "agent-1",
+      releaseId: "release-1",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      expiresAt: "2000-01-01T00:00:00.000Z",
+      capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
+    };
+    const stableAuthorizationDigest = stableReleaseAuthorizationDigest(claim);
+    const semanticPending: PendingToolInvocation = {
+      ...PENDING,
+      organizationId: "org-1",
+      releaseState: { status: "active", claim },
+      releaseBinding: {
+        routerMode: "semantic",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: claim.releaseId,
+        releaseSequence: claim.releaseSequence,
+        snapshotDigest: claim.snapshotDigest,
+        authorizationExpiresAt: claim.expiresAt,
+        stableAuthorizationDigest,
+        eligibilityBindingDigest: stableToolEligibilityDigest({
+          mcpId: PENDING.mcpId,
+          toolName: PENDING.toolName,
+          effectiveInventoryFingerprint: "b".repeat(64),
+          stableAuthorizationDigest,
+        }),
+      },
+    };
+    await storePendingTool("req-stale", semanticPending, 60);
+    const h = setup({ organizationId: "org-1" });
+    await h.handler({
+      actionId: "tool:req-stale:always",
+      value: "",
+      thread: h.thread,
+    });
+    expect(h.grantStore.grant).not.toHaveBeenCalled();
+    expect(h.executeToolDirect).not.toHaveBeenCalled();
+
+    const activeClaim = {
+      ...claim,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      snapshotDigest: `sha256:${"c".repeat(64)}`,
+    };
+    const activeStable = stableReleaseAuthorizationDigest(activeClaim);
+    await storePendingTool("req-active", {
+      ...PENDING,
+      organizationId: "org-1",
+      releaseState: { status: "active", claim: activeClaim },
+      releaseBinding: {
+        routerMode: "semantic",
+        effectiveInventoryFingerprint: "d".repeat(64),
+        releaseId: activeClaim.releaseId,
+        releaseSequence: activeClaim.releaseSequence,
+        snapshotDigest: activeClaim.snapshotDigest,
+        authorizationExpiresAt: activeClaim.expiresAt,
+        stableAuthorizationDigest: activeStable,
+        eligibilityBindingDigest: stableToolEligibilityDigest({
+          mcpId: PENDING.mcpId,
+          toolName: PENDING.toolName,
+          effectiveInventoryFingerprint: "d".repeat(64),
+          stableAuthorizationDigest: activeStable,
+        }),
+      },
+    }, 60);
+    const active = setup({
+      organizationId: "org-1",
+      continuationValid: true,
+    });
+    await active.handler({
+      actionId: "tool:req-active:always",
+      value: "",
+      thread: active.thread,
+    });
+    expect(active.grantStore.grant).toHaveBeenCalledTimes(1);
+    expect(active.executeToolDirect).toHaveBeenCalledTimes(1);
+    expect(h.post).toHaveBeenCalledWith("approval_inventory_stale");
+
+    await storePendingTool("req-cross-tenant", {
+      ...semanticPending,
+      organizationId: "org-2",
+      connectionId: "conn-2",
+    }, 60);
+    await h.handler({
+      actionId: "tool:req-cross-tenant:always",
+      value: "",
+      thread: h.thread,
+    });
+    expect(await getPendingTool("req-cross-tenant")).not.toBeNull();
+    expect(h.grantStore.grant).not.toHaveBeenCalled();
+    expect(h.executeToolDirect).not.toHaveBeenCalled();
+  });
+
+  test("authority revoked after validation but before execution never grants or executes", async () => {
+    const claim = {
+      environment: "production" as const,
+      toolboxUserId: "user-1",
+      agentId: "agent-1",
+      releaseId: "release-1",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
+    };
+    const stableAuthorizationDigest = stableReleaseAuthorizationDigest(claim);
+    await storePendingTool("req-toctou", {
+      ...PENDING,
+      organizationId: "org-1",
+      releaseState: { status: "active", claim },
+      releaseBinding: {
+        routerMode: "shadow",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: claim.releaseId,
+        releaseSequence: claim.releaseSequence,
+        snapshotDigest: claim.snapshotDigest,
+        authorizationExpiresAt: claim.expiresAt,
+        stableAuthorizationDigest,
+        eligibilityBindingDigest: stableToolEligibilityDigest({
+          mcpId: PENDING.mcpId,
+          toolName: PENDING.toolName,
+          effectiveInventoryFingerprint: "b".repeat(64),
+          stableAuthorizationDigest,
+        }),
+      },
+    }, 60);
+    const h = setup({
+      organizationId: "org-1",
+      continuationResults: [true, false],
+    });
+    await h.handler({
+      actionId: "tool:req-toctou:always",
+      thread: h.thread,
+    });
+    expect(h.grantStore.grant).not.toHaveBeenCalled();
+    expect(h.executeToolDirect).not.toHaveBeenCalled();
+  });
+
+  test("egress revocation after both interaction validations leaves no grant", async () => {
+    const claim = {
+      environment: "production" as const,
+      toolboxUserId: "user-1",
+      agentId: "agent-1",
+      releaseId: "release-egress",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      capabilityIds: [],
+    };
+    const stableAuthorizationDigest = stableReleaseAuthorizationDigest(claim);
+    await storePendingTool("req-egress-revoke", {
+      ...PENDING,
+      organizationId: "org-1",
+      releaseState: { status: "active", claim },
+      releaseBinding: {
+        routerMode: "legacy",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: claim.releaseId,
+        releaseSequence: claim.releaseSequence,
+        snapshotDigest: claim.snapshotDigest,
+        authorizationExpiresAt: claim.expiresAt,
+        stableAuthorizationDigest,
+        eligibilityBindingDigest: stableToolEligibilityDigest({
+          mcpId: PENDING.mcpId,
+          toolName: PENDING.toolName,
+          effectiveInventoryFingerprint: "b".repeat(64),
+          stableAuthorizationDigest,
+        }),
+      },
+    }, 60);
+    const h = setup({
+      organizationId: "org-1",
+      continuationResults: [true, true, false],
+    });
+    await h.handler({
+      actionId: "tool:req-egress-revoke:always",
+      thread: h.thread,
+    });
+    expect(h.executeToolDirect).toHaveBeenCalledTimes(1);
+    expect(h.grantStore.grant).not.toHaveBeenCalled();
+    expect(h.post).toHaveBeenCalledWith(
+      "This approval expired because the available tools changed. Please try again.",
+    );
+    expect(h.post).not.toHaveBeenCalledWith(
+      expect.stringContaining("Tool error:"),
+    );
+  });
+
+  test("active interaction continuation without a release binding fails closed", async () => {
+    await storePendingTool("req-missing-binding", {
+      ...PENDING,
+      organizationId: "org-1",
+      releaseState: {
+        status: "active",
+        claim: {
+          environment: "production",
+          toolboxUserId: "user-1",
+          agentId: "agent-1",
+          releaseId: "release-1",
+          releaseSequence: 1,
+          snapshotDigest: `sha256:${"a".repeat(64)}`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          capabilityIds: [],
+        },
+      },
+    }, 60);
+    const h = setup({ organizationId: "org-1" });
+    await h.handler({
+      actionId: "tool:req-missing-binding:always",
+      thread: h.thread,
+    });
+    expect(h.grantStore.grant).not.toHaveBeenCalled();
+    expect(h.executeToolDirect).not.toHaveBeenCalled();
   });
 
   test("approve with pending + executeToolDirect stores grant, runs tool, posts result, deletes pending", async () => {
@@ -127,6 +395,7 @@ describe("registerActionHandlers — tool approval", () => {
       "github",
       "create_issue",
       { title: "hi" },
+      { approvalReplay: true },
     ]);
 
     expect(h.post).toHaveBeenCalledWith("issue #42");

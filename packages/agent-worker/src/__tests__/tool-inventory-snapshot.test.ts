@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { McpToolDef } from "@lobu/core";
 import { initializeExternalTurnToolRouting } from "../openclaw/session-runner";
+import { resolveReleaseAwareToolRouterMode } from "../openclaw/session-runner";
 import {
   clearToolInventorySnapshotCacheForTests,
   snapshotToolsByMcp,
@@ -25,7 +26,232 @@ function tool(name: string, description: string): McpToolDef {
   };
 }
 
+const UNPAIRED_HIGH = "bad\ud800";
+const UNPAIRED_LOW = "bad\udfff";
+
 describe("external-turn immutable tool inventory snapshots", () => {
+  test("raw descriptor snapshots remain content-addressed across releases", () => {
+    clearToolInventorySnapshotCacheForTests();
+    const source = { source: [tool("search", "Search")] };
+    const first = snapshotToolsByMcp(source);
+    const same = snapshotToolsByMcp(source);
+
+    expect(same).toBe(first);
+    expect(toolInventorySnapshotCacheStats().entries).toBe(1);
+  });
+
+  test("semantic enforcement requires the exact active release capability", () => {
+    const active = {
+      status: "active" as const,
+      claim: {
+        environment: "production" as const,
+        toolboxUserId: "user-1",
+        agentId: "agent-1",
+        releaseId: "release-1",
+        releaseSequence: 1,
+        snapshotDigest: "sha256:one",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
+      },
+    };
+    expect(
+      resolveReleaseAwareToolRouterMode("semantic", active, "agent-1")
+    ).toBe("semantic");
+    expect(
+      resolveReleaseAwareToolRouterMode("semantic", active, "agent-2")
+    ).toBe("shadow");
+    expect(
+      resolveReleaseAwareToolRouterMode(
+        "semantic",
+        {
+          ...active,
+          claim: { ...active.claim, capabilityIds: [] },
+        },
+        "agent-1"
+      )
+    ).toBe("shadow");
+    expect(
+      resolveReleaseAwareToolRouterMode(
+        "semantic",
+        {
+          status: "legacy_unenrolled",
+        },
+        "agent-1"
+      )
+    ).toBe("shadow");
+    expect(
+      resolveReleaseAwareToolRouterMode(
+        "semantic",
+        {
+          ...active,
+          claim: { ...active.claim, expiresAt: "2026-07-14T00:00:00.000Z" },
+        },
+        "agent-1",
+        new Date("2026-07-15T00:00:00.000Z")
+      )
+    ).toBe("shadow");
+    expect(resolveReleaseAwareToolRouterMode("shadow", active, "agent-1")).toBe(
+      "shadow"
+    );
+  });
+  test.each([
+    ["undefined", undefined],
+    ["Map", new Map([["type", "string"]])],
+    ["Set", new Set(["string"])],
+    ["Date", new Date("2026-07-14T00:00:00.000Z")],
+    [
+      "custom prototype",
+      Object.assign(Object.create({ inherited: true }), { type: "object" }),
+    ],
+  ])("rejects non-JSON %s schema values without caching an empty-object collision", (_label, unsupported) => {
+    clearToolInventorySnapshotCacheForTests();
+    const valid = snapshotToolsByMcp({
+      source: [{ name: "tool", inputSchema: {} }],
+    });
+    const before = toolInventorySnapshotCacheStats();
+
+    expect(() =>
+      snapshotToolsByMcp({
+        source: [{ name: "tool", inputSchema: { unsupported } }],
+      })
+    ).toThrow("non-JSON tool inventory value");
+    expect(toolInventorySnapshotCacheStats()).toEqual(before);
+    expect(valid.source[0]?.inputSchema).toEqual({});
+  });
+
+  test.each([
+    [
+      "sparse array",
+      (() => {
+        const value = new Array(2);
+        value[1] = "x";
+        return value;
+      })(),
+    ],
+    ["named array property", Object.assign(["x"], { extra: "y" })],
+    [
+      "non-index numeric array property",
+      Object.assign(["x"], { "4294967295": "ghost" }),
+    ],
+    [
+      "non-enumerable property",
+      (() => {
+        const value = { type: "object" };
+        Object.defineProperty(value, "hidden", { value: "x" });
+        return value;
+      })(),
+    ],
+  ])("rejects JSON/clone mismatch from a %s", (_label, unsupported) => {
+    expect(() =>
+      snapshotToolsByMcp({
+        source: [{ name: "bad", inputSchema: { unsupported } }],
+      })
+    ).toThrow("non-JSON tool inventory value");
+  });
+
+  test("rejects an overlarge array before traversing it", () => {
+    const overlarge = new Array(100_001).fill("x");
+    expect(() =>
+      snapshotToolsByMcp({
+        source: [{ name: "bad", inputSchema: { overlarge } }],
+      })
+    ).toThrow("array exceeds 100000 entries");
+  });
+
+  test("preserves a JSON own __proto__ key without mutating the clone prototype", () => {
+    const inputSchema = JSON.parse(
+      '{"type":"object","__proto__":{"polluted":true}}'
+    ) as Record<string, unknown>;
+    const snapshot = snapshotToolsByMcp({
+      source: [{ name: "safe", inputSchema }],
+    });
+    const cloned = snapshot.source[0]!.inputSchema!;
+
+    expect(Object.hasOwn(cloned, "__proto__")).toBe(true);
+    expect((cloned.__proto__ as { polluted?: boolean }).polluted).toBe(true);
+    expect(
+      (Object.getPrototypeOf(cloned) as { polluted?: boolean }).polluted
+    ).toBeUndefined();
+  });
+
+  test("rejects cyclic schemas instead of cloning a cyclic cache entry", () => {
+    clearToolInventorySnapshotCacheForTests();
+    const cyclic: Record<string, unknown> = { type: "object" };
+    cyclic.self = cyclic;
+
+    expect(() =>
+      snapshotToolsByMcp({
+        source: [{ name: "cyclic", inputSchema: cyclic }],
+      })
+    ).toThrow("cyclic tool inventory value");
+    expect(toolInventorySnapshotCacheStats().entries).toBe(0);
+  });
+
+  test.each([
+    ["MCP id key", () => ({ [UNPAIRED_HIGH]: [tool("safe", "safe")] })],
+    ["tool name value", () => ({ source: [tool(UNPAIRED_LOW, "safe")] })],
+    [
+      "nested string value",
+      () => ({
+        source: [
+          {
+            name: "safe",
+            inputSchema: { nested: { description: UNPAIRED_HIGH } },
+          },
+        ],
+      }),
+    ],
+    [
+      "nested property key",
+      () => ({
+        source: [
+          {
+            name: "safe",
+            inputSchema: { nested: { [UNPAIRED_LOW]: true } },
+          },
+        ],
+      }),
+    ],
+  ])("rejects an unpaired surrogate in a production inventory %s", (_label, inventory) => {
+    expect(() => snapshotToolsByMcp(inventory())).toThrow(
+      "invalid UTF-16 string: unpaired surrogate"
+    );
+  });
+
+  test("preserves valid astral pairs in inventory keys and nested values", () => {
+    const snapshot = snapshotToolsByMcp({
+      "mcp-🧭": [
+        {
+          name: "提醒-💧",
+          inputSchema: {
+            type: "object",
+            properties: { "欄位-🌟": { description: "內容-🚀" } },
+          },
+        },
+      ],
+    });
+
+    expect(snapshot["mcp-🧭"]?.[0]?.name).toBe("提醒-💧");
+    expect(
+      snapshot["mcp-🧭"]?.[0]?.inputSchema?.properties?.["欄位-🌟"]
+    ).toEqual({ description: "內容-🚀" });
+  });
+
+  test("validates an already frozen inventory before the immutable fast path", () => {
+    clearToolInventorySnapshotCacheForTests();
+    const frozenMap = Object.freeze(new Map([["type", "object"]]));
+    const source = Object.freeze({
+      source: Object.freeze([
+        Object.freeze({ name: "bad", inputSchema: frozenMap }),
+      ]),
+    }) as unknown as Record<string, McpToolDef[]>;
+
+    expect(() => snapshotToolsByMcp(source)).toThrow(
+      "non-JSON tool inventory value"
+    );
+    expect(toolInventorySnapshotCacheStats().immutableReuses).toBe(0);
+  });
+
   test("preserves caller identity for an already deeply immutable inventory", () => {
     clearToolInventorySnapshotCacheForTests();
     const immutableTool = Object.freeze({
@@ -64,6 +290,67 @@ describe("external-turn immutable tool inventory snapshots", () => {
     expect(Object.isFrozen(first)).toBe(true);
     expect(Object.isFrozen(first.school)).toBe(true);
     expect(Object.isFrozen(first.school[0]?.inputSchema)).toBe(true);
+  });
+
+  test("partitions equal inventories by release authority and caps reuse at snapshot expiry", () => {
+    clearToolInventorySnapshotCacheForTests();
+    const source = { school: [tool("search_students", "Find students")] };
+    const base = {
+      environment: "production",
+      agentId: "shifu-u-1",
+      releaseId: "release-1",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      snapshotExpiresAt: "2099-01-01T00:00:00.000Z",
+      effectiveInventoryFingerprint: "b".repeat(64),
+      effectivePolicyFingerprint: "c".repeat(64),
+      grantProjectionFingerprint: "d".repeat(64),
+    };
+    const first = snapshotToolsByMcp(source, { cacheContext: base });
+    const same = snapshotToolsByMcp(structuredClone(source), {
+      cacheContext: base,
+    });
+    const advanced = snapshotToolsByMcp(structuredClone(source), {
+      cacheContext: { ...base, releaseSequence: 2 },
+    });
+    const changedDigest = snapshotToolsByMcp(structuredClone(source), {
+      cacheContext: { ...base, snapshotDigest: `sha256:${"e".repeat(64)}` },
+    });
+    const expired = snapshotToolsByMcp(structuredClone(source), {
+      cacheContext: { ...base, snapshotExpiresAt: "2000-01-01T00:00:00.000Z" },
+    });
+    const expiredAgain = snapshotToolsByMcp(structuredClone(source), {
+      cacheContext: { ...base, snapshotExpiresAt: "2000-01-01T00:00:00.000Z" },
+    });
+
+    expect(same).toBe(first);
+    expect(advanced).not.toBe(first);
+    expect(changedDigest).not.toBe(first);
+    expect(expiredAgain).not.toBe(expired);
+  });
+
+  test("expiry reaccess removes snapshot accounting exactly once", async () => {
+    clearToolInventorySnapshotCacheForTests();
+    const source = { school: [tool("search_students", "Find students")] };
+    const context = {
+      environment: "production",
+      agentId: "shifu-u-1",
+      releaseId: "release-expiring",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      snapshotExpiresAt: new Date(Date.now() + 25).toISOString(),
+      effectiveInventoryFingerprint: "b".repeat(64),
+      effectivePolicyFingerprint: "c".repeat(64),
+      grantProjectionFingerprint: "d".repeat(64),
+    };
+    snapshotToolsByMcp(source, { cacheContext: context });
+    expect(toolInventorySnapshotCacheStats().estimatedBytes).toBeGreaterThan(0);
+    await Bun.sleep(35);
+    snapshotToolsByMcp(structuredClone(source), { cacheContext: context });
+    expect(toolInventorySnapshotCacheStats()).toMatchObject({
+      entries: 0,
+      estimatedBytes: 0,
+    });
   });
 
   test("reuses production initialization caches while applying authorization per turn", () => {

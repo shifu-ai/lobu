@@ -7,6 +7,9 @@
 
 import { getDb } from "../../../db/client.js";
 import type { TrustedCourseToolScope } from "../../orchestration/course-tool-policy.js";
+import type { ReleaseCapabilityState } from "@lobu/core";
+import { createHash } from "node:crypto";
+import { canonicalize } from "json-canonicalize";
 
 const SCOPE = "pending-tool";
 
@@ -16,6 +19,7 @@ export interface PendingToolInvocation {
   args: Record<string, unknown>;
   agentId: string;
   userId: string;
+  organizationId?: string;
   channelId?: string;
   conversationId?: string;
   teamId?: string;
@@ -28,6 +32,68 @@ export interface PendingToolInvocation {
     configSource: "global" | "agent" | "derived";
     configDigest: string;
   };
+	releaseState?: ReleaseCapabilityState;
+	releaseBinding?: {
+		routerMode: "legacy" | "shadow" | "semantic";
+		effectiveInventoryFingerprint: string;
+		releaseId: string;
+		releaseSequence: number;
+		snapshotDigest: string;
+		authorizationExpiresAt: string;
+		stableAuthorizationDigest: string;
+		eligibilityBindingDigest: string;
+	};
+	/** Bounded non-secret identity used to re-sign an internal approval replay. */
+	originalRunIdentity?: {
+		runId: number;
+		deploymentName: string;
+	};
+	personalReminderDeliveryIntent?: true;
+}
+
+export function stableToolEligibilityDigest(input: {
+	mcpId: string;
+	toolName: string;
+	connectionId?: string;
+	expectedMcpIdentity?: PendingToolInvocation["expectedMcpIdentity"];
+	courseToolScope?: TrustedCourseToolScope;
+	effectiveInventoryFingerprint: string;
+	stableAuthorizationDigest: string;
+}): string {
+	return createHash("sha256")
+		.update(canonicalize({
+			mcpId: input.mcpId,
+			toolName: input.toolName,
+			connectionId: input.connectionId ?? null,
+			expectedMcpIdentity: input.expectedMcpIdentity ?? null,
+			courseToolScope: input.courseToolScope ?? null,
+			effectiveInventoryFingerprint: input.effectiveInventoryFingerprint,
+			stableAuthorizationDigest: input.stableAuthorizationDigest,
+		}))
+		.digest("hex");
+}
+
+export function stableReleaseAuthorizationDigest(
+	claim: import("@lobu/core").ReleaseCapabilityClaim,
+): string {
+	return createHash("sha256")
+		.update(canonicalize({
+			environment: claim.environment,
+			toolboxUserId: claim.toolboxUserId,
+			agentId: claim.agentId,
+			releaseId: claim.releaseId,
+			releaseSequence: claim.releaseSequence,
+			capabilityIds: [...claim.capabilityIds].sort(),
+			snapshotDigest: claim.snapshotDigest,
+			expiresAt: claim.expiresAt,
+		}))
+		.digest("hex");
+}
+
+export function pendingToolContinuationDigest(
+	invocation: PendingToolInvocation,
+): string {
+	return createHash("sha256").update(canonicalize(invocation)).digest("hex");
 }
 
 export interface PendingToolExecutionOptions {
@@ -36,18 +102,30 @@ export interface PendingToolExecutionOptions {
     PendingToolInvocation["expectedMcpIdentity"]
   >;
   channelId?: string;
+  organizationId?: string;
+	releaseState?: ReleaseCapabilityState;
+	approvalReplay: true;
+	originalRunIdentity?: NonNullable<PendingToolInvocation["originalRunIdentity"]>;
+	conversationId?: string;
+	personalReminderDeliveryIntent?: true;
+	approvalReplayAuthorization?: {
+		revalidate(): Promise<boolean>;
+		onExecutionCompleted?(): Promise<void>;
+	};
 }
 
 /**
  * Preserve the security context captured at discovery time when an approved
  * invocation is replayed. Omit absent fields instead of writing undefined over
- * an execution path's existing scope, and omit the options argument entirely
- * for legacy pending rows that carry no scoped context.
+ * an execution path's existing scope. Every claimed row carries the replay
+ * marker so internal MCPs can fail closed when legacy rows lack run identity;
+ * external MCPs ignore the marker and remain backward compatible.
  */
 export function buildPendingToolExecutionOptions(
-  pending: PendingToolInvocation
+	pending: PendingToolInvocation,
 ): PendingToolExecutionOptions | undefined {
   const options: PendingToolExecutionOptions = {
+		approvalReplay: true,
     ...(pending.courseToolScope
       ? { courseToolScope: pending.courseToolScope }
       : {}),
@@ -55,14 +133,25 @@ export function buildPendingToolExecutionOptions(
       ? { expectedMcpIdentity: pending.expectedMcpIdentity }
       : {}),
     ...(pending.channelId ? { channelId: pending.channelId } : {}),
+		...(pending.organizationId
+			? { organizationId: pending.organizationId }
+      : {}),
+		...(pending.releaseState ? { releaseState: pending.releaseState } : {}),
+		...(pending.originalRunIdentity
+			? { originalRunIdentity: pending.originalRunIdentity }
+			: {}),
+		...(pending.conversationId ? { conversationId: pending.conversationId } : {}),
+		...(pending.personalReminderDeliveryIntent
+			? { personalReminderDeliveryIntent: true as const }
+			: {}),
   };
-  return Object.keys(options).length > 0 ? options : undefined;
+	return options;
 }
 
 export async function storePendingTool(
   requestId: string,
   invocation: PendingToolInvocation,
-  ttlSeconds: number
+	ttlSeconds: number,
 ): Promise<void> {
   const sql = getDb();
   const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
@@ -81,7 +170,7 @@ export async function storePendingTool(
  * this to validate caller identity before the destructive `takePendingTool`.
  */
 export async function getPendingTool(
-  requestId: string
+	requestId: string,
 ): Promise<PendingToolInvocation | null> {
   const sql = getDb();
   const rows = await sql`
@@ -93,7 +182,7 @@ export async function getPendingTool(
     LIMIT 1
   `;
   if (rows.length === 0) return null;
-  return ((rows[0] as { payload: PendingToolInvocation }).payload) ?? null;
+	return (rows[0] as { payload: PendingToolInvocation }).payload ?? null;
 }
 
 /**
@@ -103,7 +192,7 @@ export async function getPendingTool(
  * click see null and no-op.
  */
 export async function takePendingTool(
-  requestId: string
+	requestId: string,
 ): Promise<PendingToolInvocation | null> {
   const sql = getDb();
   const rows = await sql`
@@ -114,5 +203,28 @@ export async function takePendingTool(
     RETURNING payload
   `;
   if (rows.length === 0) return null;
-  return ((rows[0] as { payload: PendingToolInvocation }).payload) ?? null;
+	return (rows[0] as { payload: PendingToolInvocation }).payload ?? null;
+}
+
+/** Atomically claims only the exact payload that was previously validated. */
+export async function takePendingToolIfUnchanged(
+	requestId: string,
+	expected: PendingToolInvocation,
+	expectedDigest: string,
+): Promise<PendingToolInvocation | null> {
+	if (pendingToolContinuationDigest(expected) !== expectedDigest) return null;
+	const sql = getDb();
+	const rows = await sql`
+		DELETE FROM oauth_states
+		WHERE id = ${requestId}
+		  AND scope = ${SCOPE}
+		  AND expires_at > now()
+		  AND payload = ${sql.json(expected as object)}::jsonb
+		RETURNING payload
+	`;
+	if (rows.length === 0) return null;
+	const claimed = (rows[0] as { payload: PendingToolInvocation }).payload;
+	return pendingToolContinuationDigest(claimed) === expectedDigest
+		? claimed
+		: null;
 }

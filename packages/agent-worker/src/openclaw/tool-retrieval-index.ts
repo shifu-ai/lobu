@@ -5,6 +5,8 @@ import {
   releaseToolRouterCacheEntry,
   retainToolRouterCacheEntry,
   touchToolRouterCacheEntry,
+  serializeToolRouterCacheContext,
+  type ToolRouterCacheContext,
 } from "./tool-router-memory-budget";
 import { normalizeToolText, tokenizeToolText } from "./tool-tokenizer";
 
@@ -326,20 +328,25 @@ export function buildToolRetrievalIndex(
   });
 }
 
-function retrievalIndexCacheKey(descriptors: ToolDescriptor[]): string {
-  return `${TOOL_RETRIEVAL_INDEX_SCHEMA}:${inventoryFingerprint(descriptors)}`;
+function retrievalIndexCacheKey(
+  descriptors: ToolDescriptor[],
+  context?: ToolRouterCacheContext
+): string {
+  return `${TOOL_RETRIEVAL_INDEX_SCHEMA}:${inventoryFingerprint(descriptors)}:${
+    context ? serializeToolRouterCacheContext(context) : "raw"
+  }`;
 }
 
 export function getOrBuildToolRetrievalIndex(
-  descriptors: ToolDescriptor[]
+  descriptors: ToolDescriptor[],
+  options: { cacheContext?: ToolRouterCacheContext } = {}
 ): CachedToolRetrievalIndex {
   const startedAt = performance.now();
-  const cacheKey = retrievalIndexCacheKey(descriptors);
+  const cacheKey = retrievalIndexCacheKey(descriptors, options.cacheContext);
   const cached = toolRetrievalIndexCache.get(cacheKey);
-  if (cached) {
+  if (cached && touchToolRouterCacheEntry(CACHE_NAMESPACE, cacheKey)) {
     toolRetrievalIndexCache.delete(cacheKey);
     toolRetrievalIndexCache.set(cacheKey, cached);
-    touchToolRouterCacheEntry(CACHE_NAMESPACE, cacheKey);
     toolRetrievalIndexCacheHits++;
     return {
       index: cached.index,
@@ -359,6 +366,9 @@ export function getOrBuildToolRetrievalIndex(
       namespace: CACHE_NAMESPACE,
       key: cacheKey,
       estimatedBytes: index.estimatedBytes,
+      ...(options.cacheContext
+        ? { expiresAtMs: Date.parse(options.cacheContext.snapshotExpiresAt) }
+        : {}),
       onEvict: () => {
         const evicted = toolRetrievalIndexCache.get(cacheKey);
         if (!evicted) return;

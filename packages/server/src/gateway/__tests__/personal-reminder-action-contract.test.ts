@@ -76,16 +76,19 @@ function row(input: {
 }
 
 function deps(captured: ScheduledJobRow[]): ManageSchedulesDeps {
-	return {
-		createScheduledJob: mock(
-			async (
+	const persist = async (
 				input: Parameters<ManageSchedulesDeps["createScheduledJob"]>[0],
 			) => {
 				const saved = row(input);
 				captured.push(saved);
 				return saved;
-			},
-		) as never,
+	};
+	return {
+		createScheduledJob: mock(persist) as never,
+		createScheduledJobWithGuards: mock(async (input) => ({
+			status: "ok",
+			job: await persist(input),
+		})) as never,
 		upsertScheduledJobByExternalKeyWithQuota: mock(async () => {
 			throw new Error("unexpected upsert");
 		}) as never,

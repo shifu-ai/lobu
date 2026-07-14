@@ -1,10 +1,13 @@
 import { createLogger } from "@lobu/core";
 import {
   buildPendingToolExecutionOptions,
-  takePendingTool,
+  getPendingTool,
+  pendingToolContinuationDigest,
+  takePendingToolIfUnchanged,
   type PendingToolExecutionOptions,
   type PendingToolInvocation,
 } from "../auth/mcp/pending-tool-store.js";
+import { validatePendingToolContinuation } from "../auth/mcp/tool-approval-service.js";
 import type {
   InteractionService,
   PostedLinkButton,
@@ -35,6 +38,7 @@ type ExecuteToolDirectFn = (
 ) => Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
+  diagnosticCode?: string;
 }>;
 
 /**
@@ -84,9 +88,11 @@ function resolveGrantExpiresAt(duration: string): number | null {
  * the payload and subsequent webhook retries see null and no-op.
  */
 async function takePendingToolInvocation(
-  requestId: string
+  requestId: string,
+  expected: PendingToolInvocation,
+  expectedDigest: string,
 ): Promise<PendingToolInvocation | null> {
-  return takePendingTool(requestId);
+  return takePendingToolIfUnchanged(requestId, expected, expectedDigest);
 }
 
 function describeDecision(decision: string): string {
@@ -153,7 +159,14 @@ export function registerInteractionBridge(
   connection: PlatformConnection,
   chat: any,
   grantStore?: GrantStore,
-  executeToolDirect?: ExecuteToolDirectFn
+  executeToolDirect?: ExecuteToolDirectFn,
+  revalidatePendingToolEligibility?: (
+    pending: PendingToolInvocation
+  ) => Promise<boolean>,
+  continuationValidator?: (
+    pending: PendingToolInvocation,
+    organizationId: string,
+  ) => Promise<{ valid: true } | { valid: false; diagnosticCode: "approval_inventory_stale" }>
 ): () => void {
   const { id: connectionId, platform } = connection;
 
@@ -633,7 +646,9 @@ export function registerInteractionBridge(
       });
     },
     async (channelId, conversationId) =>
-      resolveThread(manager, connectionId, channelId, conversationId)
+      resolveThread(manager, connectionId, channelId, conversationId),
+    revalidatePendingToolEligibility,
+    continuationValidator
   );
 
   logger.info({ connectionId, platform }, "Interaction bridge registered");
@@ -693,7 +708,14 @@ export function registerActionHandlers(
   resolveApprovalTarget?: (
     channelId: string,
     conversationId: string
-  ) => Promise<any | null>
+  ) => Promise<any | null>,
+  revalidatePendingToolEligibility?: (
+    pending: PendingToolInvocation
+  ) => Promise<boolean>,
+  continuationValidator?: (
+    pending: PendingToolInvocation,
+    organizationId: string,
+  ) => Promise<{ valid: true } | { valid: false; diagnosticCode: "approval_inventory_stale" }>
 ): void {
   chat.onAction(async (event: any) => {
     const actionId: string = event.actionId ?? "";
@@ -717,9 +739,58 @@ export function registerActionHandlers(
       // tracked — this is a real first click landing on an expired/missing
       // pending key, and we MUST surface that to the user. Otherwise the
       // click looks like it did nothing.
-      const pending = await takePendingToolInvocation(requestId).catch(
+      const candidate = await getPendingTool(requestId).catch(
         () => null
       );
+      const clickerUserId = String(
+        event.userId ?? event.user?.userId ?? event.user?.id ?? "",
+      ).trim();
+      if (candidate && (!clickerUserId || clickerUserId !== candidate.userId)) {
+        logger.warn(
+          { requestId, hasClickerIdentity: clickerUserId.length > 0 },
+          "Ignoring tool approval from a non-owning interaction user",
+        );
+        return;
+      }
+      if (candidate?.releaseBinding) {
+        if (
+          candidate.organizationId !== connection.organizationId ||
+          (candidate.connectionId !== undefined &&
+            candidate.connectionId !== connection.id)
+        ) {
+          await thread.post("approval_inventory_stale").catch(() => undefined);
+          return;
+        }
+        const validation = !connection.organizationId
+          ? { valid: false as const, diagnosticCode: "approval_inventory_stale" as const }
+          : continuationValidator
+            ? await continuationValidator(candidate, connection.organizationId)
+            : await validatePendingToolContinuation(
+                candidate,
+                connection.organizationId,
+                { revalidateEligibility: revalidatePendingToolEligibility }
+              );
+        if (!validation.valid) {
+          const digest = pendingToolContinuationDigest(candidate);
+          await takePendingToolInvocation(requestId, candidate, digest).catch(
+            () => null
+          );
+          const sent = claimApprovalCard?.(requestId);
+          await sent?.edit("*Tool Approval*\n\n_approval_inventory_stale_").catch(() => undefined);
+          await thread.post("approval_inventory_stale").catch(() => undefined);
+          return;
+        }
+      }
+      const candidateDigest = candidate
+        ? pendingToolContinuationDigest(candidate)
+        : "";
+      const pending = candidate
+        ? await takePendingToolInvocation(
+            requestId,
+            candidate,
+            candidateDigest
+          ).catch(() => null)
+        : null;
       if (!pending) {
         const sent = claimApprovalCard?.(requestId);
         if (sent) {
@@ -748,6 +819,22 @@ export function registerActionHandlers(
           );
         }
         return;
+      }
+
+      if (pending.releaseBinding || pending.releaseState?.status === "active") {
+        const validation = !connection.organizationId
+          ? { valid: false as const, diagnosticCode: "approval_inventory_stale" as const }
+          : continuationValidator
+            ? await continuationValidator(pending, connection.organizationId)
+            : await validatePendingToolContinuation(
+                pending,
+                connection.organizationId,
+                { revalidateEligibility: revalidatePendingToolEligibility },
+              );
+        if (!validation.valid) {
+          await thread.post(validation.diagnosticCode).catch(() => undefined);
+          return;
+        }
       }
 
       const pattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;
@@ -802,8 +889,11 @@ export function registerActionHandlers(
 
       // Approved — store grant, execute, post result
       const expiresAt = resolveGrantExpiresAt(decision);
+      const requiresEgressAuthorization = Boolean(
+        pending.releaseBinding || pending.releaseState?.status === "active",
+      );
 
-      if (grantStore) {
+      if (grantStore && !requiresEgressAuthorization) {
         try {
           await grantStore.grant(
             pending.agentId,
@@ -833,7 +923,39 @@ export function registerActionHandlers(
       // Execute the pending tool call
       if (executeToolDirect) {
         try {
-          const options = buildPendingToolExecutionOptions(pending);
+          const baseOptions = buildPendingToolExecutionOptions(pending);
+          let grantStored = false;
+          const options = baseOptions && requiresEgressAuthorization
+            ? {
+                ...baseOptions,
+                approvalReplayAuthorization: {
+                  revalidate: async () => {
+                    if (!connection.organizationId) return false;
+                    const result = continuationValidator
+                      ? await continuationValidator(pending, connection.organizationId)
+                      : await validatePendingToolContinuation(
+                          pending,
+                          connection.organizationId,
+                          { revalidateEligibility: revalidatePendingToolEligibility },
+                        );
+                    return result.valid;
+                  },
+                  onExecutionCompleted: grantStore
+                    ? async () => {
+                        if (grantStored) return;
+                        await grantStore.grant(
+                          pending.agentId,
+                          pattern,
+                          expiresAt,
+                          undefined,
+                          connection.organizationId,
+                        );
+                        grantStored = true;
+                      }
+                    : undefined,
+                },
+              }
+            : baseOptions;
           const execute = () =>
             options
               ? executeToolDirect(
@@ -857,6 +979,17 @@ export function registerActionHandlers(
                 execute
               )
             : await execute();
+
+          if (result.diagnosticCode === "approval_inventory_stale") {
+            await postTarget.post(
+              "This approval expired because the available tools changed. Please try again.",
+            );
+            logger.warn(
+              { requestId, mcpId: pending.mcpId, toolName: pending.toolName },
+              "Tool approval became stale before execution",
+            );
+            return;
+          }
 
           const resultText = result.content.map((c) => c.text).join("\n");
           await postTarget.post(

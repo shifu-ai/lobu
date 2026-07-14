@@ -460,6 +460,34 @@ describe("callMcpTool", () => {
     expect(capturedContentType).toBe("application/json");
   });
 
+  test.each([
+    "legacy",
+    "shadow",
+    "semantic",
+  ] as const)("binds the effective inventory for %s approval continuations", async (routerMode) => {
+    let headers = new Headers();
+    globalThis.fetch = mock(async (_url, init) => {
+      headers = new Headers(init?.headers);
+      return Response.json({ content: [], isError: false });
+    }) as unknown as typeof fetch;
+
+    await callMcpTool(
+      {
+        ...gw,
+        effectiveToolRouterMode: routerMode,
+        effectiveToolInventoryFingerprint: "a".repeat(64),
+      },
+      "lobu",
+      "search_memory",
+      {}
+    );
+
+    expect(headers.get("x-lobu-effective-tool-router-mode")).toBe(routerMode);
+    expect(headers.get("x-lobu-effective-tool-inventory-fingerprint")).toBe(
+      "a".repeat(64)
+    );
+  });
+
   test("sends POST method", async () => {
     let capturedMethod = "";
     globalThis.fetch = mock(
@@ -725,6 +753,58 @@ describe("direct MCP personal reminder execution contract", () => {
         "x-lobu-personal-reminder-delivery-intent"
       ]
     ).toBe("personal_reminder_delivery.v1");
+  });
+
+  test("inactive release behavior blocks a direct reminder before the proxy", async () => {
+    const fetchMock = mock(async () =>
+      Response.json({ content: [{ type: "text", text: "must not run" }] })
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const [definition] = createMcpToolDefinitions(
+      {
+        "lobu-memory": [
+          {
+            name: "manage_schedules",
+            description: "Manage schedules",
+            inputSchema: { type: "object", additionalProperties: true },
+          },
+        ],
+      },
+      gw,
+      undefined,
+      {
+        turnExecutionIntent: deriveTurnExecutionIntent("五分鐘後提醒我喝水"),
+        personalReminderDeliveryExecutable: false,
+      }
+    );
+
+    const result = await definition!.execute("inactive-reminder", {
+      action: "create",
+      run_at: "2026-07-14T12:35:00.000Z",
+      action_type: "send_notification",
+      body: "喝水",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(extractText(result)).toContain("personal_reminder_release_inactive");
+  });
+
+  test("direct definition rechecks the final effective allowed keys", async () => {
+    const fetchMock = mock(async () =>
+      Response.json({ content: [{ type: "text", text: "must not run" }] })
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const [definition] = createMcpToolDefinitions(
+      { secret: [{ name: "stale_tool", inputSchema: { type: "object" } }] },
+      gw,
+      undefined,
+      { effectiveAllowedToolKeys: [] }
+    );
+
+    const result = await definition!.execute("stale-direct", {});
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(extractText(result)).toContain("policy_denied");
   });
 });
 

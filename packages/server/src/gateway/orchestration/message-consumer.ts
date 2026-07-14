@@ -8,12 +8,13 @@ import {
   getTraceparent,
   type GuardrailRegistry,
   type MessagePayload,
+	type ReleaseCapabilityState,
   OrchestratorError,
   retryWithBackoff,
   runGuardrailInstances,
   SpanStatusCode,
 } from "@lobu/core";
-import type {Env} from '@lobu/connector-sdk';
+import type { Env } from "@lobu/connector-sdk";
 import { createHash } from "node:crypto";
 import { resolveAgentGuardrails } from "../guardrails/aggregator.js";
 import * as Sentry from "@sentry/node";
@@ -30,11 +31,24 @@ import {
   TERMINAL_DELIVERY_SEND_OPTS,
 } from "../infrastructure/queue/index.js";
 import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
-import { attachCourseContextForReviewedScope, isExplicitPersonalBypass, type CourseContextGateOptions, type CourseContextGateResult } from "./course-context-gate.js";
-import type {CourseMemorySearch} from './course-memory-retriever.js';
-import {resolveCourseSkillContextMetadata,selectActiveCourseSkill} from './course-skill-context-metadata.js';
+import {
+	attachCourseContextForReviewedScope,
+	isExplicitPersonalBypass,
+	type CourseContextGateOptions,
+	type CourseContextGateResult,
+} from "./course-context-gate.js";
+import type { CourseMemorySearch } from "./course-memory-retriever.js";
+import {
+	resolveCourseSkillContextMetadata,
+	selectActiveCourseSkill,
+} from "./course-skill-context-metadata.js";
 import { getDb } from "../../db/client.js";
 import { emitJourneyEvent as emitJourneyObsEvent } from "../services/journey-observability.js";
+import {
+	resolveRuntimeCapabilitySnapshot,
+	type RuntimeEnvironment,
+} from "../services/runtime-capability-snapshot.js";
+import { readAgentReleaseCapabilityState } from "../../lobu/agent-release-service.js";
 import {
   type BaseDeploymentManager,
   buildCanonicalConversationKey,
@@ -43,24 +57,139 @@ import {
 } from "./base-deployment-manager.js";
 
 const logger = createLogger("orchestrator");
-export type CourseContextGateMode = "off" | "shadow" | "single_course" | "enforce";
-export function parseCourseContextRolloutConfig(source: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env): { mode: CourseContextGateMode; legacyFallback: boolean } {
+export type CourseContextGateMode =
+	| "off"
+	| "shadow"
+	| "single_course"
+	| "enforce";
+export function parseCourseContextRolloutConfig(
+	source: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
+): { mode: CourseContextGateMode; legacyFallback: boolean } {
   const rawMode = source.COURSE_CONTEXT_GATE_MODE?.trim().toLowerCase();
-  const mode: CourseContextGateMode = rawMode === undefined ? "enforce" : rawMode === "off" || rawMode === "shadow" || rawMode === "single_course" || rawMode === "enforce" ? rawMode : "off";
-  return { mode, legacyFallback: source.COURSE_CONTEXT_LEGACY_FALLBACK?.trim().toLowerCase() === "true" };
+	const mode: CourseContextGateMode =
+		rawMode === undefined
+			? "enforce"
+			: rawMode === "off" ||
+					rawMode === "shadow" ||
+					rawMode === "single_course" ||
+					rawMode === "enforce"
+				? rawMode
+				: "off";
+	return {
+		mode,
+		legacyFallback:
+			source.COURSE_CONTEXT_LEGACY_FALLBACK?.trim().toLowerCase() === "true",
+	};
 }
-export type LegacyComparison = "match"|"mismatch"|"legacy_missing"|"resolved_missing";
-export function compareCourseContextIdentity(resolved:{courseKey:string;courseEntityId:string}|undefined,legacy:{courseKey:string;courseEntityId:string}|undefined):LegacyComparison{if(!resolved)return"resolved_missing";if(!legacy)return"legacy_missing";return resolved.courseKey===legacy.courseKey&&resolved.courseEntityId===legacy.courseEntityId?"match":"mismatch";}
-function hasTrustedCourseContext(data:MessagePayload,context:NonNullable<MessagePayload['resolvedCourseContext']>):boolean{const trust=context.trust;return Boolean(trust&&trust.ownerUserId===data.userId&&trust.agentId===data.agentId&&trust.conversationId===data.conversationId&&trust.courseKey===context.course.courseKey&&trust.courseEntityId===context.course.courseEntityId&&trust.contextPackId===context.context.contextPackId&&trust.contextVersion===context.context.contextVersion&&Number.isSafeInteger(trust.contextVersion)&&trust.contextVersion>0&&context.retrieval.crossCourseGuard==='passed');}
-type LegacyCourseContext={courseKey:string;courseEntityId:string;contextPackId:string;contextVersion:number;stale:boolean;confirmedSummary:string};
-async function readLegacyCourseContext(data:MessagePayload):Promise<LegacyCourseContext|undefined>{const root=process.env.COURSE_CONTEXT_LEGACY_COMPARE_URL?.trim();const secret=process.env.TOOLBOX_INTERNAL_SECRET?.trim();if(!root||!secret)return undefined;const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),500);try{const url=new URL(root);url.searchParams.set('ownerUserId',data.userId);url.searchParams.set('agentId',data.agentId);const response=await fetch(url,{headers:{'x-internal-secret':secret},signal:controller.signal});if(response.status===404)return undefined;if(!response.ok)return undefined;const value=await response.json() as Record<string,unknown>;if(typeof value.courseKey!=="string"||value.courseKey.length>200||typeof value.courseEntityId!=="string"||value.courseEntityId.length>300||typeof value.contextPackId!=="string"||value.contextPackId.length>300||!Number.isInteger(value.contextVersion)||typeof value.stale!=="boolean"||typeof value.confirmedSummary!=="string"||value.confirmedSummary.length>8000)return undefined;return value as LegacyCourseContext;}catch{return undefined;}finally{clearTimeout(timer);}}
-export function buildCourseMemorySearchEnv(source:NodeJS.ProcessEnv=process.env):Env{return{ENVIRONMENT:source.ENVIRONMENT??'production',EMBEDDINGS_SERVICE_URL:source.EMBEDDINGS_SERVICE_URL,EMBEDDINGS_SERVICE_TOKEN:source.EMBEDDINGS_SERVICE_TOKEN,EMBEDDINGS_MODEL:source.EMBEDDINGS_MODEL,EMBEDDINGS_DIMENSIONS:source.EMBEDDINGS_DIMENSIONS,EMBEDDINGS_TIMEOUT_MS:source.EMBEDDINGS_TIMEOUT_MS};}
+export type LegacyComparison =
+	| "match"
+	| "mismatch"
+	| "legacy_missing"
+	| "resolved_missing";
+export function compareCourseContextIdentity(
+	resolved: { courseKey: string; courseEntityId: string } | undefined,
+	legacy: { courseKey: string; courseEntityId: string } | undefined,
+): LegacyComparison {
+	if (!resolved) return "resolved_missing";
+	if (!legacy) return "legacy_missing";
+	return resolved.courseKey === legacy.courseKey &&
+		resolved.courseEntityId === legacy.courseEntityId
+		? "match"
+		: "mismatch";
+}
+function hasTrustedCourseContext(
+	data: MessagePayload,
+	context: NonNullable<MessagePayload["resolvedCourseContext"]>,
+): boolean {
+	const trust = context.trust;
+	return Boolean(
+		trust &&
+			trust.ownerUserId === data.userId &&
+			trust.agentId === data.agentId &&
+			trust.conversationId === data.conversationId &&
+			trust.courseKey === context.course.courseKey &&
+			trust.courseEntityId === context.course.courseEntityId &&
+			trust.contextPackId === context.context.contextPackId &&
+			trust.contextVersion === context.context.contextVersion &&
+			Number.isSafeInteger(trust.contextVersion) &&
+			trust.contextVersion > 0 &&
+			context.retrieval.crossCourseGuard === "passed",
+	);
+}
+type LegacyCourseContext = {
+	courseKey: string;
+	courseEntityId: string;
+	contextPackId: string;
+	contextVersion: number;
+	stale: boolean;
+	confirmedSummary: string;
+};
+async function readLegacyCourseContext(
+	data: MessagePayload,
+): Promise<LegacyCourseContext | undefined> {
+	const root = process.env.COURSE_CONTEXT_LEGACY_COMPARE_URL?.trim();
+	const secret = process.env.TOOLBOX_INTERNAL_SECRET?.trim();
+	if (!root || !secret) return undefined;
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), 500);
+	try {
+		const url = new URL(root);
+		url.searchParams.set("ownerUserId", data.userId);
+		url.searchParams.set("agentId", data.agentId);
+		const response = await fetch(url, {
+			headers: { "x-internal-secret": secret },
+			signal: controller.signal,
+		});
+		if (response.status === 404) return undefined;
+		if (!response.ok) return undefined;
+		const value = (await response.json()) as Record<string, unknown>;
+		if (
+			typeof value.courseKey !== "string" ||
+			value.courseKey.length > 200 ||
+			typeof value.courseEntityId !== "string" ||
+			value.courseEntityId.length > 300 ||
+			typeof value.contextPackId !== "string" ||
+			value.contextPackId.length > 300 ||
+			!Number.isInteger(value.contextVersion) ||
+			typeof value.stale !== "boolean" ||
+			typeof value.confirmedSummary !== "string" ||
+			value.confirmedSummary.length > 8000
+		)
+			return undefined;
+		return value as LegacyCourseContext;
+	} catch {
+		return undefined;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+export function buildCourseMemorySearchEnv(
+	source: NodeJS.ProcessEnv = process.env,
+): Env {
+	return {
+		ENVIRONMENT: source.ENVIRONMENT ?? "production",
+		EMBEDDINGS_SERVICE_URL: source.EMBEDDINGS_SERVICE_URL,
+		EMBEDDINGS_SERVICE_TOKEN: source.EMBEDDINGS_SERVICE_TOKEN,
+		EMBEDDINGS_MODEL: source.EMBEDDINGS_MODEL,
+		EMBEDDINGS_DIMENSIONS: source.EMBEDDINGS_DIMENSIONS,
+		EMBEDDINGS_TIMEOUT_MS: source.EMBEDDINGS_TIMEOUT_MS,
+	};
+}
 
-type ScheduledExecutionTrace = Parameters<NonNullable<CourseContextGateOptions["recordScheduledExecutionTrace"]>>[0];
-type ScheduledExecutionTraceRecorder = (data: MessagePayload, trace: ScheduledExecutionTrace) => Promise<void>;
+type ScheduledExecutionTrace = Parameters<
+	NonNullable<CourseContextGateOptions["recordScheduledExecutionTrace"]>
+>[0];
+type ScheduledExecutionTraceRecorder = (
+	data: MessagePayload,
+	trace: ScheduledExecutionTrace,
+) => Promise<void>;
 
-async function persistScheduledExecutionTrace(data: MessagePayload, trace: ScheduledExecutionTrace): Promise<void> {
-  if (!data.organizationId || !data.scheduledCourseContext) throw new Error("scheduled_course_trace_scope_missing");
+async function persistScheduledExecutionTrace(
+	data: MessagePayload,
+	trace: ScheduledExecutionTrace,
+): Promise<void> {
+	if (!data.organizationId || !data.scheduledCourseContext)
+		throw new Error("scheduled_course_trace_scope_missing");
   const sql = getDb();
   const rows = await sql<{ id: string }>`
     UPDATE scheduled_jobs
@@ -87,10 +216,15 @@ export function mintRunJobToken(
   data: MessagePayload,
   effectiveConversationId: string,
   deploymentName: string,
-  includeTrustedCourseScope = false
+  includeTrustedCourseScope = false,
+	releaseState: ReleaseCapabilityState = { status: "legacy_unenrolled" },
 ): string | undefined {
   if (data.runId === undefined) return undefined;
-  return generateWorkerToken(data.userId, effectiveConversationId, deploymentName, {
+	return generateWorkerToken(
+		data.userId,
+		effectiveConversationId,
+		deploymentName,
+		{
     channelId: data.channelId,
     teamId: data.teamId || getStringField(data.platformMetadata, "teamId"),
     agentId: data.agentId,
@@ -110,7 +244,9 @@ export function mintRunJobToken(
 				: includeTrustedCourseScope && data.resolvedCourseContext
 					? "course"
 					: "personal",
-		courseToolScope: includeTrustedCourseScope && data.resolvedCourseContext?.trust ? {
+			courseToolScope:
+				includeTrustedCourseScope && data.resolvedCourseContext?.trust
+					? {
       ownerUserId: data.resolvedCourseContext.trust.ownerUserId,
       agentId: data.resolvedCourseContext.trust.agentId,
 			courseEntityId: data.resolvedCourseContext.trust.courseEntityId,
@@ -118,24 +254,109 @@ export function mintRunJobToken(
 			contextVersion: data.resolvedCourseContext.trust.contextVersion,
 			activeSpecializedSkill:
 				data.resolvedCourseContext.activeSpecializedSkill ?? null,
-    } : undefined,
-  });
+						}
+					: undefined,
+			releaseState,
+		},
+	);
 }
 
 export function workerMessageSingletonKey(data: MessagePayload): string {
-  const canonical = buildCanonicalConversationKey({ platform:data.platform,channelId:data.channelId,conversationId:data.conversationId });
-  return `worker-message:${createHash("sha256").update(`${data.organizationId ?? ""}\0${data.agentId ?? ""}\0${canonical}\0${data.messageId}`).digest("hex")}`;
+	const canonical = buildCanonicalConversationKey({
+		platform: data.platform,
+		channelId: data.channelId,
+		conversationId: data.conversationId,
+	});
+	return `worker-message:${createHash("sha256")
+		.update(
+			`${data.organizationId ?? ""}\0${data.agentId ?? ""}\0${canonical}\0${data.messageId}`,
+		)
+		.digest("hex")}`;
 }
 
 export function terminalCourseContextSingletonKey(
   data: MessagePayload,
-  result: Exclude<CourseContextGateResult, {status:"ready"}|{status:"not_required"}|{status:"already_dispatched"}>,
+	result: Exclude<
+		CourseContextGateResult,
+		| { status: "ready" }
+		| { status: "not_required" }
+		| { status: "already_dispatched" }
+	>,
 ): string {
-  const canonical = buildCanonicalConversationKey({ platform:data.platform,channelId:data.channelId,conversationId:data.conversationId });
-  const outcome = result.status === "clarification_required"
-    ? `${result.status}:${result.candidates.map((candidate) => candidate.courseKey).sort().join(",")}`
+	const canonical = buildCanonicalConversationKey({
+		platform: data.platform,
+		channelId: data.channelId,
+		conversationId: data.conversationId,
+	});
+	const outcome =
+		result.status === "clarification_required"
+			? `${result.status}:${result.candidates
+					.map((candidate) => candidate.courseKey)
+					.sort()
+					.join(",")}`
     : result.status;
-  return `course-terminal:${createHash("sha256").update(`${data.organizationId ?? ""}\0${data.agentId ?? ""}\0${canonical}\0${data.messageId ?? ""}\0${outcome}`).digest("hex")}`;
+	return `course-terminal:${createHash("sha256")
+		.update(
+			`${data.organizationId ?? ""}\0${data.agentId ?? ""}\0${canonical}\0${data.messageId ?? ""}\0${outcome}`,
+		)
+		.digest("hex")}`;
+}
+
+export async function resolveRunReleaseState(
+	data: MessagePayload,
+	environment: string | undefined,
+	deps: {
+		readState: typeof readAgentReleaseCapabilityState;
+		resolveSnapshot: typeof resolveRuntimeCapabilitySnapshot;
+	},
+): Promise<ReleaseCapabilityState> {
+	if (
+		!data.organizationId ||
+		!data.agentId ||
+		(environment !== "staging" && environment !== "production")
+	)
+		return { status: "legacy_unenrolled" };
+	const runtimeEnvironment = environment as RuntimeEnvironment;
+	const inactive = (
+		reason: "receipt_invalid" | "snapshot_unavailable",
+	): ReleaseCapabilityState => ({
+		status: "enrolled_inactive",
+		environment: runtimeEnvironment,
+		reason,
+	});
+	const scope = {
+		organizationId: data.organizationId,
+		agentId: data.agentId,
+		environment: runtimeEnvironment,
+	};
+	let enrollment;
+	try {
+		enrollment = await deps.readState({ ...scope, snapshot: null });
+	} catch (error) {
+		logger.warn(
+			{ err: error, agentId: data.agentId },
+			"Release enrollment state unavailable",
+		);
+		return inactive("snapshot_unavailable");
+	}
+	if (enrollment.status === "legacy_unenrolled") return enrollment;
+	try {
+		const snapshot = await deps.resolveSnapshot({
+			environment: runtimeEnvironment,
+			toolboxUserId: data.userId,
+			agentId: data.agentId,
+		});
+		const resolved = await deps.readState({ ...scope, snapshot });
+		return resolved.status === "active"
+			? { status: "active", claim: resolved.claim }
+			: inactive("receipt_invalid");
+	} catch (error) {
+		logger.warn(
+			{ err: error, agentId: data.agentId },
+			"Release capability snapshot unavailable",
+		);
+		return inactive("snapshot_unavailable");
+	}
 }
 
 export class MessageConsumer {
@@ -165,8 +386,13 @@ export class MessageConsumer {
     config: OrchestratorConfig,
     deploymentManager: BaseDeploymentManager,
     queue?: IMessageQueue,
-    courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void> = attachCourseContextForReviewedScope,
-    journeyEmitter: (event:Parameters<typeof emitJourneyObsEvent>[0],signal?:AbortSignal)=>Promise<void> = emitJourneyObsEvent,
+		courseContextResolver: (
+			payload: MessagePayload,
+		) => Promise<CourseContextGateResult | void> = attachCourseContextForReviewedScope,
+		journeyEmitter: (
+			event: Parameters<typeof emitJourneyObsEvent>[0],
+			signal?: AbortSignal,
+		) => Promise<void> = emitJourneyObsEvent,
     scheduledExecutionTraceRecorder: ScheduledExecutionTraceRecorder = persistScheduledExecutionTrace,
   ) {
     this.config = config;
@@ -178,13 +404,26 @@ export class MessageConsumer {
     this.scheduledExecutionTraceRecorder = scheduledExecutionTraceRecorder;
   }
 
+  private async mintReleaseAwareRunToken(
+    data: MessagePayload,
+    deploymentName: string,
+    includeTrustedCourseScope = false,
+  ): Promise<string | undefined> {
+    const environment = process.env.AGENT_RELEASE_ENVIRONMENT?.trim() ?? process.env.ENVIRONMENT?.trim();
+    const releaseState = await resolveRunReleaseState(data, environment, {
+      readState: readAgentReleaseCapabilityState,
+      resolveSnapshot: resolveRuntimeCapabilitySnapshot,
+    });
+    return mintRunJobToken(data, data.conversationId, deploymentName, includeTrustedCourseScope, releaseState);
+  }
+
 	private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
 		delete data.trustedExecutionScope;
 		const gateMode:CourseContextGateMode=data.scheduledCourseContext?'enforce':this.courseContextRollout.mode;
 		if(!data.scheduledCourseContext||gateMode==='off'||gateMode==='shadow')delete data.resolvedCourseContext;
 		if (gateMode === "off") {
 			await this.emitExecutionSelection(data);
-      data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName);
+      data.runJobToken = await this.mintReleaseAwareRunToken(data, deploymentName);
       await armTurnTimeout(this.queue, { messageId:data.messageId,channelId:data.channelId,conversationId:data.conversationId,userId:data.userId,platform:data.platform,platformMetadata:data.platformMetadata,deploymentName,organizationId:data.organizationId });
       await this.sendToWorkerQueue(data, deploymentName);
       return true;
@@ -246,7 +485,7 @@ export class MessageConsumer {
       return false;
 	}
 	await this.emitExecutionSelection(data);
-	data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName, gateMode === "enforce" && result?.status === "ready");
+	data.runJobToken = await this.mintReleaseAwareRunToken(data, deploymentName, gateMode === "enforce" && result?.status === "ready");
     await armTurnTimeout(this.queue, {
       messageId: data.messageId, channelId: data.channelId, conversationId: data.conversationId,
       userId: data.userId, platform: data.platform, platformMetadata: data.platformMetadata,
@@ -285,7 +524,7 @@ export class MessageConsumer {
    */
   setGuardrails(
     registry?: GuardrailRegistry,
-    settingsStore?: AgentSettingsStore
+		settingsStore?: AgentSettingsStore,
   ): void {
     this.guardrailRegistry = registry;
     this.agentSettingsStore = settingsStore;
@@ -294,7 +533,9 @@ export class MessageConsumer {
   setSessionManager(sessionManager: ISessionManager): void {
     this.sessionManager = sessionManager;
   }
-  setCourseMemorySearch(search:CourseMemorySearch):void{this.courseMemorySearch=search;}
+	setCourseMemorySearch(search: CourseMemorySearch): void {
+		this.courseMemorySearch = search;
+	}
 
   async start(): Promise<void> {
     try {
@@ -319,9 +560,9 @@ export class MessageConsumer {
             },
             async () => {
               return this.handleMessage(job);
-            }
+						},
           );
-        }
+				},
       );
 
       logger.debug("Queue consumer started");
@@ -330,7 +571,7 @@ export class MessageConsumer {
         ErrorCode.QUEUE_JOB_PROCESSING_FAILED,
         `Failed to start queue consumer: ${error instanceof Error ? error.message : String(error)}`,
         { error },
-        true
+				true,
       );
     }
   }
@@ -344,7 +585,7 @@ export class MessageConsumer {
    * Handle all messages - creates deployment for new threads or routes to existing thread queues
    */
   private async handleMessage(
-    job: SharedQueueJob<MessagePayload>
+		job: SharedQueueJob<MessagePayload>,
   ): Promise<void> {
     const data = job?.data;
     const jobId = job?.id || "unknown";
@@ -352,7 +593,7 @@ export class MessageConsumer {
     // Extract traceparent for distributed tracing (from message ingestion)
     const traceparent = platformMetadataString(
       data?.platformMetadata,
-      "traceparent"
+			"traceparent",
     );
 
     // Extract or generate trace ID for logging (backwards compatible)
@@ -381,7 +622,7 @@ export class MessageConsumer {
         userId: data?.userId,
         conversationId: data?.conversationId,
       },
-      "Processing job with trace context"
+			"Processing job with trace context",
     );
 
     try {
@@ -406,7 +647,7 @@ export class MessageConsumer {
           ErrorCode.QUEUE_JOB_PROCESSING_FAILED,
           "conversationId is required for message routing",
           { messageId: data.messageId, userId: data.userId },
-          true
+					true,
         );
       }
 
@@ -431,7 +672,7 @@ export class MessageConsumer {
       // path) we skip the mint; the snapshot path then declines to write
       // (worker-side runId is undefined and writeSnapshot bails).
       logger.info(
-        `Conversation routing - effectiveConversationId: ${effectiveConversationId}, canonicalKey: ${canonicalConversationKey}, deploymentName: ${deploymentName}`
+				`Conversation routing - effectiveConversationId: ${effectiveConversationId}, canonicalKey: ${canonicalConversationKey}, deploymentName: ${deploymentName}`,
       );
 
       // Input-stage guardrails: short-circuit dispatch when an enabled
@@ -449,12 +690,12 @@ export class MessageConsumer {
       ) {
         try {
           const settings = await this.agentSettingsStore.getSettings(
-            data.agentId
+						data.agentId,
           );
           const resolved = resolveAgentGuardrails(
             settings ?? { guardrails: [] },
             (settings?.skillsConfig?.skills ?? []).filter((s) => s.enabled),
-            this.guardrailRegistry
+						this.guardrailRegistry,
           );
           const list = resolved.byStage.input;
           if (list.length > 0) {
@@ -472,7 +713,7 @@ export class MessageConsumer {
               if (!resolvedOrgId && this.agentSettingsStore) {
                 try {
                   const md = await this.agentSettingsStore.getMetadata(
-                    data.agentId
+										data.agentId,
                   );
                   resolvedOrgId = md?.organizationId;
                 } catch (lookupErr) {
@@ -484,7 +725,7 @@ export class MessageConsumer {
                           ? lookupErr.message
                           : String(lookupErr),
                     },
-                    "Input guardrail trip: orgId metadata lookup failed (audit may be skipped)"
+										"Input guardrail trip: orgId metadata lookup failed (audit may be skipped)",
                   );
                 }
               }
@@ -516,7 +757,7 @@ export class MessageConsumer {
               agentId: data.agentId,
               err: err instanceof Error ? err.message : String(err),
             },
-            "Input guardrail check failed — proceeding without guardrails"
+						"Input guardrail check failed — proceeding without guardrails",
           );
         }
       }
@@ -542,7 +783,7 @@ export class MessageConsumer {
             error: `Message rejected: ${inputTrip.reason}`,
             processedMessageIds: [data.messageId],
           },
-          TERMINAL_DELIVERY_SEND_OPTS
+					TERMINAL_DELIVERY_SEND_OPTS,
         );
         logger.info(
           {
@@ -550,7 +791,7 @@ export class MessageConsumer {
             guardrail: inputTrip.guardrail,
             conversationId: effectiveConversationId,
           },
-          "Input guardrail tripped — message dropped"
+					"Input guardrail tripped — message dropped",
         );
         queueSpan?.setStatus({ code: SpanStatusCode.OK });
         queueSpan?.end();
@@ -579,14 +820,18 @@ export class MessageConsumer {
         },
         async () => {
           return await this.dispatchCourseContextBoundary(data, deploymentName);
-        }
+				},
       );
 
-      if (!workerDispatched) { queueSpan?.setStatus({ code: SpanStatusCode.OK }); queueSpan?.end(); return; }
+			if (!workerDispatched) {
+				queueSpan?.setStatus({ code: SpanStatusCode.OK });
+				queueSpan?.end();
+				return;
+			}
 
       logger.info(
         { traceId, traceparent: childTraceparent, deploymentName },
-        "Enqueued message to thread queue"
+				"Enqueued message to thread queue",
       );
 
       // 2) Ensure worker exists in the background (don't block queue send)
@@ -596,7 +841,7 @@ export class MessageConsumer {
         data,
         effectiveConversationId,
         traceId,
-        childTraceparent
+				childTraceparent,
       ).catch((bgError) => {
         // Capture error for monitoring and alerting
         Sentry.captureException(bgError, {
@@ -618,14 +863,14 @@ export class MessageConsumer {
             userId: data.userId,
             conversationId: effectiveConversationId,
           },
-          "Critical: Background worker creation failed. Messages are queued but worker unavailable."
+					"Critical: Background worker creation failed. Messages are queued but worker unavailable.",
         );
 
         // Track failed deployments for monitoring and potential retry
         this.trackFailedDeployment(deploymentName, data, bgError).catch(
           (trackError) => {
             logger.error("Failed to track deployment failure:", trackError);
-          }
+					},
         );
       });
 
@@ -647,7 +892,7 @@ export class MessageConsumer {
         ErrorCode.QUEUE_JOB_PROCESSING_FAILED,
         `Failed to process message job: ${error instanceof Error ? error.message : String(error)}`,
         { jobId, data, error },
-        true
+				true,
       );
     }
   }
@@ -657,7 +902,7 @@ export class MessageConsumer {
    */
   private async sendToWorkerQueue(
     data: MessagePayload,
-    deploymentName: string
+		deploymentName: string,
   ): Promise<void> {
     try {
       // Create thread-specific queue name: thread_message_[deploymentid]
@@ -681,12 +926,12 @@ export class MessageConsumer {
           ErrorCode.QUEUE_JOB_PROCESSING_FAILED,
           `queue.send() returned null/undefined for queue: ${threadQueueName}`,
           { threadQueueName, deploymentName },
-          true
+					true,
         );
       }
 
       logger.info(
-        `✅ Sent message to thread queue ${threadQueueName} for conversation ${data.conversationId}, jobId: ${jobId}`
+				`✅ Sent message to thread queue ${threadQueueName} for conversation ${data.conversationId}, jobId: ${jobId}`,
       );
     } catch (error) {
       logger.error(`❌ [ERROR] sendToWorkerQueue failed:`, error);
@@ -694,7 +939,7 @@ export class MessageConsumer {
         ErrorCode.QUEUE_JOB_PROCESSING_FAILED,
         `Failed to send message to thread queue: ${error instanceof Error ? error.message : String(error)}`,
         { deploymentName, data, error },
-        true
+				true,
       );
     }
   }
@@ -726,7 +971,7 @@ export class MessageConsumer {
     data: MessagePayload,
     conversationId: string,
     traceId: string,
-    traceparent?: string
+		traceparent?: string,
   ): Promise<void> {
     return retryWithBackoff(
       async () => {
@@ -743,7 +988,7 @@ export class MessageConsumer {
         const existingDeployments =
           await this.deploymentManager.listDeployments();
         const isNewThread = !existingDeployments.some(
-          (d) => d.deploymentName === deploymentName
+					(d) => d.deploymentName === deploymentName,
         );
 
         if (isNewThread) {
@@ -751,7 +996,7 @@ export class MessageConsumer {
           if (!acquired) {
             logger.info(
               { traceId, deploymentName },
-              "Another handler is creating this deployment, waiting"
+							"Another handler is creating this deployment, waiting",
             );
             await new Promise((r) => setTimeout(r, 3000));
             const rechecked = await this.deploymentManager.listDeployments();
@@ -759,10 +1004,10 @@ export class MessageConsumer {
               await this.deploymentManager.scaleDeployment(deploymentName, 1);
               logger.info(
                 { traceId, deploymentName },
-                "Deployment created by other handler, scaled up"
+								"Deployment created by other handler, scaled up",
               );
               await this.deploymentManager.updateDeploymentActivity(
-                deploymentName
+								deploymentName,
               );
               return;
             }
@@ -780,24 +1025,24 @@ export class MessageConsumer {
             ) {
               logger.info(
                 { traceId, deploymentName },
-                "Deployment already created by another handler after lock acquired"
+								"Deployment already created by another handler after lock acquired",
               );
               await this.deploymentManager.scaleDeployment(deploymentName, 1);
               await this.deploymentManager.updateDeploymentActivity(
-                deploymentName
+								deploymentName,
               );
               return;
             }
 
             logger.info(
               { traceId, traceparent, conversationId, deploymentName },
-              "New thread - creating deployment"
+							"New thread - creating deployment",
             );
             await this.deploymentManager.createWorkerDeployment(
               data.userId,
               conversationId,
               dataWithTrace,
-              recheckAfterLock
+							recheckAfterLock,
             );
             logger.info({ traceId, deploymentName }, "Created deployment");
           } finally {
@@ -806,7 +1051,7 @@ export class MessageConsumer {
         } else {
           logger.info(
             { traceId, conversationId, deploymentName },
-            "Existing thread - ensuring worker exists"
+						"Existing thread - ensuring worker exists",
           );
           // Sync network config domains to grant store (picks up settings changes)
           await this.deploymentManager.syncNetworkConfigGrants(dataWithTrace);
@@ -814,17 +1059,17 @@ export class MessageConsumer {
             await this.deploymentManager.scaleDeployment(deploymentName, 1);
             logger.info(
               { traceId, deploymentName },
-              "Scaled existing worker to 1"
+							"Scaled existing worker to 1",
             );
           } catch {
             logger.info(
               { traceId, conversationId, deploymentName },
-              "Worker doesn't exist, creating it"
+							"Worker doesn't exist, creating it",
             );
             await this.deploymentManager.createWorkerDeployment(
               data.userId,
               conversationId,
-              dataWithTrace
+							dataWithTrace,
             );
             logger.info({ traceId, deploymentName }, "Created worker");
           }
@@ -843,10 +1088,10 @@ export class MessageConsumer {
         onRetry: (attempt, error) => {
           logger.warn(
             { traceId, deploymentName, attempt, maxAttempts: 3 },
-            `Retry attempt failed: ${error.message}`
+						`Retry attempt failed: ${error.message}`,
           );
         },
-      }
+			},
     );
   }
 
@@ -857,7 +1102,7 @@ export class MessageConsumer {
   private async trackFailedDeployment(
     deploymentName: string,
     data: MessagePayload,
-    error: unknown
+		error: unknown,
   ): Promise<void> {
     try {
       logger.error(
@@ -869,7 +1114,7 @@ export class MessageConsumer {
           stack: error instanceof Error ? error.stack : undefined,
           queueName: `thread_message_${deploymentName}`,
         },
-        "Deployment creation failed"
+				"Deployment creation failed",
       );
 
       const userMessage =

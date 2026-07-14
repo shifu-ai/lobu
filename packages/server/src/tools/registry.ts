@@ -17,17 +17,25 @@
  * `search_memory`'s top-level `agent_id` arg) — not any of the above.
  */
 
-import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-access';
-import type { Env } from '../index';
-import { INTERNAL_REST_TOOLS } from './admin';
-import { MetricSeriesSchema, metricSeries } from './admin/metric_series';
-import { QuerySqlSchema, querySql } from './admin/query_sql';
-import { ResolvePathSchema, resolvePath } from './resolve_path';
-import { saveContent } from './save_content';
-import { SaveContentSchema } from './save_content_schema';
-import { SearchSchema, search } from './search';
-import { QuerySchema, RunSchema, querySdkScript, runSdkScript } from './sdk_run';
-import { SdkSearchSchema, sdkSearch } from './sdk_search';
+import {
+	getPublicReadableActions,
+	getRequiredAccessLevel,
+} from "../auth/tool-access";
+import type { Env } from "../index";
+import { INTERNAL_REST_TOOLS } from "./admin";
+import { MetricSeriesSchema, metricSeries } from "./admin/metric_series";
+import { QuerySqlSchema, querySql } from "./admin/query_sql";
+import { ResolvePathSchema, resolvePath } from "./resolve_path";
+import { saveContent } from "./save_content";
+import { SaveContentSchema } from "./save_content_schema";
+import { SearchSchema, search } from "./search";
+import {
+	QuerySchema,
+	RunSchema,
+	querySdkScript,
+	runSdkScript,
+} from "./sdk_run";
+import { SdkSearchSchema, sdkSearch } from "./sdk_search";
 
 // ============================================
 // Tool Definitions
@@ -48,7 +56,7 @@ export interface ToolAnnotations {
   idempotentHint?: boolean;
 }
 
-export type TokenType = 'oauth' | 'session' | 'pat' | 'anonymous';
+export type TokenType = "oauth" | "session" | "pat" | "anonymous";
 
 /**
  * Tool execution context from authentication
@@ -69,6 +77,8 @@ export interface ToolContext {
   conversationId?: string | null;
   /** Gateway-verified per-call personal-reminder delivery contract. */
   personalReminderDeliveryIntent?: boolean;
+  /** Verified bounded capability provenance for the current worker request. */
+	releaseState?: import("@lobu/core").ReleaseCapabilityState;
   /** Whether request was authenticated */
   isAuthenticated: boolean;
   /** OAuth client ID that created this request (null for session/anonymous) */
@@ -110,12 +120,12 @@ export interface ToolDefinition<T = any> {
 const READ_ONLY = { readOnlyHint: true, idempotentHint: true } as const;
 
 const stripNul = (value: string): string =>
-  value.indexOf('\u0000') === -1 ? value : value.replace(/\u0000/g, '');
+	value.indexOf("\u0000") === -1 ? value : value.replace(/\u0000/g, "");
 
 function sanitizeToolInput(value: unknown): unknown {
-  if (typeof value === 'string') return stripNul(value);
+	if (typeof value === "string") return stripNul(value);
   if (Array.isArray(value)) return value.map(sanitizeToolInput);
-  if (value && typeof value === 'object') {
+	if (value && typeof value === "object") {
     const proto = Object.getPrototypeOf(value);
     if (proto === Object.prototype || proto === null) {
       const out: Record<string, unknown> = {};
@@ -131,16 +141,18 @@ function sanitizeToolInput(value: unknown): unknown {
 function withSanitizedToolInput(tool: ToolDefinition): ToolDefinition {
   return {
     ...tool,
-    handler: (args, env, ctx) => tool.handler(sanitizeToolInput(args), env, ctx),
+		handler: (args, env, ctx) =>
+			tool.handler(sanitizeToolInput(args), env, ctx),
   };
 }
 
 const ListOrganizationsInputSchema = {
-  type: 'object',
+	type: "object",
   properties: {
     search: {
-      type: 'string',
-      description: 'Filter organizations by name (case-insensitive substring match)',
+			type: "string",
+			description:
+				"Filter organizations by name (case-insensitive substring match)",
     },
   },
 } as const;
@@ -148,15 +160,15 @@ const ListOrganizationsInputSchema = {
 const TOOLS: ToolDefinition[] = [
   // ─── Memory hot path — read ───────────────────────────────────────────────
   {
-    name: 'search_memory',
+		name: "search_memory",
     description:
-      'Search saved workspace memory: entities, facts, decisions, preferences, observations, and notes. Use this to answer “what do we know?” Pair writes with `save_memory`; use `search_sdk` / `query_sdk` only when you need SDK capabilities or programmable reads.',
+			"Search saved workspace memory: entities, facts, decisions, preferences, observations, and notes. Use this to answer “what do we know?” Pair writes with `save_memory`; use `search_sdk` / `query_sdk` only when you need SDK capabilities or programmable reads.",
     inputSchema: SearchSchema,
     annotations: READ_ONLY,
     handler: search,
   },
   {
-    name: 'save_memory',
+		name: "save_memory",
     description:
       "Save user-shared facts, preferences, decisions, observations, and notes to workspace memory. Storage is append-only — pass `supersedes_event_id` to replace an existing fact (the old event is hidden from future searches without losing history). Optionally attach to entities via `entity_ids`. Always search first to avoid duplicates.",
     inputSchema: SaveContentSchema,
@@ -165,17 +177,17 @@ const TOOLS: ToolDefinition[] = [
   },
   // ─── Discovery ────────────────────────────────────────────────────────────
   {
-    name: 'list_organizations',
+		name: "list_organizations",
     description:
-      'List organizations the authenticated user belongs to, plus any public workspaces the session can read. The response marks the bound org with `is_current: true` — that is the default target for memory and SDK calls. Use the slug with `client.org(slug)` from `query_sdk` / `run_sdk` for cross-org reads on /mcp + OAuth, or reconnect to /mcp/{slug} to pin a different default.',
+			"List organizations the authenticated user belongs to, plus any public workspaces the session can read. The response marks the bound org with `is_current: true` — that is the default target for memory and SDK calls. Use the slug with `client.org(slug)` from `query_sdk` / `run_sdk` for cross-org reads on /mcp + OAuth, or reconnect to /mcp/{slug} to pin a different default.",
     inputSchema: ListOrganizationsInputSchema,
     annotations: READ_ONLY,
     handler: async () => {
-      throw new Error('Handled directly in executeTool');
+			throw new Error("Handled directly in executeTool");
     },
   },
   {
-    name: 'search_sdk',
+		name: "search_sdk",
     description:
       "Search ClientSDK documentation and method metadata. Use this to discover which SDK method exists and how to call it; it does not query workspace data. Pass a namespace ('watchers', 'entities', etc.), a dotted path ('watchers.create'), or a free-text query. Pair with `query_sdk` (read-only) or `run_sdk` (full SDK) to actually call methods.",
     inputSchema: SdkSearchSchema,
@@ -184,7 +196,7 @@ const TOOLS: ToolDefinition[] = [
   },
   // ─── Power tools — TS scripting + raw SQL ─────────────────────────────────
   {
-    name: 'query_sdk',
+		name: "query_sdk",
     description:
       'Run read-only TypeScript in a sandboxed isolate over the ClientSDK. Use this to fetch workspace data through typed SDK methods. The script signature is `export default async (ctx, client) => ...`. Mutating methods are absent from `client` — attempts surface as undefined methods; use `run_sdk` for writes. Output capped at 1 MB. Use `search_sdk` to find method names. Example: `export default async (_ctx, client) => client.entities.list({ entity_type: "company" });`',
     inputSchema: QuerySchema,
@@ -192,24 +204,24 @@ const TOOLS: ToolDefinition[] = [
     handler: querySdkScript,
   },
   {
-    name: 'query_sql',
+		name: "query_sql",
     description:
-      'Run a paginated, sortable, searchable read-only SQL query. Table references auto-scope to the bound org. The query is wrapped as a subquery, so inner ORDER BY / LIMIT / window functions are fine; pagination + sort come from the sort_by/limit/offset args. Do NOT use positional parameters ($1, $2, …). Optional `org_slug` (OAuth on /mcp only) redirects the query to a different member org; rejected on /mcp/{slug} and on PAT auth.',
+			"Run a paginated, sortable, searchable read-only SQL query. Table references auto-scope to the bound org. The query is wrapped as a subquery, so inner ORDER BY / LIMIT / window functions are fine; pagination + sort come from the sort_by/limit/offset args. Do NOT use positional parameters ($1, $2, …). Optional `org_slug` (OAuth on /mcp only) redirects the query to a different member org; rejected on /mcp/{slug} and on PAT auth.",
     inputSchema: QuerySqlSchema,
     annotations: READ_ONLY,
     handler: querySql,
   },
   {
-    name: 'metric_series',
+		name: "metric_series",
     description:
-      'Run a read-only time-series SQL for dashboard sparklines. Caller passes a single SELECT returning a bucket column + N numeric stat columns; the same validator/auto-scoper that powers `query_sql` injects `$1 = organization_id`. Returns `{ columns, rows }` for direct frontend consumption.',
+			"Run a read-only time-series SQL for dashboard sparklines. Caller passes a single SELECT returning a bucket column + N numeric stat columns; the same validator/auto-scoper that powers `query_sql` injects `$1 = organization_id`. Returns `{ columns, rows }` for direct frontend consumption.",
     inputSchema: MetricSeriesSchema,
     annotations: READ_ONLY,
     internal: true,
     handler: metricSeries,
   },
   {
-    name: 'run_sdk',
+		name: "run_sdk",
     description:
       'Destructive — confirm before running. Runs TypeScript in a sandboxed isolate over the FULL ClientSDK. Use this for SDK writes or multi-step workflows. Signature: `export default async (ctx, client) => ...`. Can mutate entities, watchers, memory, classifiers, connections, etc. Use `query_sdk` for reads. Pass `dry_run: true` to execute reads while skipping write/external SDK calls and returning `side_effect_preview`. Output capped at 1 MB. Example: `export default async (_ctx, client) => client.entities.create({ type: "company", name: "Acme" });`',
     inputSchema: RunSchema,
@@ -220,9 +232,9 @@ const TOOLS: ToolDefinition[] = [
   ...INTERNAL_REST_TOOLS,
   // ─── Path resolution (frontend internal) ──────────────────────────────────
   {
-    name: 'resolve_path',
+		name: "resolve_path",
     description:
-      'Resolve a namespace-based URL path like /acme/entity-type/entity-slug into namespace and entity details. Returns template_data with executed data source query results when templates define data_sources.',
+			"Resolve a namespace-based URL path like /acme/entity-type/entity-slug into namespace and entity details. Returns template_data with executed data source query results when templates define data_sources.",
     inputSchema: ResolvePathSchema,
     annotations: READ_ONLY,
     internal: true,
@@ -236,7 +248,7 @@ const TOOLS: ToolDefinition[] = [
 
 // TOOLS is a module constant with no runtime mutation — index it once.
 const TOOLS_BY_NAME: Map<string, ToolDefinition> = new Map(
-  TOOLS.map((tool) => [tool.name, withSanitizedToolInput(tool)])
+	TOOLS.map((tool) => [tool.name, withSanitizedToolInput(tool)]),
 );
 
 /**
@@ -258,9 +270,9 @@ function flattenUnionSchema(schema: any): any {
   const mergedProperties: Record<string, any> = {};
 
   for (const variant of variants) {
-    if (variant.type !== 'object' || !variant.properties) continue;
+		if (variant.type !== "object" || !variant.properties) continue;
     for (const [key, prop] of Object.entries<any>(variant.properties)) {
-      if (key === 'action') {
+			if (key === "action") {
         if (prop.const) actionValues.push(prop.const);
         continue;
       }
@@ -272,16 +284,23 @@ function flattenUnionSchema(schema: any): any {
   }
 
   return {
-    type: 'object' as const,
+		type: "object" as const,
     properties: {
-      action: { type: 'string', enum: actionValues, description: 'Action to perform' },
+			action: {
+				type: "string",
+				enum: actionValues,
+				description: "Action to perform",
+			},
       ...mergedProperties,
     },
-    required: ['action'],
+		required: ["action"],
   };
 }
 
-function filterSchemaForPublicActions(toolName: string, schema: any): any | null {
+function filterSchemaForPublicActions(
+	toolName: string,
+	schema: any,
+): any | null {
   const allowedActions = getPublicReadableActions(toolName);
   if (allowedActions === undefined) return null;
   if (allowedActions === null) return schema;
@@ -291,7 +310,7 @@ function filterSchemaForPublicActions(toolName: string, schema: any): any | null
 
   const filteredVariants = variants.filter((variant) => {
     const actionConst = variant?.properties?.action?.const;
-    return typeof actionConst === 'string' && allowedActions.has(actionConst);
+		return typeof actionConst === "string" && allowedActions.has(actionConst);
   });
 
   if (filteredVariants.length === 0) return null;
@@ -302,9 +321,9 @@ function filterSchemaForPublicActions(toolName: string, schema: any): any | null
   };
 }
 
-function accessLevelRank(level: 'read' | 'write' | 'admin'): number {
-  if (level === 'read') return 1;
-  if (level === 'write') return 2;
+function accessLevelRank(level: "read" | "write" | "admin"): number {
+	if (level === "read") return 1;
+	if (level === "write") return 2;
   return 3;
 }
 
@@ -312,7 +331,7 @@ function filterSchemaForAccessLevel(
   toolName: string,
   schema: any,
   readOnlyHint: boolean,
-  maxAccessLevel: 'read' | 'write' | 'admin'
+	maxAccessLevel: "read" | "write" | "admin",
 ): any | null {
   const toolAccess = getRequiredAccessLevel(toolName, {}, readOnlyHint);
   if (accessLevelRank(toolAccess) <= accessLevelRank(maxAccessLevel)) {
@@ -321,10 +340,15 @@ function filterSchemaForAccessLevel(
 
     const filteredVariants = variants.filter((variant) => {
       const actionConst = variant?.properties?.action?.const;
-      if (typeof actionConst !== 'string') return false;
+			if (typeof actionConst !== "string") return false;
       return (
-        accessLevelRank(getRequiredAccessLevel(toolName, { action: actionConst }, readOnlyHint)) <=
-        accessLevelRank(maxAccessLevel)
+				accessLevelRank(
+					getRequiredAccessLevel(
+						toolName,
+						{ action: actionConst },
+						readOnlyHint,
+					),
+				) <= accessLevelRank(maxAccessLevel)
       );
     });
 
@@ -350,11 +374,11 @@ const allToolsCache = new Map<string, ReturnType<typeof computeAllTools>>();
 export function getAllTools(options?: {
   includeInternalTools?: boolean;
   publicOnly?: boolean;
-  maxAccessLevel?: 'read' | 'write' | 'admin';
+	maxAccessLevel?: "read" | "write" | "admin";
 }) {
   const includeInternalTools = options?.includeInternalTools ?? true;
   const publicOnly = options?.publicOnly ?? false;
-  const maxAccessLevel = options?.maxAccessLevel ?? 'admin';
+	const maxAccessLevel = options?.maxAccessLevel ?? "admin";
   const cacheKey = `${includeInternalTools ? 1 : 0}:${publicOnly ? 1 : 0}:${maxAccessLevel}`;
   let cached = allToolsCache.get(cacheKey);
   if (!cached) {
@@ -367,10 +391,13 @@ export function getAllTools(options?: {
 function computeAllTools(
   includeInternalTools: boolean,
   publicOnly: boolean,
-  maxAccessLevel: 'read' | 'write' | 'admin'
+	maxAccessLevel: "read" | "write" | "admin",
 ) {
   return TOOLS.filter((tool) => includeInternalTools || !tool.internal)
-    .filter((tool) => !publicOnly || getPublicReadableActions(tool.name) !== undefined)
+		.filter(
+			(tool) =>
+				!publicOnly || getPublicReadableActions(tool.name) !== undefined,
+		)
     .map((tool) => {
       let inputSchema = tool.inputSchema;
       const readOnlyHint = tool.annotations?.readOnlyHint === true;
@@ -384,7 +411,7 @@ function computeAllTools(
         tool.name,
         inputSchema,
         readOnlyHint,
-        maxAccessLevel
+				maxAccessLevel,
       );
       if (!inputSchema) return null;
 
@@ -392,8 +419,8 @@ function computeAllTools(
       // Flatten discriminated Union schemas into a single object.
       if (inputSchema.anyOf || inputSchema.oneOf) {
         inputSchema = flattenUnionSchema(inputSchema);
-      } else if (inputSchema.type !== 'object') {
-        inputSchema = { type: 'object' as const, ...inputSchema };
+			} else if (inputSchema.type !== "object") {
+				inputSchema = { type: "object" as const, ...inputSchema };
       }
 
       return {

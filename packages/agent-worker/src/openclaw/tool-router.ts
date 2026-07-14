@@ -1,11 +1,16 @@
 import type { ToolCatalogEntry } from "./tool-catalog";
-import { getOrBuildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
+import {
+  getOrBuildToolDescriptor,
+  qualifiedToolKey,
+  toolIdentityKey,
+} from "./tool-descriptor";
 import {
   type CachedToolRetrievalIndex,
   getOrBuildToolRetrievalIndex,
   searchToolRetrievalIndex,
   type ToolCandidateMatch,
 } from "./tool-retrieval-index";
+import type { ToolRouterCacheContext } from "./tool-router-memory-budget";
 import {
   buildToolRouteQuery,
   type ToolDestination,
@@ -26,7 +31,7 @@ export interface ToolCandidateScore {
 
 export interface ToolRouteDecision {
   routerVersion: "semantic-v1";
-  inventoryFingerprint: string;
+  inventoryFingerprint?: string;
   cacheHit: boolean;
   estimatedIndexBytes: number;
   cacheEvictionCount: number;
@@ -38,6 +43,7 @@ export interface ToolRouteDecision {
   selectedEntries: ToolCatalogEntry[];
   candidates: ToolCandidateScore[];
   explicitDestinations: ToolDestination[];
+  semanticLookupSkippedReason?: "definite_non_tool";
   clarification?: {
     reason: "conflicting_destination" | "conflicting_side_effect";
     question: string;
@@ -54,6 +60,7 @@ export interface RouteToolEntriesParams {
   budget: number;
   reservedEntries: ToolCatalogEntry[];
   allowedToolNames?: Iterable<string>;
+  cacheContext?: ToolRouterCacheContext;
   retrieval?: {
     getOrBuild?: (
       descriptors: ReturnType<typeof getOrBuildToolDescriptor>[]
@@ -93,7 +100,7 @@ function eligibleIdentityKeys(
   const qualifiedNameCounts = new Map<string, number>();
   for (const entry of entries) {
     const qualifiedName = normalizeAllowedName(
-      entry.mcpId ? `${entry.mcpId}/${entry.name}` : entry.name
+      entry.mcpId ? qualifiedToolKey(entry.mcpId, entry.name) : entry.name
     );
     qualifiedNameCounts.set(
       qualifiedName,
@@ -105,7 +112,7 @@ function eligibleIdentityKeys(
       .filter((entry) => {
         const plainName = normalizeAllowedName(entry.name);
         const qualifiedName = normalizeAllowedName(
-          entry.mcpId ? `${entry.mcpId}/${entry.name}` : entry.name
+          entry.mcpId ? qualifiedToolKey(entry.mcpId, entry.name) : entry.name
         );
         return (
           (!plainName.includes("/") && allowed.has(plainName)) ||
@@ -312,10 +319,11 @@ export function routeToolEntries({
   reservedEntries,
   allowedToolNames,
   retrieval,
+  cacheContext,
 }: RouteToolEntriesParams): ToolRouteDecision {
   const query = buildToolRouteQuery(message);
   if (!normalizeToolText(message)) {
-    return fallbackDecision(
+    const decision = fallbackDecision(
       {
         entries,
         message,
@@ -323,10 +331,12 @@ export function routeToolEntries({
         reservedEntries,
         allowedToolNames,
         retrieval,
+        cacheContext,
       },
       "empty_query",
       query.explicitDestinations
     );
+    return { ...decision, selectedEntries: [] };
   }
   try {
     const buildStartedAt = performance.now();
@@ -334,7 +344,8 @@ export function routeToolEntries({
       getOrBuildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex)
     );
     const cachedIndex = (retrieval?.getOrBuild ?? getOrBuildToolRetrievalIndex)(
-      descriptors
+      descriptors,
+      { cacheContext }
     );
     const index = cachedIndex.index;
     const eligibleKeys = eligibleIdentityKeys(entries, allowedToolNames);

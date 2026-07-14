@@ -12,6 +12,7 @@ import {
 } from "../embedded/mcp-cli-commands";
 import { applyCapabilityLimitNotes } from "../openclaw/mcp-tool-projection";
 import { toolIdentityKey } from "../openclaw/tool-descriptor";
+import { deriveTurnExecutionIntent } from "../openclaw/turn-execution-intent";
 import type { GatewayParams } from "../shared/tool-implementations";
 
 const originalFetch = globalThis.fetch;
@@ -38,6 +39,9 @@ function makeRef(overrides: Partial<McpRuntimeState> = {}): McpRuntimeRef {
       allowedToolKeys: overrides.allowedToolKeys,
       turnEligibleToolKeys: overrides.turnEligibleToolKeys,
       clarificationBlockedToolKeys: overrides.clarificationBlockedToolKeys,
+      turnExecutionIntent: overrides.turnExecutionIntent,
+      personalReminderDeliveryBlockedReason:
+        overrides.personalReminderDeliveryBlockedReason,
     },
   };
 }
@@ -431,6 +435,43 @@ describe("buildMcpServerHandler", () => {
     expect(calls[0]?.options).not.toMatchObject({
       personalReminderDelivery: true,
     });
+  });
+
+  test.each([
+    "list",
+    "cancel",
+  ])("inactive reminder delivery blocks create but permits manage_schedules %s", async (ordinaryAction) => {
+    const manageSchedules = {
+      name: "manage_schedules",
+      description: "Manage schedules",
+      inputSchema: { type: "object" },
+    };
+    const key = toolIdentityKey("lobu-memory", "manage_schedules");
+    const calls: Record<string, unknown>[] = [];
+    const ref = makeRef({
+      mcpTools: { "lobu-memory": [manageSchedules] },
+      allowedToolKeys: [key],
+      turnExecutionIntent: deriveTurnExecutionIntent("五分鐘後提醒我喝水"),
+      personalReminderDeliveryBlockedReason: "capability_inactive",
+    });
+    const handler = buildMcpServerHandler("lobu-memory", ref, gw, {
+      callTool: async (_gw, _mcpId, _toolName, payload) => {
+        calls.push(payload);
+        return { content: [] };
+      },
+    });
+
+    const blocked = await handler(["manage_schedules"], {
+      stdin: '{"action":"create"}',
+    });
+    expect(JSON.parse(blocked.stderr).error).toBe("capability_inactive");
+    expect(calls).toHaveLength(0);
+
+    const ordinary = await handler(["manage_schedules"], {
+      stdin: JSON.stringify({ action: ordinaryAction }),
+    });
+    expect(ordinary.exitCode).toBe(0);
+    expect(calls).toEqual([{ action: ordinaryAction }]);
   });
 
   test("tool invocation falls back to args[1] when stdin is empty", async () => {

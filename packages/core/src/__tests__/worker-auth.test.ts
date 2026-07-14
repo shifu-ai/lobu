@@ -120,6 +120,191 @@ describe("worker auth token", () => {
     });
   });
 
+  test("round-trips a bounded release capability only on its exact run identity", () => {
+    const releaseCapability = {
+      environment: "production" as const,
+      toolboxUserId: "user-2",
+      agentId: "agent-x",
+      releaseId: "release-7",
+      releaseSequence: 7,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      capabilityIds: ["personal_reminder_delivery.v1"],
+    };
+    const token = generateWorkerToken("user-2", "conv-2", "deploy-B", {
+      channelId: "C2",
+      agentId: "agent-x",
+      runId: 42,
+      tokenKind: "run",
+      releaseState: { status: "active", claim: releaseCapability },
+    });
+    expect(verifyWorkerToken(token)?.releaseState).toEqual({
+      status: "active",
+      claim: releaseCapability,
+    });
+  });
+
+  test.each([
+    { tokenKind: "session", runId: 42 },
+    { tokenKind: "run", runId: undefined },
+    { tokenKind: "run", runId: 42, userId: "other" },
+    { tokenKind: "run", runId: 42, agentId: "other" },
+  ])("rejects a release capability outside its exact run identity %#", (override) => {
+    const payload: Record<string, unknown> = {
+      userId: "user-2",
+      conversationId: "conv-2",
+      channelId: "C2",
+      deploymentName: "deploy-B",
+      timestamp: Date.now(),
+      tokenKind: "run",
+      runId: 42,
+      agentId: "agent-x",
+      releaseState: {
+        status: "active",
+        claim: {
+          environment: "production",
+          toolboxUserId: "user-2",
+          agentId: "agent-x",
+          releaseId: "release-7",
+          releaseSequence: 7,
+          snapshotDigest: `sha256:${"a".repeat(64)}`,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          capabilityIds: ["personal_reminder_delivery.v1"],
+        },
+      },
+    };
+    Object.assign(payload, override);
+    const token = encrypt(JSON.stringify(payload));
+    expect(verifyWorkerToken(token)).toBeNull();
+  });
+
+  test.each([
+    {},
+    { environment: "local" },
+    { releaseSequence: 0 },
+    { snapshotDigest: "not-a-digest" },
+    { expiresAt: "tomorrow" },
+    { capabilityIds: [] },
+    { capabilityIds: ["x".repeat(201)] },
+  ])("rejects malformed or partial release capability %#", (override) => {
+    const token = encrypt(
+      JSON.stringify({
+        userId: "user-2",
+        conversationId: "conv-2",
+        channelId: "C2",
+        deploymentName: "deploy-B",
+        timestamp: Date.now(),
+        tokenKind: "run",
+        runId: 42,
+        agentId: "agent-x",
+        releaseState:
+          Object.keys(override).length === 0
+            ? { status: "active" }
+            : {
+                status: "active",
+                claim: {
+                  environment: "production",
+                  toolboxUserId: "user-2",
+                  agentId: "agent-x",
+                  releaseId: "release-7",
+                  releaseSequence: 7,
+                  snapshotDigest: `sha256:${"a".repeat(64)}`,
+                  expiresAt: new Date(Date.now() + 60_000).toISOString(),
+                  capabilityIds: ["personal_reminder_delivery.v1"],
+                  ...override,
+                },
+              },
+      })
+    );
+    expect(verifyWorkerToken(token)).toBeNull();
+  });
+
+  test.each([
+    { status: "legacy_unenrolled" },
+    {
+      status: "enrolled_inactive",
+      environment: "production",
+      reason: "snapshot_unavailable",
+    },
+  ])("round-trips explicit non-active release state %#", (releaseState) => {
+    const token = generateWorkerToken("user-2", "conv-2", "deploy-B", {
+      channelId: "C2",
+      agentId: "agent-x",
+      runId: 44,
+      tokenKind: "run",
+      releaseState: releaseState as never,
+    });
+    expect(JSON.stringify(verifyWorkerToken(token)?.releaseState)).toBe(
+      JSON.stringify(releaseState)
+    );
+  });
+
+  test("downgrades a normally expired active claim without invalidating the run token", () => {
+    const timestamp = Date.now() - 61_000;
+    const token = encrypt(
+      JSON.stringify({
+        userId: "user-2",
+        conversationId: "conv-2",
+        channelId: "C2",
+        deploymentName: "deploy-B",
+        timestamp,
+        tokenKind: "run",
+        runId: 45,
+        agentId: "agent-x",
+        releaseState: {
+          status: "active",
+          claim: {
+            environment: "production",
+            toolboxUserId: "user-2",
+            agentId: "agent-x",
+            releaseId: "release-7",
+            releaseSequence: 7,
+            snapshotDigest: `sha256:${"a".repeat(64)}`,
+            expiresAt: new Date(timestamp + 60_000).toISOString(),
+            capabilityIds: ["personal_reminder_delivery.v1"],
+          },
+        },
+      })
+    );
+    expect(verifyWorkerToken(token)).toMatchObject({
+      runId: 45,
+      releaseState: {
+        status: "enrolled_inactive",
+        reason: "capability_expired",
+      },
+    });
+  });
+
+  test("rejects an active claim minted beyond the bounded snapshot lifetime", () => {
+    const timestamp = Date.now();
+    const token = encrypt(
+      JSON.stringify({
+        userId: "user-2",
+        conversationId: "conv-2",
+        channelId: "C2",
+        deploymentName: "deploy-B",
+        timestamp,
+        tokenKind: "run",
+        runId: 46,
+        agentId: "agent-x",
+        releaseState: {
+          status: "active",
+          claim: {
+            environment: "production",
+            toolboxUserId: "user-2",
+            agentId: "agent-x",
+            releaseId: "release-7",
+            releaseSequence: 7,
+            snapshotDigest: `sha256:${"a".repeat(64)}`,
+            expiresAt: new Date(timestamp + 91_000).toISOString(),
+            capabilityIds: ["personal_reminder_delivery.v1"],
+          },
+        },
+      })
+    );
+    expect(verifyWorkerToken(token)).toBeNull();
+  });
+
   test("round-trips a complete integrity-bound course execution scope", () => {
     const token = generateWorkerToken("user-2", "conv-2", "deploy-B", {
       channelId: "C2",

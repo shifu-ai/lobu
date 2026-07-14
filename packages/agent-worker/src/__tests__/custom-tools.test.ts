@@ -293,6 +293,63 @@ describe("createOpenClawCustomTools", () => {
     ]);
   });
 
+  test("tool_call suppresses personal reminder canonicalization when the release behavior is inactive", async () => {
+    const calls: unknown[][] = [];
+    const tools = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "shifu-u-1",
+      channelId: "channel-1",
+      conversationId: "line-conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+      turnExecutionIntent: deriveTurnExecutionIntent("五分鐘後提醒我喝水"),
+      personalReminderDeliveryExecutable: false,
+      runtimeToolCatalog: [
+        {
+          tool: {
+            name: "manage_schedules",
+            description: "Manage schedules",
+            inputSchema: { type: "object", properties: {} },
+          },
+          name: "manage_schedules",
+          mcpId: "lobu-memory",
+          domain: "automation",
+          intent: "automation",
+          priority: "P1",
+          aliases: [],
+          readOnly: false,
+          mutatesState: true,
+          requiresConfirmation: false,
+          originalIndex: 0,
+          availableThisTurn: false,
+          directVisibleThisTurn: false,
+          callableViaCatalog: true,
+          description: "Manage schedules",
+        },
+      ],
+      runtimeToolCaller: mock(async (...args) => {
+        calls.push(args);
+        return { content: [{ type: "text" as const, text: "ok" }] };
+      }),
+    });
+
+    await tools
+      .find((tool) => tool.name === "tool_call")!
+      .execute("call", {
+        tool_name: "manage_schedules",
+        mcp_id: "lobu-memory",
+        args: {
+          action: "create",
+          run_at: "2026-07-14T12:35:00.000Z",
+          action_type: "send_notification",
+          title: "喝水",
+        },
+      });
+
+    expect(calls).toEqual([]);
+  });
+
   test("tool_status reports clarification blocks without exposing schemas or messages", async () => {
     const tools = createOpenClawCustomTools({
       gatewayUrl: "http://gateway",

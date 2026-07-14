@@ -32,6 +32,9 @@ function makeRef(overrides: Partial<McpRuntimeState> = {}): McpRuntimeRef {
       allowedToolKeys: overrides.allowedToolKeys,
       turnEligibleToolKeys: overrides.turnEligibleToolKeys,
       clarificationBlockedToolKeys: overrides.clarificationBlockedToolKeys,
+      turnExecutionIntent: overrides.turnExecutionIntent,
+      personalReminderDeliveryBlockedReason:
+        overrides.personalReminderDeliveryBlockedReason,
     },
   };
 }

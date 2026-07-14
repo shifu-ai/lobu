@@ -5,6 +5,7 @@ import {
   buildToolDescriptor,
   getOrBuildToolDescriptor,
   inventoryFingerprint,
+  qualifiedToolKey,
   type ToolDescriptor,
   toolIdentityKey,
 } from "../openclaw/tool-descriptor";
@@ -321,6 +322,56 @@ describe("tool retrieval index", () => {
     expect(second.cacheHit).toBe(true);
   });
 
+  test("does not reuse an equal descriptor index across release authority", () => {
+    clearToolRetrievalIndexCacheForTests();
+    const descriptors = [
+      buildToolDescriptor(tool("search", "Search"), "mcp", 0),
+    ];
+    const base = {
+      environment: "production",
+      agentId: "shifu-u-1",
+      releaseId: "release-1",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      snapshotExpiresAt: "2099-01-01T00:00:00.000Z",
+      effectiveInventoryFingerprint: "b".repeat(64),
+      effectivePolicyFingerprint: "c".repeat(64),
+      grantProjectionFingerprint: "d".repeat(64),
+    };
+    const first = getOrBuildToolRetrievalIndex(descriptors, {
+      cacheContext: base,
+    });
+    const same = getOrBuildToolRetrievalIndex(descriptors, {
+      cacheContext: base,
+    });
+    const advanced = getOrBuildToolRetrievalIndex(descriptors, {
+      cacheContext: { ...base, releaseSequence: 2 },
+    });
+    const policyChanged = getOrBuildToolRetrievalIndex(descriptors, {
+      cacheContext: { ...base, effectivePolicyFingerprint: "e".repeat(64) },
+    });
+    const authorityChanges = (
+      [
+        { environment: "staging" },
+        { agentId: "shifu-u-2" },
+        { releaseId: "release-2" },
+        { snapshotDigest: `sha256:${"f".repeat(64)}` },
+        { snapshotExpiresAt: "2099-01-02T00:00:00.000Z" },
+        { effectiveInventoryFingerprint: "1".repeat(64) },
+        { grantProjectionFingerprint: "2".repeat(64) },
+      ] as const
+    ).map((change) =>
+      getOrBuildToolRetrievalIndex(descriptors, {
+        cacheContext: { ...base, ...change },
+      })
+    );
+    expect(same.cacheHit).toBe(true);
+    expect(same.index).toBe(first.index);
+    expect(advanced.cacheHit).toBe(false);
+    expect(policyChanged.cacheHit).toBe(false);
+    expect(authorityChanges.every((entry) => !entry.cacheHit)).toBe(true);
+  });
+
   test("does not retain an index above the per-index cache budget", () => {
     clearToolRetrievalIndexCacheForTests();
     const descriptors = Array.from({ length: 600 }, (_, index) =>
@@ -530,7 +581,7 @@ describe("tool retrieval index", () => {
     const left = buildToolDescriptor(tool("b/c", "shared"), "a", 0);
     const right = buildToolDescriptor(tool("c", "shared"), "a/b", 1);
 
-    expect(left.key).toBe(right.key);
+    expect(left.key).not.toBe(right.key);
     expect(left.identityKey).toBe(toolIdentityKey("a", "b/c"));
     expect(right.identityKey).toBe(toolIdentityKey("a/b", "c"));
     const index = buildToolRetrievalIndex([left, right]);
@@ -542,6 +593,28 @@ describe("tool retrieval index", () => {
     );
 
     expect(matches.map(({ descriptor }) => descriptor.mcpId)).toEqual(["a"]);
+  });
+
+  test.each([
+    ["qualified mcp id", () => qualifiedToolKey("bad\ud800", "tool")],
+    ["qualified tool name", () => qualifiedToolKey("mcp", "bad\udfff")],
+    ["identity mcp id", () => toolIdentityKey("bad\ud800", "tool")],
+    ["identity tool name", () => toolIdentityKey("mcp", "bad\udfff")],
+  ])("fails malformed UTF-16 closed for %s", (_label, buildKey) => {
+    expect(buildKey).toThrow("invalid UTF-16 string: unpaired surrogate");
+  });
+
+  test("keeps a valid astral surrogate pair reversible", () => {
+    const mcpId = "mcp-🧭";
+    const name = "提醒-💧";
+    const qualified = qualifiedToolKey(mcpId, name);
+    const [encodedMcpId, encodedName] = qualified.split("/");
+
+    expect([
+      decodeURIComponent(encodedMcpId!),
+      decodeURIComponent(encodedName!),
+    ]).toEqual([mcpId, name]);
+    expect(JSON.parse(toolIdentityKey(mcpId, name))).toEqual([mcpId, name]);
   });
 
   test("keeps raw NUL-containing identity components injective", () => {
