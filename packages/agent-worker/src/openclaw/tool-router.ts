@@ -13,7 +13,7 @@ export interface ToolRouteDecision {
   candidates: ToolCandidateScore[];
   explicitDestinations: string[];
   clarification?: {
-    reason: string;
+    reason: "conflicting_destination" | "conflicting_side_effect";
     question: string;
     blockedToolKeys: string[];
   };
