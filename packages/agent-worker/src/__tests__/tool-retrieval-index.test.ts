@@ -281,6 +281,36 @@ describe("tool retrieval index", () => {
 		expect(searchToolRetrievalIndex(index, "tool", 2)).toHaveLength(2);
 	});
 
+	test("returns no unrelated matches in either inverted or linear mode", () => {
+		const descriptors = [
+			buildToolDescriptor(tool("alpha", "first utility"), "mcp", 0),
+			buildToolDescriptor(tool("beta", "second utility"), "mcp", 1),
+		];
+		const inverted = buildToolRetrievalIndex(descriptors);
+		const linear = buildToolRetrievalIndex(descriptors, { maxIndexBytes: 1 });
+
+		expect(searchToolRetrievalIndex(inverted, "completely unrelated", 2)).toEqual(
+			[],
+		);
+		expect(searchToolRetrievalIndex(linear, "completely unrelated", 2)).toEqual(
+			[],
+		);
+	});
+
+	test("keeps semantic reminder overrides relevant in linear mode", () => {
+		const reminder = buildToolDescriptor(
+			tool("manage_schedules", "Manage delayed agent schedules"),
+			"lobu-memory",
+			0,
+		);
+		const index = buildToolRetrievalIndex([reminder], { maxIndexBytes: 1 });
+
+		expect(
+			searchToolRetrievalIndex(index, "稍後提醒我回覆客戶", 1)[0]?.descriptor
+				.name,
+		).toBe("manage_schedules");
+	});
+
 	test("uses inverted postings instead of scanning every descriptor", () => {
 		const descriptor = buildToolDescriptor(
 			tool("needle_tool", "Find the needle"),

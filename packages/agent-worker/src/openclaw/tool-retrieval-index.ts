@@ -518,5 +518,8 @@ export function searchToolRetrievalIndex(
 		index.mode === "inverted"
 			? searchInvertedIndex(index, normalizedQuery, queryTokens, eligibleKeys)
 			: searchLinearIndex(index, normalizedQuery, queryTokens, eligibleKeys);
-	return matches.sort(compareMatches).slice(0, boundedLimit);
+	return matches
+		.filter((match) => match.totalScore > 0)
+		.sort(compareMatches)
+		.slice(0, boundedLimit);
 }
