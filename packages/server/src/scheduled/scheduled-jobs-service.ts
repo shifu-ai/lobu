@@ -104,6 +104,7 @@ export async function stageScheduledJobByExternalKey(
 			SELECT * FROM scheduled_jobs
 			WHERE organization_id = ${params.organizationId}
 			  AND external_key = ${params.externalKey}
+			  AND created_by_user = ${params.createdByUser}
 			FOR UPDATE
 		`) as unknown as ScheduledJobRow[];
 		const existing = existingRows[0];
@@ -228,6 +229,7 @@ export async function upsertScheduledJobByExternalKeyWithQuota(
       SELECT * FROM scheduled_jobs
       WHERE organization_id = ${params.organizationId}
         AND external_key = ${params.externalKey}
+        AND created_by_user = ${params.createdByUser}
       FOR UPDATE
     `) as unknown as ScheduledJobRow[];
 		const existing = existingRows[0];
@@ -235,9 +237,6 @@ export async function upsertScheduledJobByExternalKeyWithQuota(
 			return stagedPayloadMatches(existing, params)
 				? { status: "ok", job: existing }
 				: { status: "conflict" };
-		}
-		if (existing && existing.created_by_user !== params.createdByUser) {
-			return { status: "ok", job: existing };
 		}
 		const changeDetection = params.changeDetection ?? "trusted-course-wake";
 		const now = Date.now();

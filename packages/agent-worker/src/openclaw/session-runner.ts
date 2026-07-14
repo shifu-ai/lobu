@@ -609,7 +609,7 @@ export interface RunAISessionParams {
    * gateway calls made by first-class tools must use this token instead of
    * the deployment-lifetime WORKER_TOKEN so worker-auth can resolve the
    * current agent/user/run context.
-  */
+   */
   runJobToken?: string;
   resolvedCourseContext?: ResolvedCourseExecutionContext;
   trustedExecutionScope?: TrustedExecutionScope;
@@ -995,10 +995,11 @@ export async function runAISession(
     maybeRunPreCompactionMemoryFlush,
     maybeBuildAuthHintMessage,
   } = params;
-  const automationModificationTurn = buildTrustedAutomationModificationTurnContext({
-    userPrompt: rawUserPrompt,
-    platformMetadata,
-  });
+  const automationModificationTurn =
+    buildTrustedAutomationModificationTurnContext({
+      userPrompt: rawUserPrompt,
+      platformMetadata,
+    });
   const userPrompt = automationModificationTurn.userPrompt;
 
   let rawOptions: Record<string, unknown>;

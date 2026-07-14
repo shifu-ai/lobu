@@ -28,7 +28,7 @@ interface AutomationModificationContext {
 
 function exactKeys(
   value: Record<string, unknown>,
-  expected: Set<string>,
+  expected: Set<string>
 ): boolean {
   const keys = Object.keys(value);
   return (
@@ -46,7 +46,7 @@ function boundedString(value: unknown, maxLength: number): value is string {
 
 function parseAutomationModificationContext(
   platformMetadata: unknown,
-  now: Date,
+  now: Date
 ): AutomationModificationContext | null {
   if (!isRecord(platformMetadata)) return null;
   const context = platformMetadata.automationModificationContext;
@@ -69,7 +69,7 @@ function parseAutomationModificationContext(
     !boundedString(schedule, 500) ||
     !boundedString(reason, 2_000) ||
     [title, summary, schedule, reason].some((value) =>
-      FORBIDDEN_DISPLAY_COPY.test(value),
+      FORBIDDEN_DISPLAY_COPY.test(value)
     )
   )
     return null;
@@ -77,7 +77,7 @@ function parseAutomationModificationContext(
   if (
     !boundedString(context.expiresAt, 64) ||
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(
-      context.expiresAt,
+      context.expiresAt
     )
   )
     return null;
@@ -102,7 +102,7 @@ export function buildTrustedAutomationModificationTurnContext(input: {
 }): { userPrompt: string; systemInstructions: string } {
   const context = parseAutomationModificationContext(
     input.platformMetadata,
-    input.now ?? new Date(),
+    input.now ?? new Date()
   );
   if (!context) return { userPrompt: input.userPrompt, systemInstructions: "" };
 
