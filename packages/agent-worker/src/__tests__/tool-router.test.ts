@@ -5,11 +5,16 @@ import { catalogEntryForTool } from "../openclaw/tool-catalog";
 import { buildToolRouteQuery } from "../openclaw/tool-route-query";
 import { routeToolEntries } from "../openclaw/tool-router";
 
-function tool(name: string, description: string): McpToolDef {
+function tool(
+	name: string,
+	description: string,
+	extras: Record<string, unknown> = {},
+): McpToolDef {
 	return {
 		name,
 		description,
 		inputSchema: { type: "object", properties: {} },
+		...extras,
 	};
 }
 
@@ -107,8 +112,45 @@ describe("semantic tool routing authorization and write ambiguity", () => {
 		]);
 	});
 
+	test("does not select a Calendar create tool for an explicit read operation", () => {
+		const result = selectMcpToolsByMcpForTurn({
+			toolsByMcp: schedulingTools(),
+			message: "get Google Calendar events",
+			budget: 12,
+		});
+
+		expect(result.trace.explicitDestinations).toContain("google_calendar");
+		expect(result.trace.selectedToolNames).toEqual([]);
+	});
+
 	test("extracts read operations from Chinese requests", () => {
 		expect(buildToolRouteQuery("讀取會議紀錄").operations).toContain("read");
+	});
+
+	test("matches English operation words only at token boundaries", () => {
+		const result = selectMcpToolsByMcpForTurn({
+			toolsByMcp: {
+				"shifu-toolbox": [
+					tool("create_address", "Create an address record", {
+						_meta: {
+							shifuTool: {
+								domain: "unknown",
+								priority: "P2",
+								aliases: ["address"],
+								readOnly: false,
+								mutatesState: true,
+								requiresConfirmation: true,
+							},
+						},
+					}),
+				],
+			},
+			message: "find address",
+			budget: 12,
+		});
+
+		expect(buildToolRouteQuery("find address").operations).toEqual(["search"]);
+		expect(result.trace.selectedToolNames).toEqual([]);
 	});
 
 	test("exposes qualified display keys in the clarification contract", () => {
@@ -135,7 +177,7 @@ describe("semantic tool routing authorization and write ambiguity", () => {
 				drive: [tool("search", "Search meeting notes in Google Drive")],
 				notion: [tool("search", "Search meeting notes in Notion")],
 			},
-			message: "搜尋老師會議紀錄",
+			message: "search meeting notes",
 			budget: 2,
 		});
 
@@ -164,7 +206,36 @@ describe("semantic tool routing authorization and write ambiguity", () => {
 			budget: 2,
 			allowedToolNames: ["a/b/c"],
 		});
-		expect(collision.selectedTools.a).toHaveLength(1);
-		expect(collision.selectedTools["a/b"]).toHaveLength(1);
+		expect(collision.selectedTools).toEqual({});
+		expect(collision.trace.candidates).toEqual([]);
+		expect(collision.trace.omittedToolNames).toEqual([]);
+	});
+
+	test("does not backfill unrelated read-only tools", () => {
+		const result = selectMcpToolsByMcpForTurn({
+			toolsByMcp: {
+				drive: [tool("search", "Search meeting notes in Google Drive")],
+				notion: [tool("search", "Search meeting notes in Notion")],
+			},
+			message: "weather tomorrow",
+			budget: 12,
+		});
+
+		expect(result.trace.candidates).toEqual([]);
+		expect(result.trace.selectedToolNames).toEqual([]);
+	});
+
+	test("does not backfill read-only tools for an empty message", () => {
+		const result = selectMcpToolsByMcpForTurn({
+			toolsByMcp: {
+				drive: [tool("search", "Search meeting notes in Google Drive")],
+				notion: [tool("search", "Search meeting notes in Notion")],
+			},
+			message: "",
+			budget: 12,
+		});
+
+		expect(result.trace.candidates).toEqual([]);
+		expect(result.trace.selectedToolNames).toEqual([]);
 	});
 });

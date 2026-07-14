@@ -72,6 +72,16 @@ function eligibleIdentityKeys(
 	const allowed = new Set(
 		[...allowedToolNames].map(normalizeAllowedName).filter(Boolean),
 	);
+	const qualifiedNameCounts = new Map<string, number>();
+	for (const entry of entries) {
+		const qualifiedName = normalizeAllowedName(
+			entry.mcpId ? `${entry.mcpId}/${entry.name}` : entry.name,
+		);
+		qualifiedNameCounts.set(
+			qualifiedName,
+			(qualifiedNameCounts.get(qualifiedName) ?? 0) + 1,
+		);
+	}
 	return new Set(
 		entries
 			.filter((entry) => {
@@ -79,7 +89,11 @@ function eligibleIdentityKeys(
 				const qualifiedName = normalizeAllowedName(
 					entry.mcpId ? `${entry.mcpId}/${entry.name}` : entry.name,
 				);
-				return allowed.has(plainName) || allowed.has(qualifiedName);
+				return (
+					allowed.has(plainName) ||
+					(allowed.has(qualifiedName) &&
+						qualifiedNameCounts.get(qualifiedName) === 1)
+				);
 			})
 			.map(canonicalToolKey),
 	);
@@ -132,10 +146,19 @@ function isRelevantMutatingMatch(
 ): boolean {
 	if (!match.descriptor.mutatesState || match.totalScore <= 0) return false;
 	if (explicitDestinations.length > 0) {
-		return match.descriptor.destinations.some((destination) =>
-			explicitDestinations.includes(destination),
+		return (
+			match.descriptor.destinations.some((destination) =>
+				explicitDestinations.includes(destination),
+			) && operationIsCompatible(match, operations)
 		);
 	}
+	return operationIsCompatible(match, operations);
+}
+
+function operationIsCompatible(
+	match: ToolCandidateMatch,
+	operations: readonly ToolOperation[],
+): boolean {
 	const meaningfulOperations = operations.filter(
 		(operation) => operation !== "unknown",
 	);
@@ -217,7 +240,6 @@ export function routeToolEntries({
 	const blockedKeys = new Set(
 		blockedMatches.map((match) => match.descriptor.identityKey),
 	);
-	const eligibleEntries = filterEligibleToolEntries(entries, allowedToolNames);
 	const selectedEntries: ToolCatalogEntry[] = [];
 	const selectedKeys = new Set<string>();
 
@@ -255,18 +277,6 @@ export function routeToolEntries({
 				);
 			})
 			.map(({ entry }) => entry),
-		...eligibleEntries.filter((entry) => {
-			const identityKey = canonicalToolKey(entry);
-			const descriptor = descriptorsByIdentityKey.get(identityKey);
-			return (
-				descriptor?.readOnly === true &&
-				!blockedKeys.has(identityKey) &&
-				!conflictsWithExplicitDestination(
-					descriptor,
-					query.explicitDestinations,
-				)
-			);
-		}),
 	]) {
 		if (selectedEntries.length >= budget) break;
 		const key = canonicalToolKey(entry);
