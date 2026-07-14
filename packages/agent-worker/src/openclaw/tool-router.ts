@@ -1,5 +1,5 @@
 import type { ToolCatalogEntry } from "./tool-catalog";
-import { buildToolRouteQuery } from "./tool-route-query";
+import { buildToolRouteQuery, type ToolDestination } from "./tool-route-query";
 
 export interface ToolCandidateScore {
   key: string;
@@ -11,7 +11,7 @@ export interface ToolRouteDecision {
   routerVersion: "semantic-v1";
   selectedEntries: ToolCatalogEntry[];
   candidates: ToolCandidateScore[];
-  explicitDestinations: string[];
+  explicitDestinations: ToolDestination[];
   clarification?: {
     reason: "conflicting_destination" | "conflicting_side_effect";
     question: string;
@@ -27,19 +27,24 @@ export interface RouteToolEntriesParams {
   reservedEntries: ToolCatalogEntry[];
 }
 
-function qualifiedKey(entry: ToolCatalogEntry): string {
+function canonicalToolKey(entry: ToolCatalogEntry): string {
+  return `${entry.mcpId}\u0000${entry.name}`;
+}
+
+function displayToolKey(entry: ToolCatalogEntry): string {
   return entry.mcpId ? `${entry.mcpId}/${entry.name}` : entry.name;
 }
 
 function scoreEntry(
   entry: ToolCatalogEntry,
-  explicitDestinations: string[]
+  explicitDestinations: ToolDestination[]
 ): ToolCandidateScore {
   const reasons: string[] = [];
   let totalScore = 0;
 
   if (
     explicitDestinations.includes("personal_reminder") &&
+    entry.mcpId === "lobu-memory" &&
     entry.name === "manage_schedules"
   ) {
     totalScore += 100;
@@ -47,13 +52,14 @@ function scoreEntry(
   }
   if (
     explicitDestinations.includes("google_calendar") &&
+    entry.mcpId === "google_workspace" &&
     entry.name === "gws_calendar_events_create"
   ) {
     totalScore += 100;
     reasons.push("destination:google_calendar");
   }
 
-  return { key: qualifiedKey(entry), totalScore, reasons };
+  return { key: displayToolKey(entry), totalScore, reasons };
 }
 
 export function routeToolEntries({
@@ -81,7 +87,7 @@ export function routeToolEntries({
     ...scoredEntries.map(({ entry }) => entry),
   ]) {
     if (selectedEntries.length >= budget) break;
-    const key = qualifiedKey(entry);
+    const key = canonicalToolKey(entry);
     if (selectedKeys.has(key)) continue;
     selectedKeys.add(key);
     selectedEntries.push(entry);

@@ -171,9 +171,11 @@ function selectEntriesForTurn(
     ...entry,
     originalIndex,
   }));
-  const pinnedKeys = new Set(pinnedEntries.map(displayToolName));
+  const pinnedKeys = new Set(
+    pinnedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))
+  );
   const reservedEntries = rankedForRouting.filter((entry) =>
-    pinnedKeys.has(displayToolName(entry))
+    pinnedKeys.has(catalogToolKey(entry.mcpId, entry.name))
   );
   const route = routeToolEntries({
     entries: rankedForRouting,

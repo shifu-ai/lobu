@@ -51,6 +51,21 @@ describe("selectMcpToolsForTurn", () => {
     expect(result.trace.clarificationRequired).toBe(false);
   });
 
+  test("routes a personal reminder to the qualified tool across MCP name collisions", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "aaa-mcp": [tool("manage_schedules")],
+        "lobu-memory": [tool("manage_schedules")],
+      },
+      message: "5分鐘後提醒我吃午餐",
+      budget: 1,
+    });
+
+    expect(result.trace.selectedToolNames).toEqual([
+      "lobu-memory/manage_schedules",
+    ]);
+  });
+
   test("keeps P0 battle report tools inside a crowded Toolbox MCP catalog", () => {
     const cardStudioDistractors = Array.from({ length: 75 }, (_, index) =>
       tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)

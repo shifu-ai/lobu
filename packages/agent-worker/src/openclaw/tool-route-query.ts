@@ -8,10 +8,12 @@ export type ToolOperation =
   | "schedule"
   | "unknown";
 
+export type ToolDestination = "personal_reminder" | "google_calendar";
+
 export interface ToolRouteQuery {
   normalizedText: string;
   operations: ToolOperation[];
-  explicitDestinations: string[];
+  explicitDestinations: ToolDestination[];
 }
 
 const PERSONAL_REMINDER_PATTERN = /提醒我|叫我|稍後提醒|稍后提醒|remind\s+me/;
@@ -20,7 +22,7 @@ const CREATE_PATTERN = /建立|新增|create/;
 
 export function buildToolRouteQuery(message: string): ToolRouteQuery {
   const normalizedText = message.normalize("NFKC").trim().toLowerCase();
-  const explicitDestinations: string[] = [];
+  const explicitDestinations: ToolDestination[] = [];
   const operations: ToolOperation[] = [];
   const isPersonalReminder = PERSONAL_REMINDER_PATTERN.test(normalizedText);
 
