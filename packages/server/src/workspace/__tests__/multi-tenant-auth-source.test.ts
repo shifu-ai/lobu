@@ -22,21 +22,43 @@ const SOURCE = readFileSync(
   'utf8'
 );
 
+const PAT_OAUTH_ASSIGNMENT =
+  /authSource\s*:\s*isPat\s*\?\s*["']pat["']\s*:\s*["']oauth["']\s*,/g;
+const SESSION_ASSIGNMENT = /authSource\s*:\s*["']session["']\s*,/g;
+const DIRECT_PAT_ASSIGNMENT = /authSource\s*:\s*["']pat["']\s*,/g;
+
+function assignmentCount(source: string, pattern: RegExp): number {
+  return source.match(pattern)?.length ?? 0;
+}
+
+function removeFirstAssignment(source: string, pattern: RegExp): string {
+  return source.replace(new RegExp(pattern.source), '');
+}
+
 describe('multi-tenant resolveAuth: authSource per branch', () => {
-  it('PAT/OAuth branch picks pat or oauth via isPat ternary', () => {
-    // The PAT and OAuth bearers share a code path; the branch picks the
-    // label off the same `isPat` boolean it already used to dispatch
-    // verification.
-    expect(SOURCE).toMatch(
-      /authSource\s*:\s*isPat\s*\?\s*["']pat["']\s*:\s*["']oauth["']/,
-    );
+  it('pins both PAT/OAuth object assignments and the worker direct-PAT assignment', () => {
+    // The PAT and OAuth bearer flow has two successful exits: unscoped and
+    // organization-scoped. Worker direct auth has one separate PAT exit.
+    expect(assignmentCount(SOURCE, PAT_OAUTH_ASSIGNMENT)).toBe(2);
+    expect(assignmentCount(SOURCE, DIRECT_PAT_ASSIGNMENT)).toBe(1);
   });
 
-  it('session-cookie branch sets authSource: session', () => {
+  it('pins all three session-cookie object assignments', () => {
     // Three session-cookie paths: unscoped /mcp, member, and non-member
-    // public-readable fallthrough. All three must label the source.
-    const matches = SOURCE.match(/authSource\s*:\s*["']session["']/g) ?? [];
-    expect(matches.length).toBeGreaterThanOrEqual(3);
+    // public-readable fallthrough. The trailing comma requirement excludes
+    // the helper's type union from this count.
+    expect(assignmentCount(SOURCE, SESSION_ASSIGNMENT)).toBe(3);
+  });
+
+  it('detects a removed real branch assignment instead of counting the helper union', () => {
+    const withoutOneSessionBranch = removeFirstAssignment(SOURCE, SESSION_ASSIGNMENT);
+    const withoutOnePatOAuthBranch = removeFirstAssignment(
+      SOURCE,
+      PAT_OAUTH_ASSIGNMENT,
+    );
+
+    expect(assignmentCount(withoutOneSessionBranch, SESSION_ASSIGNMENT)).toBe(2);
+    expect(assignmentCount(withoutOnePatOAuthBranch, PAT_OAUTH_ASSIGNMENT)).toBe(1);
   });
 
   it("initializes c.var.authSource to null at the top of resolveAuth", () => {
