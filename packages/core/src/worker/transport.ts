@@ -33,12 +33,15 @@ export interface WorkerTransport {
    *
    * @param finalDelta - Optional final content delta
    */
-  signalDone(finalDelta?: string): Promise<void>;
+  signalDone(
+    finalDelta?: string,
+    awaitingHumanDecision?: boolean
+  ): Promise<void>;
 
   /**
    * Signal successful completion without additional content
    */
-  signalCompletion(): Promise<void>;
+  signalCompletion(awaitingHumanDecision?: boolean): Promise<void>;
 
   /**
    * Signal that an error occurred during processing

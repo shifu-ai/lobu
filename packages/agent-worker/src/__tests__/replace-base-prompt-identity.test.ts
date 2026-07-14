@@ -105,6 +105,13 @@ describe("replaceBasePromptIdentity", () => {
     expect(out).toContain("ISO date / 日期: 2026-07-09");
     expect(out).toContain("Today / 今天: 2026-07-09 (星期四)");
     expect(out).toContain("Yesterday / 昨天: 2026-07-08 (星期三)");
+    expect(out).toContain("Previous week / 上週: 2026-06-29 (星期一)");
+    expect(out).toContain("Current week / 本週: 2026-07-06 (星期一)");
+    expect(out).toContain("2026-07-12 (星期日)");
+    expect(out).toContain("Next week / 下週: 2026-07-13 (星期一)");
+    expect(out).toContain(
+      "Current Date Context overrides relative dates in old conversation history"
+    );
     expect(out).toContain("---");
     expect(out).toContain(gateway);
   });

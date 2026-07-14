@@ -37,6 +37,32 @@ describe("normalizeCreateArgs", () => {
     });
   });
 
+  test("strips internal trusted wake provenance while preserving benign extra fields", () => {
+    const args = normalizeCreateArgs({
+      action: "create",
+      description: "ordinary wake",
+      run_at: "2026-08-01T00:00:00Z",
+      payload: {
+        type: "wake_agent",
+        agent_id: "shifu-u-abc",
+        prompt: "hello",
+        custom_metadata: { tolerated: true },
+        trustedCoursePreference: "course-a",
+        trustedCourseWake: { source: "calendar_scheduled_wake" },
+        trustedCourseScope: { courseKey: "course-a" },
+        __trustedCourseWakeProvenance: "internal",
+      },
+    });
+
+    expect(args.payload).toEqual({
+      type: "wake_agent",
+      agent_id: "shifu-u-abc",
+      prompt: "hello",
+      custom_metadata: { tolerated: true },
+      trustedCoursePreference: "course-a",
+    });
+  });
+
   test("flattened wake_agent fields are lifted into payload (observed model shape)", () => {
     // Exactly what the production agent sent on 2026-07-07: no payload,
     // action_type + agent_id at the top level.

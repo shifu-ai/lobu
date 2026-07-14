@@ -2,6 +2,7 @@ import {
   getRequiredAccessLevel,
   hasRequiredMcpScope,
   isDirectAuthMemberScheduleWrite,
+  isVerifiedOrganizationAdminPat,
 } from '../../auth/tool-access';
 import logger from '../../utils/logger';
 import type { ToolContext } from '../registry';
@@ -18,6 +19,11 @@ import type { ToolContext } from '../registry';
  */
 function isSystemContext(ctx: ToolContext): boolean {
   return ctx.isAuthenticated === true && ctx.userId === null && ctx.memberRole === null;
+}
+
+export function isPrivilegedToolContext(ctx: ToolContext): boolean {
+  if (ctx.memberRole === 'owner' || ctx.memberRole === 'admin') return true;
+  return isVerifiedOrganizationAdminPat(ctx);
 }
 
 function enforceActionAccess(toolName: string, action: string, ctx: ToolContext): void {
@@ -42,7 +48,7 @@ function enforceActionAccess(toolName: string, action: string, ctx: ToolContext)
   const effectiveAccess =
     isScheduleWriteException && requiredAccess === 'admin' ? 'write' : requiredAccess;
 
-  if (effectiveAccess === 'admin' && ctx.memberRole !== 'owner' && ctx.memberRole !== 'admin') {
+  if (effectiveAccess === 'admin' && !isPrivilegedToolContext(ctx)) {
     throw new Error(
       `Action ${toolName}.${action} requires admin or owner access. Ask an organization owner to grant elevated access.`
     );

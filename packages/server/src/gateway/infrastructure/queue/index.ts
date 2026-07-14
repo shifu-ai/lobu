@@ -12,5 +12,6 @@ export type {
   IMessageQueue,
   QueueJob,
   QueueOptions,
+  QueueSendDisposition,
   ThreadResponsePayload,
 } from "./types.js";

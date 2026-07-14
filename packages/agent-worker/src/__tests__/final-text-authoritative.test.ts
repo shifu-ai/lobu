@@ -116,6 +116,19 @@ describe("HttpWorkerTransport finalText is authoritative", () => {
     expect(completionFinalText()).toBe("Hello world");
   });
 
+  test("completion carries awaitingHumanDecision without changing finalText", async () => {
+    const transport = new HttpWorkerTransport(baseConfig);
+
+    await transport.sendStreamDelta("Please choose one.", false, true);
+    await transport.signalCompletion(true);
+
+    const completion = sentPayloads.find((payload) => "finalText" in payload);
+    expect(completion).toMatchObject({
+      finalText: "Please choose one.",
+      awaitingHumanDecision: true,
+    });
+  });
+
   test("pure streaming (no explicit final): finalText falls back to the stream", async () => {
     const transport = new HttpWorkerTransport(baseConfig);
 

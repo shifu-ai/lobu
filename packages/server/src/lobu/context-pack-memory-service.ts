@@ -1,6 +1,7 @@
 import { hasRequiredMcpScope } from '../auth/tool-access';
 import type { Env } from '../index';
 import { saveContent } from '../tools/save_content';
+import { stripCallerEvidenceProvenance } from '../utils/trusted-evidence-provenance';
 import type { ToolContext, TokenType } from '../tools/registry';
 import { enqueueEmbeddingBackfillRun } from '../scheduled/trigger-embed-backfill';
 import { generateEmbeddings, getConfiguredEmbeddingModel } from '../utils/embeddings';
@@ -365,7 +366,7 @@ export async function writeContextPackMemory(
   let saved: Awaited<ReturnType<SaveContentImpl>>;
   try {
     const metadata: Record<string, unknown> = {
-      ...parsed.metadata,
+      ...stripCallerEvidenceProvenance(parsed.metadata),
       summary: parsed.summary,
       owner_user_id: parsed.ownerUserId,
       agent_id: parsed.agentId,

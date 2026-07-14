@@ -21,17 +21,21 @@
 import { type Static, Type } from '@sinclair/typebox';
 import { TypeCompiler } from '@sinclair/typebox/compiler';
 import type { Env } from '../../index';
-import { routeAction } from './action-router';
+import { isPrivilegedToolContext, routeAction } from './action-router';
 import { getDb } from '../../db/client';
 import {
+  activateScheduledJobByExternalKey,
   countActiveScheduledJobs,
   createScheduledJob,
   deleteScheduledJob,
   getScheduledJob,
+  getScheduledJobByExternalKey,
   listScheduledJobs,
   pauseScheduledJob,
   resolveWakeAgentId,
+  stageScheduledJobByExternalKey,
   type ScheduledJobRow,
+  upsertScheduledJobByExternalKeyWithQuota,
 } from '../../scheduled/scheduled-jobs-service';
 import type { ToolContext } from '../registry';
 import logger from '../../utils/logger';
@@ -40,7 +44,7 @@ import { nextRunAt as nextCronTickAt } from '../../utils/cron';
 // SHIFU FORK: member-scope-internal-tools plan, Task 3. Member-owned
 // direct-auth sessions (see 1c52bc33) can reach this tool, but must be
 // confined to their own agent / own notifications / a bounded quota — see
-// `isPrivilegedRole` and the deps below.
+// `isPrivilegedToolContext` and the deps below.
 const MEMBER_SCHEDULE_QUOTA = 20;
 
 // ============================================
@@ -70,10 +74,13 @@ const WakeAgentArgs = Type.Object({
 });
 
 const ActionUnion = Type.Union([SendNotificationArgs, WakeAgentArgs]);
+const CreationKey = Type.String({ minLength: 1, maxLength: 200, pattern: '\\S' });
 
 const CreateAction = Type.Object({
   action: Type.Literal('create'),
   description: Type.String({ minLength: 1, maxLength: 200 }),
+  creation_key: Type.Optional(CreationKey),
+  initial_state: Type.Optional(Type.Literal('staged')),
   /**
    * RFC3339 timestamp for the first (or only) firing. Required.
    * For one-shot schedules this is the only firing.
@@ -86,6 +93,9 @@ const CreateAction = Type.Object({
    * each firing. When omitted, the job is one-shot.
    */
   cron: Type.Optional(Type.String()),
+  until_at: Type.Optional(
+    Type.String({ description: 'ISO timestamp after which a recurring job must not fire.' })
+  ),
   /** Handler-specific payload. The `type` field selects the handler. */
   payload: ActionUnion,
   /**
@@ -116,6 +126,17 @@ const CancelAction = Type.Object({
   id: Type.String({ format: 'uuid' }),
 });
 
+const GetByCreationKeyAction = Type.Object({
+  action: Type.Literal('get_by_creation_key'),
+  creation_key: CreationKey,
+});
+
+const ActivateAction = Type.Object({
+  action: Type.Literal('activate'),
+  creation_key: CreationKey,
+  expected_schedule_id: Type.String({ format: 'uuid' }),
+});
+
 /**
  * MCP-facing schema. Deliberately flat and union-free: the agent-worker's
  * schema projection strips union keywords (anyOf/oneOf) and quarantines
@@ -125,10 +146,17 @@ const CancelAction = Type.Object({
  */
 export const ManageSchedulesSchema = Type.Object({
   action: Type.String({
-    description: "One of 'create', 'list', 'pause', 'cancel'.",
+    description: "One of 'create', 'get_by_creation_key', 'activate', 'list', 'pause', 'cancel'.",
   }),
   // create
   description: Type.Optional(Type.String({ maxLength: 200 })),
+  creation_key: Type.Optional(CreationKey),
+  initial_state: Type.Optional(
+    Type.Literal('staged', {
+      description: 'Persist without allowing execution until a later activate action.',
+    })
+  ),
+  expected_schedule_id: Type.Optional(Type.String()),
   run_at: Type.Optional(
     Type.String({
       description:
@@ -137,6 +165,9 @@ export const ManageSchedulesSchema = Type.Object({
   ),
   cron: Type.Optional(
     Type.String({ description: 'Cron expression for recurring jobs. Omit for one-shot.' })
+  ),
+  until_at: Type.Optional(
+    Type.String({ description: 'ISO timestamp after which a recurring job must not fire.' })
   ),
   payload: Type.Optional(
     Type.Object(
@@ -173,7 +204,14 @@ export const ManageSchedulesSchema = Type.Object({
   paused: Type.Optional(Type.Boolean()),
 });
 
-const InternalActionSchema = Type.Union([CreateAction, ListAction, PauseAction, CancelAction]);
+const InternalActionSchema = Type.Union([
+  CreateAction,
+  GetByCreationKeyAction,
+  ActivateAction,
+  ListAction,
+  PauseAction,
+  CancelAction,
+]);
 type ManageSchedulesArgs = Static<typeof InternalActionSchema>;
 
 const createValidator = TypeCompiler.Compile(CreateAction);
@@ -186,11 +224,9 @@ interface ToolResult {
   schedule?: ReturnType<typeof serializeSchedule>;
   schedules?: Array<ReturnType<typeof serializeSchedule>>;
   ok?: boolean;
+  found?: boolean;
+  status?: string;
   error?: string;
-}
-
-function isPrivilegedRole(ctx: ToolContext): boolean {
-  return ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
 }
 
 /**
@@ -200,6 +236,10 @@ function isPrivilegedRole(ctx: ToolContext): boolean {
  */
 export interface ManageSchedulesDeps {
   createScheduledJob: typeof createScheduledJob;
+  upsertScheduledJobByExternalKeyWithQuota: typeof upsertScheduledJobByExternalKeyWithQuota;
+  stageScheduledJobByExternalKey: typeof stageScheduledJobByExternalKey;
+  getScheduledJobByExternalKey: typeof getScheduledJobByExternalKey;
+  activateScheduledJobByExternalKey: typeof activateScheduledJobByExternalKey;
   listScheduledJobs: typeof listScheduledJobs;
   getScheduledJob: typeof getScheduledJob;
   pauseScheduledJob: typeof pauseScheduledJob;
@@ -247,6 +287,10 @@ async function dbResolveWakeAgentId(
 
 export const defaultManageSchedulesDeps: ManageSchedulesDeps = {
   createScheduledJob,
+  upsertScheduledJobByExternalKeyWithQuota,
+  stageScheduledJobByExternalKey,
+  getScheduledJobByExternalKey,
+  activateScheduledJobByExternalKey,
   listScheduledJobs,
   getScheduledJob,
   pauseScheduledJob,
@@ -265,6 +309,14 @@ export async function manageSchedules(
   return routeAction('manage_schedules', args.action, ctx, {
     create: () =>
       handleCreate(args as Extract<ManageSchedulesArgs, { action: 'create' }>, ctx, deps),
+    get_by_creation_key: () =>
+      handleGetByCreationKey(
+        args as Extract<ManageSchedulesArgs, { action: 'get_by_creation_key' }>,
+        ctx,
+        deps
+      ),
+    activate: () =>
+      handleActivate(args as Extract<ManageSchedulesArgs, { action: 'activate' }>, ctx, deps),
     list: () => handleList(args as Extract<ManageSchedulesArgs, { action: 'list' }>, ctx, deps),
     pause: () => handlePause(args as Extract<ManageSchedulesArgs, { action: 'pause' }>, ctx, deps),
     cancel: () =>
@@ -294,6 +346,15 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 const WAKE_AGENT_FIELDS = ['agent_id', 'prompt', 'thread_id', 'reason'] as const;
+const RESERVED_WAKE_TRUST_KEYS = new Set([
+  'trustedcoursewake',
+  'trustedcoursescope',
+  'trustedcoursewakeprovenance',
+  'trustedprovenance',
+  'internaltrustedprovenance',
+  'internaltrustedcoursewake',
+  'internaltrustedcoursewakeprovenance',
+]);
 const NOTIFICATION_FIELDS = ['title', 'body', 'recipients', 'resource_url'] as const;
 
 /**
@@ -304,6 +365,9 @@ const NOTIFICATION_FIELDS = ['title', 'body', 'recipients', 'resource_url'] as c
  */
 export function normalizeCreateArgs(raw: Record<string, unknown>): Record<string, unknown> {
   const args = { ...raw };
+  if (typeof args.creation_key === 'string') {
+    args.creation_key = args.creation_key.trim();
+  }
   const coerced = coerceSchedulePayload(args.payload);
   const payload: Record<string, unknown> = isPlainRecord(coerced) ? { ...coerced } : {};
 
@@ -321,6 +385,15 @@ export function normalizeCreateArgs(raw: Record<string, unknown>): Record<string
       payload.type = 'wake_agent';
     } else if (typeof args.title === 'string') {
       payload.type = 'send_notification';
+    }
+  }
+
+  if (payload.type === 'wake_agent') {
+    for (const key of Object.keys(payload)) {
+      const normalizedKey = key.toLowerCase().replace(/[^a-z]/g, '');
+      if (RESERVED_WAKE_TRUST_KEYS.has(normalizedKey)) {
+        delete payload[key];
+      }
     }
   }
 
@@ -349,7 +422,7 @@ export function normalizeCreateArgs(raw: Record<string, unknown>): Record<string
 }
 
 const CREATE_SHAPE_HINT =
-  "Expected create shape: {action:'create', description, run_at:'<future ISO>', cron?, payload:{type:'wake_agent', agent_id, prompt} | {type:'send_notification', title, body?, recipients?}}. Flattened fields (action_type/agent_id/prompt/title/body) are also accepted in place of payload.";
+  "Expected create shape: {action:'create', description, run_at:'<future ISO>', cron?, until_at?, payload:{type:'wake_agent', agent_id, prompt} | {type:'send_notification', title, body?, recipients?}}. Flattened fields (action_type/agent_id/prompt/title/body) are also accepted in place of payload.";
 
 async function handleCreate(
   rawArgs: Extract<ManageSchedulesArgs, { action: 'create' }>,
@@ -365,9 +438,25 @@ async function handleCreate(
       error: `Invalid args: ${errs.map((e) => `${e.path} ${e.message}`).join('; ')}. ${CREATE_SHAPE_HINT}`,
     };
   }
+  if (args.initial_state === 'staged' && !args.creation_key) {
+    return { error: 'initial_state staged requires a creation_key.' };
+  }
+  if (args.creation_key && !ctx.userId) {
+    return { error: 'creation_key requires an authenticated user.' };
+  }
+  if (args.creation_key && !isPrivilegedToolContext(ctx)) {
+    return { error: 'Schedule creation keys require trusted access.' };
+  }
   const runAtDate = new Date(args.run_at);
   if (Number.isNaN(runAtDate.getTime())) {
     return { error: `run_at is not a valid ISO timestamp: ${args.run_at}` };
+  }
+  const untilAtDate = args.until_at ? new Date(args.until_at) : null;
+  if (untilAtDate && Number.isNaN(untilAtDate.getTime())) {
+    return { error: `until_at is not a valid ISO timestamp: ${args.until_at}` };
+  }
+  if (untilAtDate && untilAtDate.getTime() < runAtDate.getTime()) {
+    return { error: 'until_at must be at or after run_at.' };
   }
   // A stale timestamp usually means the model guessed the current time.
   // Return the server clock so it can self-correct on retry.
@@ -415,7 +504,7 @@ async function handleCreate(
   // (see 1c52bc33) — confine them to their own agent, their own
   // notification recipients, and a bounded active-schedule quota. Owner/admin
   // sessions are unrestricted.
-  if (!isPrivilegedRole(ctx)) {
+  if (!isPrivilegedToolContext(ctx)) {
     if (args.payload.type === 'wake_agent') {
       const owned = await deps.agentOwnedByUser(
         ctx.organizationId,
@@ -435,11 +524,13 @@ async function handleCreate(
       // requested — impossible to target another user via this path.
       args.payload.recipients = ctx.userId ? [ctx.userId] : recipients;
     }
-    const activeCount = await deps.countActiveScheduledJobs(ctx.organizationId, ctx.userId);
-    if (activeCount >= MEMBER_SCHEDULE_QUOTA) {
-      return {
-        error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${activeCount}.`,
-      };
+    if (!args.creation_key) {
+      const activeCount = await deps.countActiveScheduledJobs(ctx.organizationId, ctx.userId);
+      if (activeCount >= MEMBER_SCHEDULE_QUOTA) {
+        return {
+          error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${activeCount}.`,
+        };
+      }
     }
   }
 
@@ -450,12 +541,13 @@ async function handleCreate(
     type: string;
   };
 
-  const job = await deps.createScheduledJob({
+  const createParams = {
     organizationId: ctx.organizationId,
     actionType,
     actionArgs,
     description: args.description,
     cron: args.cron ?? null,
+    untilAt: untilAtDate,
     runAt: runAtDate,
     createdByUser: ctx.userId ?? null,
     // Attribution: any session with an agentId (member-owned direct-auth
@@ -466,8 +558,87 @@ async function handleCreate(
     sourceRunId: args.source_run_id ?? null,
     sourceEventId: args.source_event_id ?? null,
     sourceThreadId: args.source_thread_id ?? null,
-  });
+  };
+  if (args.creation_key) {
+    if (args.initial_state === 'staged') {
+      const outcome = await deps.stageScheduledJobByExternalKey({
+        ...createParams,
+        externalKey: args.creation_key,
+        changeDetection: 'full',
+      });
+      if (outcome.status === 'conflict') {
+        return {
+          status: 'conflict',
+          error: 'A different schedule already uses this creation_key.',
+        };
+      }
+      return { status: outcome.job.state, schedule: serializeSchedule(outcome.job) };
+    }
+    const outcome = await deps.upsertScheduledJobByExternalKeyWithQuota({
+      ...createParams,
+      externalKey: args.creation_key,
+      changeDetection: 'full',
+      activeQuota: isPrivilegedToolContext(ctx) ? undefined : MEMBER_SCHEDULE_QUOTA,
+    });
+    if (outcome.status === 'quota_exceeded') {
+      return {
+        error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${outcome.activeCount}.`,
+      };
+    }
+    if (outcome.status === 'conflict') {
+      return {
+        status: 'conflict',
+        error: 'A different schedule already uses this creation_key.',
+      };
+    }
+    if (!isPrivilegedToolContext(ctx) && outcome.job.created_by_user !== ctx.userId) {
+      return { error: 'Schedule could not be created.' };
+    }
+    return { schedule: serializeSchedule(outcome.job) };
+  }
+  const job = await deps.createScheduledJob(createParams);
   return { schedule: serializeSchedule(job) };
+}
+
+function trustedStagedActionError(ctx: ToolContext): ToolResult | null {
+  return isPrivilegedToolContext(ctx)
+    ? null
+    : { error: 'Staged schedule actions require trusted access.' };
+}
+
+async function handleGetByCreationKey(
+  args: Extract<ManageSchedulesArgs, { action: 'get_by_creation_key' }>,
+  ctx: ToolContext,
+  deps: ManageSchedulesDeps
+): Promise<ToolResult> {
+  const accessError = trustedStagedActionError(ctx);
+  if (accessError) return accessError;
+  const creationKey = args.creation_key.trim();
+  if (!creationKey) return { error: 'creation_key is required.' };
+  const job = await deps.getScheduledJobByExternalKey(ctx.organizationId, creationKey);
+  return job
+    ? { found: true, status: job.state, schedule: serializeSchedule(job) }
+    : { found: false, status: 'not_found' };
+}
+
+async function handleActivate(
+  args: Extract<ManageSchedulesArgs, { action: 'activate' }>,
+  ctx: ToolContext,
+  deps: ManageSchedulesDeps
+): Promise<ToolResult> {
+  const accessError = trustedStagedActionError(ctx);
+  if (accessError) return accessError;
+  const creationKey = args.creation_key.trim();
+  if (!creationKey) return { error: 'creation_key is required.' };
+  if (!args.expected_schedule_id) return { error: 'expected_schedule_id is required.' };
+  const outcome = await deps.activateScheduledJobByExternalKey({
+    organizationId: ctx.organizationId,
+    externalKey: creationKey,
+    expectedScheduleId: args.expected_schedule_id,
+  });
+  return outcome.status === 'ok'
+    ? { status: outcome.job.state, schedule: serializeSchedule(outcome.job) }
+    : { status: outcome.status };
 }
 
 async function handleList(
@@ -477,7 +648,7 @@ async function handleList(
 ): Promise<ToolResult> {
   // SHIFU FORK: members can't list org-wide or spoof another user/agent via
   // args — force the filter to themselves regardless of what was passed.
-  const privileged = isPrivilegedRole(ctx);
+  const privileged = isPrivilegedToolContext(ctx);
   const rows = await deps.listScheduledJobs({
     organizationId: ctx.organizationId,
     createdByAgent: privileged ? args.agent_id ?? null : null,
@@ -511,7 +682,7 @@ async function handlePause(
   deps: ManageSchedulesDeps
 ): Promise<ToolResult> {
   const notFound = { error: `Schedule '${args.id}' not found in this organization.` };
-  if (!isPrivilegedRole(ctx)) {
+  if (!isPrivilegedToolContext(ctx)) {
     const existing = await deps.getScheduledJob(ctx.organizationId, args.id);
     if (!memberOwnsJob(existing, ctx)) return notFound;
   }
@@ -527,7 +698,7 @@ async function handleCancel(
   deps: ManageSchedulesDeps
 ): Promise<ToolResult> {
   const notFound = { error: `Schedule '${args.id}' not found in this organization.` };
-  if (!isPrivilegedRole(ctx)) {
+  if (!isPrivilegedToolContext(ctx)) {
     const existing = await deps.getScheduledJob(ctx.organizationId, args.id);
     if (!memberOwnsJob(existing, ctx)) return notFound;
   }
@@ -540,10 +711,13 @@ async function handleCancel(
 function serializeSchedule(row: ScheduledJobRow) {
   return {
     id: row.id,
+    creation_key: row.external_key,
+    state: row.state,
     organization_id: row.organization_id,
     action_type: row.action_type,
     action_args: row.action_args,
     cron: row.cron,
+    until_at: row.until_at,
     next_run_at: row.next_run_at,
     last_fired_at: row.last_fired_at,
     last_fired_run_id: row.last_fired_run_id,

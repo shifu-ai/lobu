@@ -11,6 +11,7 @@ import {
   hasRequiredMcpScope,
   isDirectAuthMemberScheduleWrite,
   isPublicReadable,
+  isVerifiedOrganizationAdminPat,
   type ToolAccessLevel,
 } from '../auth/tool-access';
 import type { Env } from '../index';
@@ -188,6 +189,8 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
   );
   const effectiveAccess: ToolAccessLevel =
     isScheduleWriteException && requiredAccess === 'admin' ? 'write' : requiredAccess;
+  const isTrustedSchedulePat =
+    toolName === 'manage_schedules' && isVerifiedOrganizationAdminPat(authCtx);
 
   if (!role && !isPublicReadable(toolName, args)) {
     if (authCtx.userId) {
@@ -201,7 +204,7 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
   }
 
   if (effectiveAccess === 'admin') {
-    if (role !== 'owner' && role !== 'admin') {
+    if (role !== 'owner' && role !== 'admin' && !isTrustedSchedulePat) {
       throw new Error(
         'This action requires admin or owner access. Ask an organization owner to grant elevated access.'
       );
@@ -369,6 +372,7 @@ export function toToolContext(authCtx: AuthContext): ToolContext {
   }
   return {
     organizationId: authCtx.organizationId,
+    tokenOrganizationId: authCtx.tokenOrganizationId,
     userId: authCtx.userId,
     memberRole: authCtx.memberRole,
     agentId: authCtx.agentId,

@@ -2,7 +2,12 @@ import * as nodeFs from "node:fs";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createLogger, ensureBaseUrl } from "@lobu/core";
+import {
+  type AutomationConfirmationContext,
+  createLogger,
+  ensureBaseUrl,
+  parseAutomationConfirmationContext,
+} from "@lobu/core";
 import FormData from "form-data";
 import { normalizeToolTextForContext } from "../openclaw/context-pressure";
 import { fetchAudioProviderSuggestions } from "./audio-provider-suggestions";
@@ -729,6 +734,7 @@ export async function requestHumanDecision(
     title: string;
     prompt: string;
     options: StructuredDecisionOption[];
+    confirmationContext?: AutomationConfirmationContext;
   },
   hooks?: {
     onPosted?: () => void;
@@ -745,6 +751,10 @@ export async function requestHumanDecision(
       return textResult("Error: request_human_decision requires an agentId");
     }
     assertRecoverableDecisionOptions(args.options);
+    const confirmationContext =
+      args.confirmationContext === undefined
+        ? undefined
+        : parseAutomationConfirmationContext(args.confirmationContext);
 
     const decisionId = randomUUID();
     const event = {
@@ -760,6 +770,7 @@ export async function requestHumanDecision(
       allowCustomResponse: true,
       options: args.options,
       createdAt: new Date().toISOString(),
+      ...(confirmationContext ? { confirmationContext } : {}),
     };
 
     const { error } = await gatewayFetch<{ id: string }>(

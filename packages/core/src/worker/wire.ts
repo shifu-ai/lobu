@@ -63,6 +63,8 @@ export interface CourseEvidenceProvenance {
 }
 
 export interface ResolvedCourseExecutionContext {
+  /** Orchestrator-selected for this turn; installed capability alone is insufficient. */
+  activeSpecializedSkill: "opp-coach" | null;
   trust: {
     ownerUserId: string;
     agentId: string;
@@ -103,12 +105,53 @@ export interface ResolvedCourseExecutionContext {
       provenanceKind: "fresh_course_retrieval";
       courseEntityId: string;
       readinessFields: Partial<Record<CourseReadinessField, string>>;
+      trustedEvidenceKind?: "meeting" | "transcript";
     }>;
   };
   /** Advisory completeness metadata. Older gateway payloads omit it. */
   readiness?: CourseReadinessAssessment;
   /** Bounded provenance labels only; never raw owner identifiers. */
   evidence?: CourseEvidenceProvenance[];
+}
+
+export type TrustedExecutionScope =
+  | {
+      mode: "onboarding";
+      source: "toolbox_course_resolution";
+      reason: "no_courses";
+      ownerUserId: string;
+      agentId: string;
+      conversationId: string;
+    }
+  | {
+      mode: "course";
+      ownerUserId: string;
+      agentId: string;
+      conversationId: string;
+      courseEntityId: string;
+      contextPackId: string;
+      contextVersion: number;
+      activeSpecializedSkill: "opp-coach" | null;
+    };
+
+export interface ScheduledCourseContext {
+  schemaVersion: 1;
+  source: "calendar_scheduled_wake";
+  automationId: string;
+  jobId: string;
+  runId: number;
+  taskKind:
+    | "opp_coach_rehearsal_prompt"
+    | "opp_coach_practice_prompt"
+    | "opp_coach_event_prompt";
+  course: {
+    ownerUserId: string;
+    agentId: string;
+    courseKey: string;
+    courseEntityId: string;
+    displayName: string;
+  };
+  evidenceReadiness: "canonical_only" | "same_course_evidence";
 }
 
 /**
@@ -147,6 +190,9 @@ export interface MessagePayload {
   // ── Message content (used by worker) ───────────────────────────────
   messageText: string;
   resolvedCourseContext?: ResolvedCourseExecutionContext;
+  /** Gateway-minted per-turn execution scope. Caller values are discarded. */
+  trustedExecutionScope?: TrustedExecutionScope;
+  scheduledCourseContext?: ScheduledCourseContext;
 
   // ── Platform-specific data (used by worker for context) ────────────
   platformMetadata: Record<string, unknown>;

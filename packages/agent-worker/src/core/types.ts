@@ -2,6 +2,8 @@
 
 import type {
   ResolvedCourseExecutionContext,
+  TrustedExecutionScope,
+  ScheduledCourseContext,
   WorkerTransport,
 } from "@lobu/core";
 
@@ -52,6 +54,9 @@ export interface WorkerConfig {
   runJobToken?: string;
   /** Trusted, per-turn course resolution supplied by the gateway. */
   resolvedCourseContext?: ResolvedCourseExecutionContext;
+  /** Trusted per-turn execution scope supplied by gateway orchestration. */
+  trustedExecutionScope?: TrustedExecutionScope;
+  scheduledCourseContext?: ScheduledCourseContext;
 }
 
 export interface WorkspaceSetupConfig {
@@ -96,6 +101,7 @@ export interface SessionExecutionResult {
   success: boolean;
   exitCode: number;
   output: string;
+  awaitingHumanDecision: boolean;
   error?: string;
   sessionKey: string;
 }

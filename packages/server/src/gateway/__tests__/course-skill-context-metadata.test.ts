@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
 	parseCourseSkillContextMetadata,
 	resolveCourseSkillContextMetadata,
+	selectActiveCourseSkill,
 } from "../orchestration/course-skill-context-metadata.js";
 
 const TOOLBOX_OPP_SKILL_FRONTMATTER = `---
@@ -16,6 +17,16 @@ metadata:
 ---`;
 
 describe("course skill context metadata", () => {
+	test.each([
+		["case-folded config name", { name: "Opp-Coach", enabled: true, content: TOOLBOX_OPP_SKILL_FRONTMATTER }],
+		["noncanonical config name", { name: "sales-helper", enabled: true, content: TOOLBOX_OPP_SKILL_FRONTMATTER }],
+		["frontmatter-only alias", { enabled: true, content: TOOLBOX_OPP_SKILL_FRONTMATTER }],
+	] as const)("rejects %s because it would sync outside .skills/opp-coach", (_label, skill) => {
+		const available = resolveCourseSkillContextMetadata([skill]);
+		expect(available.oppCoachAvailable).toBe(false);
+		expect(selectActiveCourseSkill({ available, message: "幫我修改銷講" }).activeSpecializedSkill).toBeNull();
+	});
+
 	test("parses the exact Toolbox opp-coach metadata contract", () => {
 		expect(
 			parseCourseSkillContextMetadata(TOOLBOX_OPP_SKILL_FRONTMATTER),
@@ -81,9 +92,10 @@ describe("course skill context metadata", () => {
 
 	test("merges only enabled course skills within global bounds", () => {
 		const resolved = resolveCourseSkillContextMetadata([
-			{ enabled: false, content: TOOLBOX_OPP_SKILL_FRONTMATTER },
-			{ enabled: true, content: TOOLBOX_OPP_SKILL_FRONTMATTER },
+			{ name: "opp-coach", enabled: false, content: TOOLBOX_OPP_SKILL_FRONTMATTER },
+			{ name: "opp-coach", enabled: true, content: TOOLBOX_OPP_SKILL_FRONTMATTER },
 			{
+				name: "opp-coach",
 				enabled: true,
 				instructions: `---\nmetadata:\n  course-context-contract: 1\n  scope: course\n  retrieval-terms: [第二詞]\n  retrieval-limit: 4\n---`,
 			},
@@ -94,8 +106,46 @@ describe("course skill context metadata", () => {
 
 	test("falls back to instructions only when content is invalid", () => {
 		const validInstructions = TOOLBOX_OPP_SKILL_FRONTMATTER;
-		expect(resolveCourseSkillContextMetadata([{ enabled: true, content: "", instructions: validInstructions }]).enabled).toBe(true);
-		expect(resolveCourseSkillContextMetadata([{ enabled: true, content: "---\nmetadata:\n  scope: course\n---", instructions: validInstructions }]).enabled).toBe(true);
-		expect(resolveCourseSkillContextMetadata([{ enabled: true, content: validInstructions, instructions: "invalid" }]).retrievalTerms).toEqual(["Key Learning", "Offer"]);
+		expect(resolveCourseSkillContextMetadata([{ name: "opp-coach", enabled: true, content: "", instructions: validInstructions }]).enabled).toBe(true);
+		expect(resolveCourseSkillContextMetadata([{ name: "opp-coach", enabled: true, content: "---\nmetadata:\n  scope: course\n---", instructions: validInstructions }]).enabled).toBe(true);
+		expect(resolveCourseSkillContextMetadata([{ name: "opp-coach", enabled: true, content: validInstructions, instructions: "invalid" }]).retrievalTerms).toEqual(["Key Learning", "Offer"]);
 	});
+
+	test.each([
+		["這堂課的三個秘密幫我想一下", "opp-coach"],
+		["這堂課的三個相信怎麼鋪陳", "opp-coach"],
+		["這段錯誤信念不夠有力", "opp-coach"],
+		["幫我打破學員的信念", "opp-coach"],
+		["價值公式這段怎麼講", "opp-coach"],
+		["第二個關鍵秘密要怎麼改", "opp-coach"],
+		["幫我看這段銷講彩排哪裡要改", "opp-coach"],
+		["幫我寫信跟老師確認下週錄課時間", null],
+		["整理今天的課程會議待辦", null],
+		["提醒我繳電話費", null],
+		["你好", null],
+	] as const)("selects an installed opp-coach only for deterministic sales talk intent: %s", (message, expected) => {
+		const available=resolveCourseSkillContextMetadata([{name:"opp-coach",enabled:true,content:TOOLBOX_OPP_SKILL_FRONTMATTER}]);
+		expect(selectActiveCourseSkill({available,message}).activeSpecializedSkill).toBe(expected);
+	});
+
+	test("selects opp-coach from a trusted scheduled task kind even when the prompt is generic", () => {
+		const available = resolveCourseSkillContextMetadata([
+			{
+				name: "opp-coach",
+				enabled: true,
+				content: TOOLBOX_OPP_SKILL_FRONTMATTER,
+			},
+		]);
+		expect(
+			selectActiveCourseSkill({
+				available,
+				message: "請主動問候 PM 並提供今天的準備提示",
+				trustedScheduledTaskKind: "opp_coach_rehearsal_prompt",
+			}),
+		).toMatchObject({
+			activeSpecializedSkill: "opp-coach",
+			retrievalTerms: ["Key Learning", "Offer"],
+		});
+	});
+
 });
