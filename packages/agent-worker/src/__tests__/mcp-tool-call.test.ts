@@ -19,14 +19,18 @@
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { Agent, type AgentTool } from "@mariozechner/pi-agent-core";
+import type {
+  AssistantMessage,
+  AssistantMessageEvent,
+  Model,
+} from "@mariozechner/pi-ai";
+import { Type } from "@sinclair/typebox";
 import { createMcpToolDefinitions } from "../openclaw/custom-tools";
+import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
 import {
-  buildRuntimeToolCatalog,
-  selectMcpToolsByMcpForTurn,
-} from "../openclaw/dynamic-tool-loader";
-import {
-  buildToolRouterClarificationInstruction,
   emitWorkerToolsRegisteredObsEvent,
+  initializeExternalTurnToolRouting,
 } from "../openclaw/session-runner";
 import {
   askUserQuestion,
@@ -57,6 +61,63 @@ const gw: GatewayParams = {
   conversationId: "conv-1",
   platform: "telegram",
 };
+
+const ROUTER_LOOP_MODEL: Model<"openai-completions"> = {
+  id: "router-loop-model",
+  name: "Router Loop Model",
+  api: "openai-completions",
+  provider: "test",
+  baseUrl: "http://test.invalid",
+  reasoning: false,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 100_000,
+  maxTokens: 4096,
+};
+
+function routerLoopMessage(
+  content: AssistantMessage["content"],
+  stopReason: AssistantMessage["stopReason"]
+): AssistantMessage {
+  return {
+    role: "assistant",
+    content,
+    api: "openai-completions",
+    provider: "test",
+    model: "router-loop-model",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason,
+    timestamp: Date.now(),
+  };
+}
+
+function routerLoopStream(message: AssistantMessage) {
+  const events: AssistantMessageEvent[] = [
+    { type: "start", partial: message },
+    {
+      type: "done",
+      reason: message.stopReason,
+      message,
+    } as AssistantMessageEvent,
+  ];
+  let index = 0;
+  return {
+    [Symbol.asyncIterator]: () => ({
+      next: async () =>
+        index < events.length
+          ? { value: events[index++], done: false as const }
+          : { value: undefined as never, done: true as const },
+    }),
+    result: async () => message,
+  };
+}
 
 function extractText(result: {
   content: Array<{ type: string; text?: string }>;
@@ -725,39 +786,58 @@ describe("worker MCP tool registration observability", () => {
 describe("external-turn tool router lifecycle", () => {
   test("freezes one ambiguity decision for both runtime catalogs", () => {
     const userPrompt = "幫我排明天下午三點跟老師開會";
-    const selection = selectMcpToolsByMcpForTurn({
-      toolsByMcp: {
-        "lobu-memory": [
-          {
-            name: "manage_schedules",
-            description: "Create a personal reminder schedule.",
-            inputSchema: { type: "object", properties: {} },
-          },
-        ],
-        google_workspace: [
-          {
-            name: "gws_calendar_events_create",
-            description: "Create a Google Calendar event.",
-            inputSchema: { type: "object", properties: {} },
-          },
-        ],
-      },
-      message: userPrompt,
-      budget: 8,
-      allowedToolNames: [
-        "lobu-memory/manage_schedules",
-        "google_workspace/gws_calendar_events_create",
+    const toolsByMcp = {
+      "lobu-memory": [
+        {
+          name: "manage_schedules",
+          description: "Create a personal reminder schedule.",
+          inputSchema: { type: "object", properties: {} },
+        },
       ],
-    });
+      google_workspace: [
+        {
+          name: "gws_calendar_events_create",
+          description: "Create a Google Calendar event.",
+          inputSchema: { type: "object", properties: {} },
+        },
+      ],
+    };
+    const routing = initializeExternalTurnToolRouting(
+      {
+        toolsByMcp,
+        message: userPrompt,
+        budget: 8,
+        allowedToolNames: [
+          "lobu-memory/manage_schedules",
+          "google_workspace/gws_calendar_events_create",
+        ],
+        trace: {
+          traceId: "tr_routerambiguity1234",
+          journeyId: "line_text_agent_turn",
+          actor: "worker",
+          traceSource: "incoming",
+        },
+      },
+      { emitEvent: () => undefined }
+    );
+    const selection = routing.selection;
 
     expect(selection.trace.clarificationRequired).toBe(true);
     expect(selection.trace.blockedToolNames).toHaveLength(2);
-    expect(buildToolRouterClarificationInstruction(selection.trace)).toContain(
+    expect(routing.clarificationInstruction).toContain(
       selection.trace.clarificationQuestion ?? ""
     );
     for (const providerVisibleTools of [{}, selection.selectedTools]) {
-      const catalog = buildRuntimeToolCatalog({
-        allTools: {
+      const catalog = routing.buildRuntimeCatalog({ providerVisibleTools });
+      expect(catalog.map((entry) => entry.callBlockedReason)).toEqual([
+        "clarification_required",
+        "clarification_required",
+      ]);
+    }
+
+    const unambiguous = initializeExternalTurnToolRouting(
+      {
+        toolsByMcp: {
           "lobu-memory": [
             {
               name: "manage_schedules",
@@ -765,43 +845,108 @@ describe("external-turn tool router lifecycle", () => {
               inputSchema: { type: "object", properties: {} },
             },
           ],
-          google_workspace: [
-            {
-              name: "gws_calendar_events_create",
-              description: "Create a Google Calendar event.",
-              inputSchema: { type: "object", properties: {} },
-            },
-          ],
         },
-        selectedTools: selection.selectedTools,
-        providerVisibleTools,
-        allowedToolNames: [
-          "lobu-memory/manage_schedules",
-          "google_workspace/gws_calendar_events_create",
-        ],
-        clarificationBlockedToolKeys: selection.trace.blockedToolNames,
-      });
-      expect(catalog.map((entry) => entry.callBlockedReason)).toEqual([
-        "clarification_required",
-        "clarification_required",
-      ]);
-    }
-
-    const unambiguous = selectMcpToolsByMcpForTurn({
-      toolsByMcp: {
-        "lobu-memory": [
-          {
-            name: "manage_schedules",
-            description: "Create a personal reminder schedule.",
-            inputSchema: { type: "object", properties: {} },
-          },
-        ],
+        message: "五分鐘後提醒我喝水",
+        budget: 8,
+        trace: {
+          traceId: "tr_routerclear1234",
+          journeyId: "line_text_agent_turn",
+          actor: "worker",
+          traceSource: "incoming",
+        },
       },
-      message: "五分鐘後提醒我喝水",
-      budget: 8,
+      { emitEvent: () => undefined }
+    );
+    expect(unambiguous.clarificationInstruction).toBeNull();
+  });
+
+  test("selects and emits once across a real provider tool-result continuation loop", async () => {
+    const manageSchedules = {
+      name: "manage_schedules",
+      description: "Create a personal reminder schedule.",
+      inputSchema: { type: "object", properties: {} },
+    };
+    const selectCalls: unknown[] = [];
+    const emitted: unknown[] = [];
+    const routing = initializeExternalTurnToolRouting(
+      {
+        toolsByMcp: { "lobu-memory": [manageSchedules] },
+        message: "五分鐘後提醒我喝水",
+        budget: 8,
+        allowedToolNames: ["lobu-memory/manage_schedules"],
+        trace: {
+          traceId: "tr_routerloop1234",
+          journeyId: "line_text_agent_turn",
+          actor: "worker",
+          traceSource: "incoming",
+        },
+      },
+      {
+        selectTools: (params) => {
+          selectCalls.push(params);
+          return selectMcpToolsByMcpForTurn(params);
+        },
+        emitEvent: (event) => emitted.push(event),
+        now: (() => {
+          let value = 10;
+          return () => value++;
+        })(),
+      }
+    );
+
+    const cliCatalog = routing.buildRuntimeCatalog({
+      providerVisibleTools: {},
     });
+    const toolsCatalog = routing.buildRuntimeCatalog({
+      providerVisibleTools: routing.selection.selectedTools,
+    });
+    expect(cliCatalog.map((entry) => entry.key)).toEqual(
+      toolsCatalog.map((entry) => entry.key)
+    );
+
+    let streamCalls = 0;
+    const agent = new Agent({
+      streamFn: (() => {
+        streamCalls += 1;
+        if (streamCalls === 1) {
+          return routerLoopStream(
+            routerLoopMessage(
+              [{ type: "toolCall", id: "call-1", name: "noop", arguments: {} }],
+              "toolUse"
+            )
+          ) as never;
+        }
+        return routerLoopStream(
+          routerLoopMessage([{ type: "text", text: "done" }], "stop")
+        ) as never;
+      }) as never,
+    });
+    agent.setModel(ROUTER_LOOP_MODEL as never);
+    agent.setTools([
+      {
+        name: "noop",
+        label: "noop",
+        description: "Return one tool result.",
+        parameters: Type.Object({}),
+        execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+      } as AgentTool,
+    ]);
+
+    await agent.prompt("run one tool and continue");
+
+    expect(streamCalls).toBe(2);
     expect(
-      buildToolRouterClarificationInstruction(unambiguous.trace)
-    ).toBeNull();
+      agent.state.messages.filter(
+        (message) => (message as { role: string }).role === "toolResult"
+      )
+    ).toHaveLength(1);
+    expect(selectCalls).toHaveLength(1);
+    expect(selectCalls[0]).toMatchObject({
+      allowedToolNames: ["lobu-memory/manage_schedules"],
+    });
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toMatchObject({
+      event: "lobu.worker.tool_router_decision",
+    });
   });
 });

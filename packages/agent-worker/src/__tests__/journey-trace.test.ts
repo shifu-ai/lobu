@@ -133,7 +133,12 @@ describe("worker journey trace", () => {
           {
             name: "manage_schedules",
             description: "Create a personal reminder schedule.",
-            inputSchema: { type: "object", properties: {} },
+            inputSchema: {
+              type: "object",
+              properties: {
+                raw_schema_secret: { description: "oauth-secret" },
+              },
+            },
           },
         ],
         google_workspace: [
@@ -166,9 +171,19 @@ describe("worker journey trace", () => {
       Math.min(5, selection.trace.candidateCount)
     );
     expect(serializedEvent).not.toContain(userPrompt);
+    expect(serializedEvent).not.toContain("raw_schema_secret");
+    expect(serializedEvent).not.toContain("oauth-secret");
     expect((emitted.candidates as unknown[]).length <= 5).toBe(true);
     expect(emitted.selected_tools).toHaveLength(0);
     expect(emitted.blocked_tools).toHaveLength(2);
+    expect(emitted.candidates).toEqual(
+      selection.trace.candidates.slice(0, 5).map((candidate) => ({
+        key: candidate.key,
+        totalScore: candidate.totalScore,
+        reasons: candidate.reasons,
+        scoreBreakdown: candidate.scoreBreakdown,
+      }))
+    );
     expect(emitted).toMatchObject({
       event: "lobu.worker.tool_router_decision",
       module: "agent-worker",

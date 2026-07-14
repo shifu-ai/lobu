@@ -94,8 +94,12 @@ import { buildToolUseEventPayload } from "./tool-use-events";
 import { createOpenClawTools } from "./tools";
 import { clearSnapshots, hydrateFromSnapshot } from "./transcript-snapshot";
 import {
+  type BuildRuntimeToolCatalogParams,
   buildRuntimeToolCatalog,
   type DynamicToolSelectionTrace,
+  type RuntimeToolCatalogEntry,
+  type SelectMcpToolsByMcpForTurnParams,
+  type SelectMcpToolsByMcpForTurnResult,
   resolveDynamicToolBudget,
   selectMcpToolsByMcpForTurn,
 } from "./dynamic-tool-loader";
@@ -172,6 +176,10 @@ function boundedRouterString(value: string, maxLength = 160): string {
   return value.slice(0, maxLength);
 }
 
+function boundedRouterNumber(value: number): number {
+  return Number.isFinite(value) ? value : 0;
+}
+
 export function buildToolRouterClarificationInstruction(
   trace: DynamicToolSelectionTrace
 ): string | null {
@@ -209,10 +217,33 @@ export function buildToolRouterJourneyEventInput(params: {
       clarification_reason: selectionTrace.clarificationReason,
       candidates: selectionTrace.candidates.slice(0, 5).map((candidate) => ({
         key: boundedRouterString(candidate.key),
-        total_score: candidate.totalScore,
+        totalScore: boundedRouterNumber(candidate.totalScore),
         reasons: candidate.reasons
           .slice(0, 8)
           .map((reason) => boundedRouterString(reason, 48)),
+        scoreBreakdown: candidate.scoreBreakdown
+          ? {
+              exactName: boundedRouterNumber(
+                candidate.scoreBreakdown.exactName
+              ),
+              nameTitle: boundedRouterNumber(
+                candidate.scoreBreakdown.nameTitle
+              ),
+              aliasesExamples: boundedRouterNumber(
+                candidate.scoreBreakdown.aliasesExamples
+              ),
+              description: boundedRouterNumber(
+                candidate.scoreBreakdown.description
+              ),
+              parameters: boundedRouterNumber(
+                candidate.scoreBreakdown.parameters
+              ),
+              domain: boundedRouterNumber(candidate.scoreBreakdown.domain),
+              negativePenalty: boundedRouterNumber(
+                candidate.scoreBreakdown.negativePenalty
+              ),
+            }
+          : undefined,
       })),
       candidate_count: selectionTrace.candidateCount,
       timing_ms: {
@@ -224,6 +255,65 @@ export function buildToolRouterJourneyEventInput(params: {
       fallback: selectionTrace.fallback,
     },
   };
+}
+
+export interface ExternalTurnToolRouting {
+  readonly selection: SelectMcpToolsByMcpForTurnResult;
+  readonly clarificationInstruction: string | null;
+  readonly routeTotalMs: number;
+  buildRuntimeCatalog(params: {
+    providerVisibleTools: BuildRuntimeToolCatalogParams["providerVisibleTools"];
+  }): RuntimeToolCatalogEntry[];
+}
+
+interface ExternalTurnToolRoutingDependencies {
+  selectTools: (
+    params: SelectMcpToolsByMcpForTurnParams
+  ) => SelectMcpToolsByMcpForTurnResult;
+  emitEvent: typeof emitJourneyEvent;
+  now: () => number;
+}
+
+export function initializeExternalTurnToolRouting(
+  params: SelectMcpToolsByMcpForTurnParams & {
+    trace: WorkerShifuTraceContext;
+  },
+  dependencies: Partial<ExternalTurnToolRoutingDependencies> = {}
+): ExternalTurnToolRouting {
+  const selectTools = dependencies.selectTools ?? selectMcpToolsByMcpForTurn;
+  const emitEvent = dependencies.emitEvent ?? emitJourneyEvent;
+  const now = dependencies.now ?? performance.now.bind(performance);
+  const { trace, ...selectionParams } = params;
+  const routeStartedAt = now();
+  const selection = selectTools(selectionParams);
+  const routeTotalMs = Math.max(0, now() - routeStartedAt);
+  emitEvent(
+    buildToolRouterJourneyEventInput({
+      trace,
+      selectionTrace: selection.trace,
+      totalMs: routeTotalMs,
+    })
+  );
+
+  return Object.freeze({
+    selection,
+    clarificationInstruction: buildToolRouterClarificationInstruction(
+      selection.trace
+    ),
+    routeTotalMs,
+    buildRuntimeCatalog: ({
+      providerVisibleTools,
+    }: {
+      providerVisibleTools: BuildRuntimeToolCatalogParams["providerVisibleTools"];
+    }) =>
+      buildRuntimeToolCatalog({
+        allTools: params.toolsByMcp,
+        selectedTools: selection.selectedTools,
+        providerVisibleTools,
+        allowedToolNames: params.allowedToolNames,
+        clarificationBlockedToolKeys: selection.trace.blockedToolNames,
+      }),
+  });
 }
 
 function readStringOrFallback(value: unknown, fallback: string): string {
@@ -1626,26 +1716,18 @@ Use it when the user references past discussions or you need context.`);
     }
   }
 
-  const routeStartedAt = performance.now();
-  const selection = selectMcpToolsByMcpForTurn({
+  const toolRouting = initializeExternalTurnToolRouting({
     toolsByMcp: context.mcpTools,
     message: userPrompt,
     budget: dynamicToolBudget,
     allowedToolNames: catalogAllowedToolNames,
+    trace: shifuTrace,
   });
-  const routeTotalMs = performance.now() - routeStartedAt;
+  const selection = toolRouting.selection;
+  const routeTotalMs = toolRouting.routeTotalMs;
   const selectedMcpToolsForTurn = selection.selectedTools;
-  const clarificationInstruction = buildToolRouterClarificationInstruction(
-    selection.trace
-  );
+  const clarificationInstruction = toolRouting.clarificationInstruction;
   if (clarificationInstruction) instructionParts.push(clarificationInstruction);
-  emitJourneyEvent(
-    buildToolRouterJourneyEventInput({
-      trace: shifuTrace,
-      selectionTrace: selection.trace,
-      totalMs: routeTotalMs,
-    })
-  );
   logger.info(
     `Dynamic MCP tool selection: router=${selection.trace.routerVersion}, selected=${selection.trace.selectedToolNames.length}, eligible=${selection.trace.eligibleToolCount}, total=${selection.trace.totalTools}, clarification=${selection.trace.clarificationRequired}, cacheHit=${selection.trace.cacheHit}, totalMs=${routeTotalMs.toFixed(2)}, fallback=${selection.trace.fallback ?? "none"}`
   );
@@ -1678,12 +1760,8 @@ Use it when the user references past discussions or you need context.`);
     selectedMcpToolsForTurn;
   let registeredMcpToolCount = 0;
   if (mcpExposure === "cli") {
-    const runtimeToolCatalog = buildRuntimeToolCatalog({
-      allTools: context.mcpTools,
-      selectedTools: selectedMcpToolsForTurn,
+    const runtimeToolCatalog = toolRouting.buildRuntimeCatalog({
       providerVisibleTools: {},
-      allowedToolNames: catalogAllowedToolNames,
-      clarificationBlockedToolKeys: selection.trace.blockedToolNames,
     });
     customTools.push(
       ...createOpenClawCustomTools({
@@ -1719,12 +1797,8 @@ Use it when the user references past discussions or you need context.`);
       selectionHint: userPrompt,
     });
     registeredDirectMcpTools = projectedMcp.tools;
-    const runtimeToolCatalog = buildRuntimeToolCatalog({
-      allTools: context.mcpTools,
-      selectedTools: selectedMcpToolsForTurn,
+    const runtimeToolCatalog = toolRouting.buildRuntimeCatalog({
       providerVisibleTools: projectedMcp.tools,
-      allowedToolNames: catalogAllowedToolNames,
-      clarificationBlockedToolKeys: selection.trace.blockedToolNames,
     });
     customTools.push(
       ...createOpenClawCustomTools({
