@@ -106,24 +106,27 @@ function shouldCanonicalize(
 ): boolean {
   return (
     params.personalReminderDeliveryExecutable !== false &&
-    params.intent.destination === "personal_reminder" &&
-    params.intent.confidence === "explicit" &&
-    !params.intent.requiresClarification &&
-    params.mcpId === "lobu-memory" &&
-    params.toolName === "manage_schedules" &&
-    params.args.action === "create" &&
+    isExplicitPersonalReminderAttempt(params) &&
     requested === "send_notification"
   );
 }
 
-function isExplicitPersonalReminderAttempt(
-  params: ExecuteMcpToolForTurnParams
-): boolean {
+export function isExplicitPersonalReminderAttempt(params: {
+  intent: TurnExecutionIntent;
+  mcpId: string;
+  toolName: string;
+  args?: Record<string, unknown>;
+}): boolean {
+  const operation = params.args?.action ?? params.intent.operation;
   return (
+    (params.intent.operation === undefined ||
+      params.intent.operation === "create") &&
     params.intent.destination === "personal_reminder" &&
     params.intent.confidence === "explicit" &&
     !params.intent.requiresClarification &&
-    isScheduleCreateAttempt(params)
+    operation === "create" &&
+    params.mcpId === "lobu-memory" &&
+    params.toolName === "manage_schedules"
   );
 }
 

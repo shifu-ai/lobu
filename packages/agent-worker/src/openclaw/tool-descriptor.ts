@@ -32,6 +32,11 @@ export function toolIdentityKey(mcpId: string, name: string): string {
   return JSON.stringify([mcpId, name]);
 }
 
+/** Reversible external key. Ordinary `mcp/tool` keys remain byte-compatible. */
+export function qualifiedToolKey(mcpId: string, name: string): string {
+  return `${encodeURIComponent(mcpId)}/${encodeURIComponent(name)}`;
+}
+
 export interface ToolDescriptor {
   key: string;
   identityKey: string;
@@ -433,7 +438,7 @@ export function buildToolDescriptor(
 ): ToolDescriptor {
   const entry = catalogEntryForTool(tool, originalIndex, mcpId);
   const name = entry.name;
-  const key = mcpId ? `${mcpId}/${name}` : name;
+  const key = mcpId ? qualifiedToolKey(mcpId, name) : name;
   const identityKey = toolIdentityKey(mcpId, name);
   const indexedName = sanitize(name);
   const indexedMcpId = sanitize(mcpId);

@@ -117,7 +117,7 @@ import {
   removeLegacyToolboxActiveContext,
 } from "./session-context";
 import { resolveTrustedShifuToolboxOrigins } from "./tool-catalog";
-import { toolIdentityKey } from "./tool-descriptor";
+import { qualifiedToolKey, toolIdentityKey } from "./tool-descriptor";
 import {
   cloneAndFreezeJsonLike,
   snapshotToolsByMcp,
@@ -1688,7 +1688,7 @@ export async function runAISession(
         const toolName = tool.name?.trim();
         if (!toolName || !isToolAllowedByPolicy(toolName, toolsPolicy))
           continue;
-        names.push(toolName, `${mcpId}/${toolName}`);
+        names.push(toolName, qualifiedToolKey(mcpId, toolName));
         keys.push(toolIdentityKey(mcpId, toolName));
       }
     }
@@ -1718,7 +1718,7 @@ export async function runAISession(
           trustedShifuToolboxOrigins,
         })
       ) {
-        untrustedProvenanceToolKeys.push(`${mcpId}/${tool.name}`);
+        untrustedProvenanceToolKeys.push(qualifiedToolKey(mcpId, tool.name));
       }
     }
   }
@@ -1816,6 +1816,8 @@ export async function runAISession(
       allowedToolKeys: turnEligibleToolKeys,
       turnEligibleToolKeys,
       clarificationBlockedToolKeys: selection.trace.blockedToolIdentityKeys,
+      turnExecutionIntent,
+      personalReminderDeliveryBlockedReason,
     },
     isToolInvocationAllowed: (
       mcpId: string,
@@ -2211,7 +2213,9 @@ Use it when the user references past discussions or you need context.`);
     trustedShifuToolboxOrigins,
     isToolAllowed: (toolName, mcpId) =>
       isToolAllowedByPolicy(toolName, toolsPolicy) &&
-      effectiveTools.allowedToolKeys.includes(`${mcpId}/${toolName}`),
+      effectiveTools.allowedToolKeys.includes(
+        qualifiedToolKey(mcpId, toolName)
+      ),
   });
   if (calendarResolverInstructions) {
     instructionParts.push(calendarResolverInstructions);

@@ -15,7 +15,8 @@ export {
   type RuntimeToolCatalogEntry,
 } from "./tool-catalog-dispatcher";
 
-import { toolIdentityKey } from "./tool-descriptor";
+import { qualifiedToolKey, toolIdentityKey } from "./tool-descriptor";
+import { isExplicitPersonalReminderAttempt } from "./mcp-execution-contract";
 import {
   classifyToolIntent,
   hasCalendarDateIntent,
@@ -130,10 +131,11 @@ function blocksPersonalReminderTool(
 ): boolean {
   return (
     params.personalReminderDeliveryBlockedReason !== undefined &&
-    deriveTurnExecutionIntent(params.message).destination ===
-      "personal_reminder" &&
-    mcpId === "lobu-memory" &&
-    toolName === "manage_schedules"
+    isExplicitPersonalReminderAttempt({
+      intent: deriveTurnExecutionIntent(params.message),
+      mcpId,
+      toolName,
+    })
   );
 }
 
@@ -677,7 +679,7 @@ function catalogToolKey(mcpId: string, toolName: string): string {
 }
 
 function displayToolName(entry: ToolCatalogEntry): string {
-  return entry.mcpId ? `${entry.mcpId}/${entry.name}` : entry.name;
+  return entry.mcpId ? qualifiedToolKey(entry.mcpId, entry.name) : entry.name;
 }
 
 export function selectMcpToolsByMcpForTurn(

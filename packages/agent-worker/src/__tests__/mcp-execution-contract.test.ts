@@ -13,6 +13,7 @@ describe("deriveTurnExecutionIntent", () => {
   test("classifies an explicit timed personal reminder", () => {
     expect(deriveTurnExecutionIntent("五分鐘後提醒我喝水")).toEqual({
       destination: "personal_reminder",
+      operation: "create",
       confidence: "explicit",
       requiresClarification: false,
     });
@@ -55,6 +56,7 @@ describe("deriveTurnExecutionIntent", () => {
   test("requires clarification when time or destination is missing", () => {
     expect(deriveTurnExecutionIntent("提醒我喝水")).toEqual({
       destination: "personal_reminder",
+      operation: "create",
       confidence: "ambiguous",
       requiresClarification: true,
     });
@@ -62,6 +64,15 @@ describe("deriveTurnExecutionIntent", () => {
       destination: "unspecified",
       confidence: "ambiguous",
       requiresClarification: true,
+    });
+  });
+
+  test("classifies cancellation separately from personal reminder creation", () => {
+    expect(deriveTurnExecutionIntent("取消明天提醒我喝水")).toMatchObject({
+      destination: "personal_reminder",
+      operation: "cancel",
+      confidence: "explicit",
+      requiresClarification: false,
     });
   });
 });

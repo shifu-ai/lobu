@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { McpToolDef, ReleaseCapabilityState } from "@lobu/core";
-import { toolIdentityKey } from "./tool-descriptor";
+import { qualifiedToolKey, toolIdentityKey } from "./tool-descriptor";
 import { snapshotToolsByMcp } from "./tool-inventory-snapshot";
 
 export const PERSONAL_REMINDER_DELIVERY_CAPABILITY =
@@ -87,6 +87,26 @@ export interface BuildEffectiveToolInventoryParams {
 
 function setFrom(values: Iterable<string> | undefined): Set<string> | null {
   return values === undefined ? null : new Set(values);
+}
+
+function identitySetFrom(
+  values: Iterable<string> | undefined,
+  discovered: ReadonlyMap<
+    string,
+    { mcpId: string; toolName: string; tool: McpToolDef }
+  >
+): Set<string> | null {
+  if (values === undefined) return null;
+  const input = new Set(values);
+  return new Set(
+    [...discovered.entries()]
+      .filter(
+        ([identityKey, entry]) =>
+          input.has(identityKey) ||
+          input.has(qualifiedToolKey(entry.mcpId, entry.toolName))
+      )
+      .map(([identityKey]) => identityKey)
+  );
 }
 
 function canonicalJson(value: unknown): string {
@@ -278,10 +298,19 @@ export function buildEffectiveToolInventory(
 
   const now = params.now ?? new Date();
   const connected = setFrom(params.connectedMcpIds);
-  const granted = setFrom(params.grantedToolKeys);
-  const untrusted = setFrom(params.untrustedProvenanceToolKeys);
-  const approvalRequired = setFrom(params.approvalRequiredToolKeys);
-  const clarificationRequired = setFrom(params.clarificationRequiredToolKeys);
+  const granted = identitySetFrom(params.grantedToolKeys, discovered);
+  const untrusted = identitySetFrom(
+    params.untrustedProvenanceToolKeys,
+    discovered
+  );
+  const approvalRequired = identitySetFrom(
+    params.approvalRequiredToolKeys,
+    discovered
+  );
+  const clarificationRequired = identitySetFrom(
+    params.clarificationRequiredToolKeys,
+    discovered
+  );
   const blocked: EffectiveToolBlockedEntry[] = [];
   const allowed: Array<readonly [string, McpToolDef]> = [];
   const releaseInactive = inactiveReleaseReason(params.releaseState, now);
@@ -289,19 +318,21 @@ export function buildEffectiveToolInventory(
   for (const [identityKey, entry] of [...discovered.entries()].sort(
     ([a], [b]) => a.localeCompare(b)
   )) {
-    const toolKey = `${entry.mcpId}/${entry.toolName}`;
+    const toolKey = qualifiedToolKey(entry.mcpId, entry.toolName);
     let reason: EffectiveToolBlockedReason | undefined;
     if (duplicateIdentityKeys.has(identityKey)) reason = "duplicate_identity";
     else if (connected && !connected.has(entry.mcpId)) reason = "not_connected";
-    else if (granted && !granted.has(toolKey)) reason = "policy_denied";
-    else if (untrusted?.has(toolKey)) reason = "untrusted_provenance";
+    else if (granted && !granted.has(identityKey)) reason = "policy_denied";
+    else if (untrusted?.has(identityKey)) reason = "untrusted_provenance";
     else if (
       params.isPolicyAllowed &&
       !params.isPolicyAllowed(toolKey, entry.toolName, entry.mcpId)
     )
       reason = "policy_denied";
     else {
-      const requiredCapability = params.releaseCapabilityByToolKey?.[toolKey];
+      const requiredCapability =
+        params.releaseCapabilityByToolKey?.[identityKey] ??
+        params.releaseCapabilityByToolKey?.[toolKey];
       if (requiredCapability) {
         if (releaseInactive) reason = releaseInactive;
         else if (
@@ -311,8 +342,9 @@ export function buildEffectiveToolInventory(
           reason = "capability_inactive";
       }
     }
-    if (!reason && approvalRequired?.has(toolKey)) reason = "approval_required";
-    if (!reason && clarificationRequired?.has(toolKey))
+    if (!reason && approvalRequired?.has(identityKey))
+      reason = "approval_required";
+    if (!reason && clarificationRequired?.has(identityKey))
       reason = "clarification_required";
 
     if (reason) blocked.push(Object.freeze({ toolKey, reason }));
@@ -320,19 +352,21 @@ export function buildEffectiveToolInventory(
   }
 
   const discoveredExternalKeys = new Set(
-    [...discovered.values()].map((entry) => `${entry.mcpId}/${entry.toolName}`)
+    [...discovered.values()].map((entry) =>
+      qualifiedToolKey(entry.mcpId, entry.toolName)
+    )
   );
   for (const toolKey of Object.keys(
     params.releaseCapabilityByToolKey ?? {}
   ).sort()) {
-    if (!discoveredExternalKeys.has(toolKey)) {
+    if (!discovered.has(toolKey) && !discoveredExternalKeys.has(toolKey)) {
       blocked.push(Object.freeze({ toolKey, reason: "not_discovered" }));
     }
   }
   blocked.sort((a, b) => a.toolKey.localeCompare(b.toolKey));
 
   const allowedToolKeys = Object.freeze(
-    allowed.map(([mcpId, tool]) => `${mcpId}/${tool.name}`)
+    allowed.map(([mcpId, tool]) => qualifiedToolKey(mcpId, tool.name))
   );
   const provenance = releaseProvenance(params.releaseState);
   const behaviors = Object.freeze({
@@ -371,7 +405,7 @@ export function isEffectiveToolAllowed(
   mcpId: string,
   toolName: string
 ): boolean {
-  return inventory.allowedToolKeys.includes(`${mcpId}/${toolName}`);
+  return inventory.allowedToolKeys.includes(qualifiedToolKey(mcpId, toolName));
 }
 
 export function buildPersonalReminderDeliveryInstructions(

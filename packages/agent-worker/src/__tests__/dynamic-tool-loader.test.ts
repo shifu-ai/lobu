@@ -1289,6 +1289,22 @@ describe("selectMcpToolsForTurn", () => {
     );
   });
 
+  test("inactive reminder delivery does not hide manage_schedules from cancellation", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "lobu-memory": [tool("manage_schedules")],
+      },
+      message: "取消明天提醒我喝水",
+      budget: 8,
+      routerMode: "semantic",
+      personalReminderDeliveryBlockedReason: "capability_inactive",
+    });
+
+    expect(result.trace.selectedToolNames).toContain(
+      "lobu-memory/manage_schedules"
+    );
+  });
+
   test("shadow traces ambiguity without enforcing clarification blocks", () => {
     const result = selectMcpToolsByMcpForTurn({
       toolsByMcp: {

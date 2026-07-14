@@ -1,5 +1,9 @@
 import type { ToolCatalogEntry } from "./tool-catalog";
-import { getOrBuildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
+import {
+  getOrBuildToolDescriptor,
+  qualifiedToolKey,
+  toolIdentityKey,
+} from "./tool-descriptor";
 import {
   type CachedToolRetrievalIndex,
   getOrBuildToolRetrievalIndex,
@@ -93,7 +97,7 @@ function eligibleIdentityKeys(
   const qualifiedNameCounts = new Map<string, number>();
   for (const entry of entries) {
     const qualifiedName = normalizeAllowedName(
-      entry.mcpId ? `${entry.mcpId}/${entry.name}` : entry.name
+      entry.mcpId ? qualifiedToolKey(entry.mcpId, entry.name) : entry.name
     );
     qualifiedNameCounts.set(
       qualifiedName,
@@ -105,7 +109,7 @@ function eligibleIdentityKeys(
       .filter((entry) => {
         const plainName = normalizeAllowedName(entry.name);
         const qualifiedName = normalizeAllowedName(
-          entry.mcpId ? `${entry.mcpId}/${entry.name}` : entry.name
+          entry.mcpId ? qualifiedToolKey(entry.mcpId, entry.name) : entry.name
         );
         return (
           (!plainName.includes("/") && allowed.has(plainName)) ||

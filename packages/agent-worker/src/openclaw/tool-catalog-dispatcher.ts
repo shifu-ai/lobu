@@ -10,7 +10,13 @@ import {
   type McpCatalogProvenanceById,
   type ToolCatalogEntry,
 } from "./tool-catalog";
-import { getOrBuildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
+import {
+  getOrBuildToolDescriptor,
+  qualifiedToolKey,
+  toolIdentityKey,
+} from "./tool-descriptor";
+import { isExplicitPersonalReminderAttempt } from "./mcp-execution-contract";
+import type { TurnExecutionIntent } from "./turn-execution-intent";
 import { snapshotToolsByMcp } from "./tool-inventory-snapshot";
 import {
   getOrBuildToolRetrievalIndex,
@@ -145,7 +151,7 @@ export interface DispatchRuntimeToolCallParams {
   catalog: RuntimeToolCatalogEntry[];
   /** Final turn-local authorization boundary; checked even for stale catalog entries. */
   allowedToolKeys?: Iterable<string>;
-  executionDestination?: string;
+  turnExecutionIntent?: TurnExecutionIntent;
   toolName: string;
   mcpId?: string;
   args: Record<string, unknown>;
@@ -168,7 +174,7 @@ function catalogToolKey(mcpId: string, toolName: string): string {
 }
 
 function externalToolKey(mcpId: string, toolName: string): string {
-  return `${mcpId}/${toolName}`;
+  return qualifiedToolKey(mcpId, toolName);
 }
 
 function normalizeAllowedToolName(name: string): string {
@@ -575,14 +581,21 @@ export async function dispatchRuntimeToolCall(
       entry,
     };
   }
-  const behaviorBlockedReason = params.executionDestination
-    ? entry.behaviorBlockedReasons?.[params.executionDestination]
-    : undefined;
+  const behaviorBlockedReason =
+    params.turnExecutionIntent &&
+    isExplicitPersonalReminderAttempt({
+      intent: params.turnExecutionIntent,
+      mcpId: entry.mcpId,
+      toolName: entry.name,
+      args: params.args,
+    })
+      ? entry.behaviorBlockedReasons?.personal_reminder
+      : undefined;
   if (behaviorBlockedReason) {
     return {
       ok: false,
       code: behaviorBlockedReason,
-      message: `Tool ${externalToolKey(entry.mcpId, entry.name)} is blocked for ${params.executionDestination} in this turn.`,
+      message: `Tool ${externalToolKey(entry.mcpId, entry.name)} is blocked for personal reminder creation in this turn.`,
       entry,
     };
   }
@@ -623,11 +636,8 @@ export async function dispatchRuntimeToolCall(
 
 function summarizeEntry(
   entry: RuntimeToolCatalogEntry,
-  executionDestination?: string
+  _executionDestination?: string
 ) {
-  const behaviorBlockedReason = executionDestination
-    ? entry.behaviorBlockedReasons?.[executionDestination]
-    : undefined;
   return {
     mcpId: entry.mcpId,
     name: entry.name,
@@ -641,13 +651,8 @@ function summarizeEntry(
     requiresConfirmation: entry.requiresConfirmation,
     freshness: entry.freshness,
     directVisibleThisTurn: entry.directVisibleThisTurn,
-    callableViaCatalog: behaviorBlockedReason
-      ? false
-      : entry.callableViaCatalog,
-    ...(behaviorBlockedReason
-      ? { ordinaryCallableViaCatalog: entry.callableViaCatalog }
-      : {}),
-    callBlockedReason: behaviorBlockedReason ?? entry.callBlockedReason,
+    callableViaCatalog: entry.callableViaCatalog,
+    callBlockedReason: entry.callBlockedReason,
     behaviorBlockedReasons: entry.behaviorBlockedReasons,
   };
 }

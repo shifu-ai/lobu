@@ -8,6 +8,8 @@ import {
 import { createMcpToolDefinitions } from "../openclaw/custom-tools";
 import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
 import { buildMcpToolInventoryInstructions } from "../openclaw/session-context";
+import { qualifiedToolKey } from "../openclaw/tool-descriptor";
+import { deriveTurnExecutionIntent } from "../openclaw/turn-execution-intent";
 import {
   buildRuntimeToolCatalog,
   dispatchRuntimeToolCall,
@@ -352,18 +354,85 @@ describe("effective tool inventory", () => {
     expect(callTool).not.toHaveBeenCalled();
   });
 
-  test("does not confuse distinct identities whose display keys contain slashes", () => {
+  test("keeps slash-containing identities independently eligible across router and dispatcher", async () => {
+    const allowedKey = qualifiedToolKey("a/b", "c");
+    const blockedKey = qualifiedToolKey("a", "b/c");
     const inventory = buildEffectiveToolInventory({
       scopedTools: {
-        "source/with-slash": [tool("plain")],
-        source: [tool("with-slash/plain")],
+        "a/b": [tool("c")],
+        a: [tool("b/c")],
       },
       releaseState: { status: "legacy_unenrolled" },
+      grantedToolKeys: [allowedKey, blockedKey],
+      approvalRequiredToolKeys: [blockedKey],
     });
 
-    expect(inventory.blocked).toEqual([]);
-    expect(inventory.scopedTools["source/with-slash"]).toHaveLength(1);
-    expect(inventory.scopedTools.source).toHaveLength(1);
+    expect(allowedKey).toBe("a%2Fb/c");
+    expect(blockedKey).toBe("a/b%2Fc");
+    expect(inventory.allowedToolKeys).toEqual([allowedKey]);
+    expect(inventory.blocked).toEqual([
+      { toolKey: blockedKey, reason: "approval_required" },
+    ]);
+    const releaseGated = buildEffectiveToolInventory({
+      scopedTools: inventory.scopedTools,
+      releaseState: active([]),
+      grantedToolKeys: [allowedKey, blockedKey],
+      releaseCapabilityByToolKey: { [blockedKey]: "slash-tool.v1" },
+    });
+    expect(releaseGated.allowedToolKeys).toEqual([allowedKey]);
+    expect(releaseGated.blocked).toContainEqual({
+      toolKey: blockedKey,
+      reason: "capability_inactive",
+    });
+    const route = selectMcpToolsByMcpForTurn({
+      toolsByMcp: inventory.scopedTools,
+      message: "use c",
+      budget: 8,
+      routerMode: "semantic",
+      allowedToolNames: inventory.allowedToolKeys,
+    });
+    expect(route.trace.candidates.map((entry) => entry.key)).not.toContain(
+      blockedKey
+    );
+    const catalog = buildRuntimeToolCatalog({
+      allTools: inventory.scopedTools,
+      selectedTools: route.selectedTools,
+      allowedToolNames: inventory.allowedToolKeys,
+      blockedToolReasons: Object.fromEntries(
+        inventory.blocked.map((entry) => [entry.toolKey, entry.reason])
+      ),
+    });
+    expect(
+      statusRuntimeToolCatalog(catalog, { mcpId: "a/b", toolName: "c" })
+    ).toMatchObject({ callableViaCatalog: true });
+    expect(
+      statusRuntimeToolCatalog(catalog, { mcpId: "a", toolName: "b/c" })
+    ).toMatchObject({
+      callableViaCatalog: false,
+      callBlockedReason: "approval_required",
+    });
+    const callTool = mock(async () => ({ content: [] }));
+    await expect(
+      dispatchRuntimeToolCall({
+        catalog,
+        allowedToolKeys: inventory.allowedToolKeys,
+        mcpId: "a/b",
+        toolName: "c",
+        args: {},
+        callTool,
+      })
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      dispatchRuntimeToolCall({
+        catalog,
+        allowedToolKeys: inventory.allowedToolKeys,
+        mcpId: "a",
+        toolName: "b/c",
+        args: {},
+        callTool,
+      })
+    ).resolves.toMatchObject({ ok: false, code: "approval_required" });
+    expect(callTool).toHaveBeenCalledTimes(1);
   });
 
   test("blocks only the personal-reminder behavior while ordinary manage_schedules remains callable", async () => {
@@ -423,9 +492,10 @@ describe("effective tool inventory", () => {
         executionDestination: "personal_reminder",
       })
     ).toMatchObject({
-      callableViaCatalog: false,
-      ordinaryCallableViaCatalog: true,
-      callBlockedReason: "capability_inactive",
+      callableViaCatalog: true,
+      behaviorBlockedReasons: {
+        personal_reminder: "capability_inactive",
+      },
     });
     expect(
       statusRuntimeToolCatalog(catalog, {
@@ -440,7 +510,7 @@ describe("effective tool inventory", () => {
       dispatchRuntimeToolCall({
         catalog,
         allowedToolKeys: inventory.allowedToolKeys,
-        executionDestination: "personal_reminder",
+        turnExecutionIntent: deriveTurnExecutionIntent("五分鐘後提醒我喝水"),
         mcpId: "lobu-memory",
         toolName: "manage_schedules",
         args: { action: "create" },
@@ -452,12 +522,24 @@ describe("effective tool inventory", () => {
       dispatchRuntimeToolCall({
         catalog,
         allowedToolKeys: inventory.allowedToolKeys,
+        turnExecutionIntent: deriveTurnExecutionIntent("五分鐘後提醒我喝水"),
         mcpId: "lobu-memory",
         toolName: "manage_schedules",
         args: { action: "list" },
         callTool,
       })
     ).resolves.toMatchObject({ ok: true });
-    expect(callTool).toHaveBeenCalledTimes(1);
+    await expect(
+      dispatchRuntimeToolCall({
+        catalog,
+        allowedToolKeys: inventory.allowedToolKeys,
+        turnExecutionIntent: deriveTurnExecutionIntent("取消明天提醒我喝水"),
+        mcpId: "lobu-memory",
+        toolName: "manage_schedules",
+        args: { action: "cancel" },
+        callTool,
+      })
+    ).resolves.toMatchObject({ ok: true });
+    expect(callTool).toHaveBeenCalledTimes(2);
   });
 });

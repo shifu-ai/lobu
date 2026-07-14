@@ -42,6 +42,7 @@ import {
 } from "./mcp-tool-projection";
 import type { ToolboxPersonalAgentToolGroup } from "./session-context";
 import type { McpCatalogProvenanceById } from "./tool-catalog";
+import { qualifiedToolKey } from "./tool-descriptor";
 import {
   dispatchRuntimeToolCall,
   type RuntimeToolCaller,
@@ -261,7 +262,7 @@ function createToolCallDefinition(params: {
   runtimeToolCatalog: RuntimeToolCatalogEntry[];
   runtimeToolCaller: RuntimeToolCaller;
   effectiveAllowedToolKeys?: Iterable<string>;
-  executionDestination?: string;
+  turnExecutionIntent?: TurnExecutionIntent;
 }): ToolDefinition {
   return defineTool({
     name: "tool_call",
@@ -287,7 +288,7 @@ function createToolCallDefinition(params: {
       const result = await dispatchRuntimeToolCall({
         catalog: params.runtimeToolCatalog,
         allowedToolKeys: params.effectiveAllowedToolKeys,
-        executionDestination: params.executionDestination,
+        turnExecutionIntent: params.turnExecutionIntent,
         toolName: args.tool_name,
         mcpId: args.mcp_id,
         args: (args.args || {}) as Record<string, unknown>,
@@ -696,7 +697,7 @@ export function createOpenClawCustomTools(params: {
         runtimeToolCatalog: params.runtimeToolCatalog,
         runtimeToolCaller,
         effectiveAllowedToolKeys: params.effectiveAllowedToolKeys,
-        executionDestination: params.turnExecutionIntent?.destination,
+        turnExecutionIntent: params.turnExecutionIntent,
       }),
       createToolStatusDefinition(
         params.runtimeToolCatalog,
@@ -788,7 +789,9 @@ export function createMcpToolDefinitions(
       execute: async (_toolCallId, args) => {
         if (
           effectiveAllowedToolKeys &&
-          !effectiveAllowedToolKeys.has(`${mcpId}/${upstreamToolName}`)
+          !effectiveAllowedToolKeys.has(
+            qualifiedToolKey(mcpId, upstreamToolName)
+          )
         ) {
           return toToolResult({
             isError: true,
