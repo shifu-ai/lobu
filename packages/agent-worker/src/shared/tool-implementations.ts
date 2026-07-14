@@ -1,5 +1,5 @@
-import * as nodeFs from "node:fs";
 import { randomUUID } from "node:crypto";
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -1355,6 +1355,7 @@ export async function callMcpTool(
   options: {
     shifuTrace?: WorkerShifuTraceContext;
     expectedMcpIdentity?: ExpectedMcpConfigIdentity;
+    personalReminderDelivery?: true;
   } = {}
 ): Promise<ToolContentResult> {
   return withErrorHandling(`${mcpId}/${toolName}`, async () => {
@@ -1384,6 +1385,14 @@ export async function callMcpTool(
       // RAG assertions. Other tools keep the formatted-markdown output the
       // agent has been seeing. External MCP servers ignore the header.
       if (wantsJson) headers["x-mcp-format"] = "json";
+      if (
+        options.personalReminderDelivery &&
+        mcpId === "lobu-memory" &&
+        toolName === "manage_schedules"
+      ) {
+        headers["x-lobu-personal-reminder-delivery-intent"] =
+          "personal_reminder_delivery.v1";
+      }
       const expectedIdentity = options.expectedMcpIdentity;
       if (
         expectedIdentity?.upstreamOrigin &&

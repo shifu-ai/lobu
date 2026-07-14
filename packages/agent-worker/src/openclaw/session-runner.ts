@@ -128,6 +128,7 @@ import { buildToolUseEventPayload } from "./tool-use-events";
 import { createOpenClawTools } from "./tools";
 import { clearSnapshots, hydrateFromSnapshot } from "./transcript-snapshot";
 import { TurnController, wrapToolsWithTurnGuard } from "./turn-controller";
+import { deriveTurnExecutionIntent } from "./turn-execution-intent";
 
 export { buildCurrentDateContext, resolveTurnTimeZone } from "./date-context";
 
@@ -1263,6 +1264,7 @@ export async function runAISession(
     maybeBuildAuthHintMessage,
     runAISessionDependencies,
   } = params;
+  const turnExecutionIntent = deriveTurnExecutionIntent(rawUserPrompt);
   const automationModificationTurn =
     buildTrustedAutomationModificationTurnContext({
       userPrompt: rawUserPrompt,
@@ -1951,6 +1953,7 @@ Use it when the user references past discussions or you need context.`);
         "ask_user posted — ending the turn so the model can't re-post."
       ),
     toolboxPersonalAgentTools: context.toolboxPersonalAgentTools,
+    turnExecutionIntent,
     mcpProvenanceById,
     shifuTrace,
   });
@@ -1972,6 +1975,7 @@ Use it when the user references past discussions or you need context.`);
         userId: context.userId,
         workspaceDir,
         runtimeToolCatalog,
+        turnExecutionIntent,
         mcpProvenanceById,
         shifuTrace,
       }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
@@ -2010,6 +2014,7 @@ Use it when the user references past discussions or you need context.`);
         userId: context.userId,
         workspaceDir,
         runtimeToolCatalog,
+        turnExecutionIntent,
         mcpProvenanceById,
         shifuTrace,
       }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
@@ -2051,7 +2056,7 @@ Use it when the user references past discussions or you need context.`);
       projectedMcp.tools,
       gwParams,
       context.mcpContext,
-      { shifuTrace, mcpProvenanceById }
+      { shifuTrace, mcpProvenanceById, turnExecutionIntent }
     );
     registeredMcpToolCount = mcpToolDefs.length;
     if (mcpToolDefs.length > 0) {

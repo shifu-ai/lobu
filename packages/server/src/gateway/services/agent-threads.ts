@@ -19,6 +19,7 @@ import {
 	generateWorkerToken,
 	type MessagePayload,
 } from "@lobu/core";
+import type { ScheduledPersonalReminderV1 } from "../../scheduled/personal-reminder.js";
 import type { QueueProducer } from "../infrastructure/queue/queue-producer.js";
 import type { ISessionManager, ThreadSession } from "../session.js";
 
@@ -126,6 +127,7 @@ export interface EnqueueAgentMessageArgs {
 	source?: string;
 	scheduledCourseContext?: MessagePayload["scheduledCourseContext"];
 	resolvedCourseContext?: MessagePayload["resolvedCourseContext"];
+	scheduledPersonalReminder?: ScheduledPersonalReminderV1;
 }
 
 export interface EnqueueAgentMessageResult {
@@ -190,6 +192,9 @@ export async function enqueueAgentMessage(
 								lobuAgentId: args.scheduledCourseContext.course.agentId,
 							},
 						}
+					: {}),
+				...(args.scheduledPersonalReminder
+					? { scheduledPersonalReminder: args.scheduledPersonalReminder }
 					: {}),
 			},
 			agentOptions: {

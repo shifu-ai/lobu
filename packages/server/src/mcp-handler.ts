@@ -803,6 +803,14 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       if (freshCtx.agentId) {
         session.authCtx.agentId = freshCtx.agentId;
       }
+      if (freshCtx.conversationId) {
+        session.authCtx.conversationId = freshCtx.conversationId;
+      }
+      // Per-call capability: always overwrite, including false, so a prior
+      // reminder call cannot lend delivery authority to the next MCP call on
+      // the same session.
+      session.authCtx.personalReminderDeliveryIntent =
+        freshCtx.personalReminderDeliveryIntent === true;
 
       if (session.authCtx.scopedToOrg) {
         if (freshCtx.organizationId !== session.authCtx.organizationId) {

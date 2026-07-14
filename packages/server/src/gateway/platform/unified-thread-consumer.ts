@@ -15,6 +15,10 @@ import {
   deliverCourseWakeCompletion,
   readCourseWakeDeliveryMetadata,
 } from "../../scheduled/course-wake-delivery.js";
+import {
+  deliverPersonalReminderCompletion,
+  readPersonalReminderDeliveryMetadata,
+} from "../../scheduled/personal-reminder-delivery.js";
 import type { PlatformRegistry } from "../platform.js";
 import type { SseManager } from "../services/sse-manager.js";
 import type { ResponseRenderer } from "./response-renderer.js";
@@ -28,14 +32,17 @@ const logger = createLogger("unified-thread-consumer");
 export class UnifiedThreadResponseConsumer {
   private chatResponseBridge?: ChatResponseBridge;
   private courseWakeDelivery: typeof deliverCourseWakeCompletion;
+  private personalReminderDelivery: typeof deliverPersonalReminderCompletion;
 
   constructor(
     private queue: IMessageQueue,
     private platformRegistry: PlatformRegistry,
     private sseManager: SseManager,
     courseWakeDelivery?: typeof deliverCourseWakeCompletion,
+    personalReminderDelivery?: typeof deliverPersonalReminderCompletion,
   ) {
     this.courseWakeDelivery = courseWakeDelivery ?? deliverCourseWakeCompletion;
+    this.personalReminderDelivery = personalReminderDelivery ?? deliverPersonalReminderCompletion;
   }
 
   setChatResponseBridge(bridge: ChatResponseBridge): void {
@@ -94,6 +101,24 @@ export class UnifiedThreadResponseConsumer {
     });
 
     try {
+      const personalReminder = readPersonalReminderDeliveryMetadata(
+        data.platformMetadata
+      );
+      if (personalReminder && (data.error || data.processedMessageIds?.length)) {
+        const finalOutput = data.finalText ?? "";
+        const completion = data.error
+          ? { kind: "failed" as const, error: "agent_generation_failed" }
+          : !finalOutput.trim() || finalOutput.length > 50_000
+            ? { kind: "failed" as const, error: "invalid_final_output" }
+            : { kind: "succeeded" as const, finalOutput };
+        await this.personalReminderDelivery({
+          metadata: personalReminder,
+          completion,
+          turnId: data.messageId,
+          occurredAt: stableOccurredAt(data.timestamp),
+        });
+        return;
+      }
       const scheduledDelivery = readCourseWakeDeliveryMetadata(
         data.platformMetadata
       );
@@ -352,4 +377,11 @@ export class UnifiedThreadResponseConsumer {
     }
   }
 
+}
+
+function stableOccurredAt(timestamp: unknown): string {
+  const millis = typeof timestamp === "number" && Number.isFinite(timestamp)
+    ? timestamp
+    : 0;
+  return new Date(millis).toISOString();
 }

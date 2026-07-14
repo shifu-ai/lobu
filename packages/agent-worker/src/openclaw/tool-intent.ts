@@ -15,15 +15,66 @@ function includesAny(text: string, keywords: string[]): boolean {
   return keywords.some((keyword) => text.includes(keyword));
 }
 
-function hasAutomationIntent(text: string): boolean {
-  const englishTemporal =
+export function hasTemporalToolIntent(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return (
     /\b(?:tomorrow|later|every|daily|weekly|monthly|recurring|continuously|until|(?:this|next)\s+(?:hour|day|week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|in\s+\d+\s+(?:minutes?|hours?|days?)|for\s+\d+\s+(?:minutes?|hours?|days?)|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/.test(
-      text
-    );
-  const chineseTemporal =
+      normalized
+    ) ||
     /(?:明天|後天|后天|這週|这周|本週|本周|下週|下周|未來|未来|每隔|每天|每日|每週|每周|每月|定期|持續|持续|直到|分鐘後|分钟后|小時後|小时后|\d+[點点時时])/.test(
-      text
-    );
+      normalized
+    )
+  );
+}
+
+export function hasPersonalReminderToolIntent(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return (
+    /(?:提醒我|提醒我們|提醒我们)/.test(normalized) ||
+    /\bremind\s+(?:me|us)\b/.test(normalized)
+  );
+}
+
+export function hasOrganizationNotificationToolIntent(text: string): boolean {
+  const normalized = text.toLowerCase();
+  const inboxDestination =
+    /(?:lobu\s*)?inbox|收件匣|收件箱/.test(normalized) &&
+    (/(?:通知|發送|发送|送到|貼到|贴到)/.test(normalized) ||
+      /\b(?:notify|send|post)\b/.test(normalized));
+  return (
+    inboxDestination ||
+    /(?:通知|提醒)(?:大家|團隊|团队|同事|學員|学员|成員|成员|社群)/.test(
+      normalized
+    ) ||
+    /\b(?:notify|remind)\s+(?:the\s+)?(?:team|group|members|students|community)\b/.test(
+      normalized
+    )
+  );
+}
+
+export function hasCalendarEventWriteToolIntent(text: string): boolean {
+  const normalized = text.toLowerCase();
+  const calendarDestination =
+    /(?:google\s*calendar|行事曆|行事历|日曆|日历)/.test(normalized);
+  const writeAction =
+    /(?:建立|新增|加入|放進|放进|記到|记到|安排|排入)/.test(normalized) ||
+    /\b(?:create|add|put|schedule)\b/.test(normalized);
+  return calendarDestination && writeAction;
+}
+
+export function hasUnderspecifiedScheduledWriteToolIntent(
+  text: string
+): boolean {
+  const normalized = text.toLowerCase();
+  return (
+    hasTemporalToolIntent(normalized) &&
+    (/(?:幫我排|帮我排|安排|排入|建立|新增)/.test(normalized) ||
+      /\b(?:schedule|arrange|create|add)\b/.test(normalized))
+  );
+}
+
+function hasAutomationIntent(text: string): boolean {
+  const temporal = hasTemporalToolIntent(text);
   const reminderRequest =
     /(?:提醒我|提醒他|提醒她|提醒大家|提醒團隊|提醒团队)/.test(text) ||
     /\bremind(?:\s+(?:me|us|him|her|them))?\b/.test(text);
@@ -38,9 +89,9 @@ function hasAutomationIntent(text: string): boolean {
     return true;
   }
 
-  if (reminderRequest && (englishTemporal || chineseTemporal)) return true;
+  if (reminderRequest && temporal) return true;
   if (
-    (englishTemporal || chineseTemporal) &&
+    temporal &&
     /(?:建立|新增|取消|設定|设定).{0,12}(?:提醒|排程)/.test(text)
   ) {
     return true;
@@ -50,13 +101,13 @@ function hasAutomationIntent(text: string): boolean {
     /\b(?:schedule|track(?:ing)?|monitor|follow[ -]?up|check|notify)\b/.test(
       text
     );
-  if (englishAction && englishTemporal) return true;
+  if (englishAction && temporal) return true;
 
   const chineseAction =
     /(?:建立|新增|安排|設定|设定|排程|追蹤|追踪|監控|监控|檢查|检查|告訴|告诉|回報|回报|通知|觀察|观察)/.test(
       text
     );
-  return chineseAction && chineseTemporal;
+  return chineseAction && temporal;
 }
 
 export function hasCalendarDateIntent(text: string): boolean {

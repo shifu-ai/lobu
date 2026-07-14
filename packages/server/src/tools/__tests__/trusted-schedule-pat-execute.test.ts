@@ -4,7 +4,7 @@ import {
 	resetTestDatabase,
 	seedAgentRow,
 } from "../../gateway/__tests__/helpers/db-setup.js";
-import { executeTool, type AuthContext } from "../execute";
+import { executeTool, toToolContext, type AuthContext } from "../execute";
 
 const ORGANIZATION_ID = "org-trusted-schedule-pat";
 const USER_ID = "pm-trusted-schedule-pat";
@@ -33,6 +33,22 @@ function trustedPat(overrides: Partial<AuthContext> = {}): AuthContext {
 }
 
 describe("executeTool trusted schedule PAT boundary", () => {
+	test("verified worker conversation provenance reaches ToolContext", () => {
+		const auth = trustedPat({
+			agentId: AGENT_ID,
+			conversationId: "conversation-trusted-1",
+			clientId: "lobu-worker",
+			personalReminderDeliveryIntent: true,
+		});
+		expect(toToolContext(auth)).toMatchObject({
+			userId: USER_ID,
+			agentId: AGENT_ID,
+			conversationId: "conversation-trusted-1",
+			clientId: "lobu-worker",
+			personalReminderDeliveryIntent: true,
+		});
+	});
+
 	beforeAll(async () => {
 		await ensureDbForGatewayTests();
 	}, 60_000);

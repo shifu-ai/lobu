@@ -7,15 +7,14 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import type { Static } from "@sinclair/typebox";
 import { type TSchema, Type } from "@sinclair/typebox";
-import type {
-  GatewayParams,
-  ToolContentResult,
-} from "../shared/tool-implementations";
-import { readContextArtifactChunk } from "./context-pressure";
 import {
   emitJourneyEvent,
   type WorkerShifuTraceContext,
 } from "../shared/journey-trace";
+import type {
+  GatewayParams,
+  ToolContentResult,
+} from "../shared/tool-implementations";
 import {
   askUserQuestion,
   callMcpTool,
@@ -30,6 +29,12 @@ import {
   startProjectContextDiscovery,
   uploadUserFile,
 } from "../shared/tool-implementations";
+import { readContextArtifactChunk } from "./context-pressure";
+import {
+  executeMcpToolForTurn,
+  type McpExecutionCaller,
+  type McpExecutionTrace,
+} from "./mcp-execution-contract";
 import {
   buildMcpAuthToolNames,
   type McpAuthToolNames,
@@ -39,11 +44,12 @@ import type { ToolboxPersonalAgentToolGroup } from "./session-context";
 import type { McpCatalogProvenanceById } from "./tool-catalog";
 import {
   dispatchRuntimeToolCall,
-  searchRuntimeToolCatalog,
-  statusRuntimeToolCatalog,
   type RuntimeToolCaller,
   type RuntimeToolCatalogEntry,
+  searchRuntimeToolCatalog,
+  statusRuntimeToolCatalog,
 } from "./tool-catalog-dispatcher";
+import type { TurnExecutionIntent } from "./turn-execution-intent";
 
 type ToolResult = AgentToolResult<Record<string, unknown>>;
 
@@ -72,6 +78,43 @@ function safeObjectKeys(value: unknown): string[] {
   return value && typeof value === "object" && !Array.isArray(value)
     ? Object.keys(value).sort()
     : [];
+}
+
+const UNSPECIFIED_TURN_EXECUTION_INTENT: TurnExecutionIntent = Object.freeze({
+  destination: "unspecified",
+  confidence: "inferred",
+  requiresClarification: false,
+});
+
+function emitMcpExecutionContractTrace(
+  trace: WorkerShifuTraceContext | undefined,
+  mcpId: string,
+  toolName: string,
+  decision: McpExecutionTrace
+): void {
+  if (
+    !trace ||
+    (!decision.requestedActionType && !decision.effectiveActionType)
+  ) {
+    return;
+  }
+  emitJourneyEvent({
+    event: "worker.mcp_execution_contract",
+    trace,
+    module: "agent-worker",
+    status: decision.canonicalized ? "ok" : "skipped",
+    fields: {
+      mcp_id: mcpId,
+      tool_name: toolName,
+      canonicalized: decision.canonicalized,
+      ...(decision.requestedActionType
+        ? { requested_action_type: decision.requestedActionType }
+        : {}),
+      ...(decision.effectiveActionType
+        ? { effective_action_type: decision.effectiveActionType }
+        : {}),
+    },
+  });
 }
 
 const OFFICIAL_NOTION_TOOL_NAMES = new Set([
@@ -331,6 +374,7 @@ export function createOpenClawCustomTools(params: {
   toolboxPersonalAgentTools?: ToolboxPersonalAgentToolGroup[];
   runtimeToolCatalog?: RuntimeToolCatalogEntry[];
   runtimeToolCaller?: RuntimeToolCaller;
+  turnExecutionIntent?: TurnExecutionIntent;
   mcpProvenanceById?: McpCatalogProvenanceById;
   shifuTrace?: WorkerShifuTraceContext;
 }): ToolDefinition[] {
@@ -605,13 +649,30 @@ export function createOpenClawCustomTools(params: {
   ];
 
   if (params.runtimeToolCatalog && params.runtimeToolCatalog.length > 0) {
-    const runtimeToolCaller: RuntimeToolCaller =
+    const rawRuntimeToolCaller: McpExecutionCaller =
       params.runtimeToolCaller ??
-      ((mcpId, toolName, args) =>
+      ((mcpId, toolName, args, transport) =>
         callMcpTool(gw, mcpId, toolName, args, {
           shifuTrace: params.shifuTrace,
           expectedMcpIdentity: params.mcpProvenanceById?.[mcpId],
+          personalReminderDelivery: transport?.personalReminderDelivery,
         }));
+    const runtimeToolCaller: RuntimeToolCaller = (mcpId, toolName, args) =>
+      executeMcpToolForTurn({
+        intent: params.turnExecutionIntent ?? UNSPECIFIED_TURN_EXECUTION_INTENT,
+        gateway: gw,
+        mcpId,
+        toolName,
+        args,
+        callTool: rawRuntimeToolCaller,
+        onTrace: (decision) =>
+          emitMcpExecutionContractTrace(
+            params.shifuTrace,
+            mcpId,
+            toolName,
+            decision
+          ),
+      });
     tools.push(
       createToolSearchDefinition(params.runtimeToolCatalog),
       createToolCallDefinition({
@@ -662,6 +723,7 @@ export function createMcpToolDefinitions(
   options?: {
     shifuTrace?: WorkerShifuTraceContext;
     mcpProvenanceById?: McpCatalogProvenanceById;
+    turnExecutionIntent?: TurnExecutionIntent;
   }
 ): ToolDefinition[] {
   const tools: ToolDefinition[] = [];
@@ -709,16 +771,27 @@ export function createMcpToolDefinitions(
         }
         let result: ToolContentResult;
         try {
-          result = await callMcpTool(
-            gw,
+          result = await executeMcpToolForTurn({
+            intent:
+              options?.turnExecutionIntent ?? UNSPECIFIED_TURN_EXECUTION_INTENT,
+            gateway: gw,
             mcpId,
-            upstreamToolName,
-            (args || {}) as Record<string, unknown>,
-            {
-              shifuTrace: options?.shifuTrace,
-              expectedMcpIdentity: options?.mcpProvenanceById?.[mcpId],
-            }
-          );
+            toolName: upstreamToolName,
+            args: (args || {}) as Record<string, unknown>,
+            callTool: (targetMcpId, targetToolName, targetArgs, transport) =>
+              callMcpTool(gw, targetMcpId, targetToolName, targetArgs, {
+                shifuTrace: options?.shifuTrace,
+                expectedMcpIdentity: options?.mcpProvenanceById?.[targetMcpId],
+                personalReminderDelivery: transport?.personalReminderDelivery,
+              }),
+            onTrace: (decision) =>
+              emitMcpExecutionContractTrace(
+                options?.shifuTrace,
+                mcpId,
+                upstreamToolName,
+                decision
+              ),
+          });
         } catch (error) {
           if (options?.shifuTrace) {
             emitJourneyEvent({

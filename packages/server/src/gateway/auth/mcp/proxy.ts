@@ -45,6 +45,28 @@ import { McpServerHealth } from "./server-health.js";
 import type { CachedMcpServer, McpTool, McpToolCache } from "./tool-cache.js";
 
 const logger = createLogger("mcp-proxy");
+const PERSONAL_REMINDER_DELIVERY_CONTRACT =
+  "personal_reminder_delivery.v1";
+
+export function trustedPersonalReminderForwardHeaders(input: {
+  mcpId: string;
+  toolName: string;
+  internal: boolean;
+  workerIntentHeader?: string;
+}): Record<string, string> {
+  if (
+    input.internal &&
+    input.mcpId === "lobu-memory" &&
+    input.toolName === "manage_schedules" &&
+    input.workerIntentHeader === PERSONAL_REMINDER_DELIVERY_CONTRACT
+  ) {
+    return {
+      "x-lobu-trusted-personal-reminder-delivery":
+        PERSONAL_REMINDER_DELIVERY_CONTRACT,
+    };
+  }
+  return {};
+}
 
 export interface ExpectedMcpConfigIdentity {
   upstreamOrigin: string;
@@ -2220,9 +2242,17 @@ export class McpProxy {
       // structured `result_summary` (event ids + snippet text) through the
       // `tool_use` SSE event.
       const callerFormat = c.req.header("x-mcp-format");
-      const extraHeaders = callerFormat
-        ? { "x-mcp-format": callerFormat }
-        : undefined;
+      const extraHeaders: Record<string, string> = {
+        ...trustedPersonalReminderForwardHeaders({
+          mcpId,
+          toolName,
+          internal: httpServer.internal === true,
+          workerIntentHeader: c.req.header(
+            "x-lobu-personal-reminder-delivery-intent",
+          ),
+        }),
+      };
+      if (callerFormat) extraHeaders["x-mcp-format"] = callerFormat;
 
       let upstreamStartedAt = Date.now();
       emitJourneyEvent({

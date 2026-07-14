@@ -13,6 +13,7 @@ import {
   projectToolParametersForProvider,
 } from "../openclaw/mcp-tool-projection";
 import { findDuplicateToolNames } from "../openclaw/session-runner";
+import { deriveTurnExecutionIntent } from "../openclaw/turn-execution-intent";
 
 const originalFetch = globalThis.fetch;
 const originalProjectDiscoveryUrl = process.env.TOOLBOX_PROJECT_DISCOVERY_URL;
@@ -217,6 +218,79 @@ describe("createOpenClawCustomTools", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toContain('"code": "not_allowed"');
+  });
+
+  test("tool_call applies the personal reminder execution contract", async () => {
+    const calls: unknown[][] = [];
+    const tools = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "shifu-u-1",
+      channelId: "channel-1",
+      conversationId: "line-conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+      turnExecutionIntent: deriveTurnExecutionIntent("五分鐘後提醒我喝水"),
+      runtimeToolCatalog: [
+        {
+          tool: {
+            name: "manage_schedules",
+            description: "Manage schedules",
+            inputSchema: { type: "object", properties: {} },
+          },
+          name: "manage_schedules",
+          mcpId: "lobu-memory",
+          domain: "automation",
+          intent: "automation",
+          priority: "P1",
+          aliases: [],
+          readOnly: false,
+          mutatesState: true,
+          requiresConfirmation: false,
+          originalIndex: 0,
+          availableThisTurn: false,
+          directVisibleThisTurn: false,
+          callableViaCatalog: true,
+          description: "Manage schedules",
+        },
+      ],
+      runtimeToolCaller: mock(async (...args) => {
+        calls.push(args);
+        return { content: [{ type: "text" as const, text: "ok" }] };
+      }),
+    });
+
+    const toolCall = tools.find((tool) => tool.name === "tool_call");
+    await toolCall!.execute("tool-call-reminder", {
+      tool_name: "manage_schedules",
+      mcp_id: "lobu-memory",
+      args: {
+        action: "create",
+        run_at: "2026-07-14T12:35:00.000Z",
+        action_type: "send_notification",
+        title: "喝水",
+      },
+    });
+
+    expect(calls).toEqual([
+      [
+        "lobu-memory",
+        "manage_schedules",
+        {
+          action: "create",
+          run_at: "2026-07-14T12:35:00.000Z",
+          action_type: "wake_agent",
+          agent_id: "shifu-u-1",
+          thread_id: "line-conversation-1",
+          prompt: "喝水",
+          delivery_intent: {
+            contract: "personal_reminder_delivery.v1",
+            destination: "personal_reminder",
+          },
+        },
+        { personalReminderDelivery: true },
+      ],
+    ]);
   });
 
   test("tool_status reports clarification blocks without exposing schemas or messages", async () => {

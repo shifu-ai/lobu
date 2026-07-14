@@ -40,6 +40,7 @@ import {
 import type { ToolContext } from '../registry';
 import logger from '../../utils/logger';
 import { nextRunAt as nextCronTickAt } from '../../utils/cron';
+import { buildTrustedPersonalReminder } from '../../scheduled/personal-reminder';
 
 // SHIFU FORK: member-scope-internal-tools plan, Task 3. Member-owned
 // direct-auth sessions (see 1c52bc33) can reach this tool, but must be
@@ -354,6 +355,11 @@ const RESERVED_WAKE_TRUST_KEYS = new Set([
   'internaltrustedprovenance',
   'internaltrustedcoursewake',
   'internaltrustedcoursewakeprovenance',
+  'personalreminder',
+  'personalreminderdelivery',
+  'personalreminderprovenance',
+  'trustedpersonalreminder',
+  'deliveryintent',
 ]);
 const NOTIFICATION_FIELDS = ['title', 'body', 'recipients', 'resource_url'] as const;
 
@@ -429,8 +435,20 @@ async function handleCreate(
   ctx: ToolContext,
   deps: ManageSchedulesDeps
 ): Promise<ToolResult> {
+  const deliveryIntent = (rawArgs as unknown as Record<string, unknown>).delivery_intent;
+  const hasPersonalReminderDeliveryMarker =
+    isPlainRecord(deliveryIntent) &&
+    Object.keys(deliveryIntent).length === 2 &&
+    deliveryIntent.contract === 'personal_reminder_delivery.v1' &&
+    deliveryIntent.destination === 'personal_reminder';
+  const sanitizedRawArgs = { ...(rawArgs as unknown as Record<string, unknown>) };
+  delete sanitizedRawArgs.delivery_intent;
+  if (isPlainRecord(sanitizedRawArgs.payload)) {
+    sanitizedRawArgs.payload = { ...sanitizedRawArgs.payload };
+    delete (sanitizedRawArgs.payload as Record<string, unknown>).delivery_intent;
+  }
   const args = normalizeCreateArgs(
-    rawArgs as unknown as Record<string, unknown>
+    sanitizedRawArgs
   ) as unknown as Extract<ManageSchedulesArgs, { action: 'create' }>;
   if (!createValidator.Check(args)) {
     const errs = [...createValidator.Errors(args)];
@@ -499,6 +517,31 @@ async function handleCreate(
     );
     if (resolvedAgentId) args.payload.agent_id = resolvedAgentId;
   }
+  const isDirectAuthWake =
+    args.payload.type === 'wake_agent' &&
+    ctx.clientId === 'lobu-worker' &&
+    ctx.isAuthenticated &&
+    ctx.tokenType === 'pat' &&
+    ctx.userId &&
+    ctx.agentId &&
+    ctx.conversationId;
+  const trustedPersonalReminder =
+    hasPersonalReminderDeliveryMarker &&
+    ctx.personalReminderDeliveryIntent === true &&
+    isDirectAuthWake &&
+    args.payload.type === 'wake_agent' &&
+    args.payload.agent_id === ctx.agentId &&
+    args.payload.thread_id === ctx.conversationId
+      ? buildTrustedPersonalReminder({
+          toolboxUserId: ctx.userId,
+          lobuAgentId: ctx.agentId,
+          conversationId: ctx.conversationId,
+          reminderContent: args.payload.prompt,
+        })
+      : null;
+  if (trustedPersonalReminder && args.payload.type === 'wake_agent') {
+    (args.payload as Record<string, unknown>).personalReminder = trustedPersonalReminder;
+  }
   // SHIFU FORK: member self-scoping (member-scope-internal-tools plan, Task
   // 3). Members reach this tool only via a member-owned direct-auth session
   // (see 1c52bc33) — confine them to their own agent, their own
@@ -557,7 +600,9 @@ async function handleCreate(
     createdByAgent: ctx.agentId ?? null,
     sourceRunId: args.source_run_id ?? null,
     sourceEventId: args.source_event_id ?? null,
-    sourceThreadId: args.source_thread_id ?? null,
+    sourceThreadId:
+      trustedPersonalReminder?.conversationId ??
+      args.source_thread_id ?? null,
   };
   if (args.creation_key) {
     if (args.initial_state === 'staged') {

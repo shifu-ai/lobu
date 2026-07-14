@@ -39,6 +39,7 @@ import {
   initializeExternalTurnToolRouting,
   runAISession,
 } from "../openclaw/session-runner";
+import { deriveTurnExecutionIntent } from "../openclaw/turn-execution-intent";
 import type { GatewayParams } from "../shared/tool-implementations";
 import {
   askUserQuestion,
@@ -667,6 +668,63 @@ describe("callMcpTool: approval-blocked response from gateway", () => {
     expect(text).toContain("requires approval");
     expect(result.isError).toBe(true);
     expect(result.errorCode).toBe("approval_required");
+  });
+});
+
+describe("direct MCP personal reminder execution contract", () => {
+  test("canonicalizes the direct manage_schedules request before proxying", async () => {
+    const fetchMock = mock(async () =>
+      Response.json({
+        content: [{ type: "text", text: "created" }],
+      })
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const [tool] = createMcpToolDefinitions(
+      {
+        "lobu-memory": [
+          {
+            name: "manage_schedules",
+            description: "Manage schedules",
+            inputSchema: { type: "object", additionalProperties: true },
+          },
+        ],
+      },
+      gw,
+      undefined,
+      {
+        turnExecutionIntent: deriveTurnExecutionIntent("五分鐘後提醒我喝水"),
+      }
+    );
+
+    await tool!.execute("direct-reminder", {
+      action: "create",
+      run_at: "2026-07-14T12:35:00.000Z",
+      action_type: "send_notification",
+      body: "記得喝水",
+      recipients: ["toolbox-user-1"],
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(JSON.parse(String(init.body))).toEqual({
+      action: "create",
+      run_at: "2026-07-14T12:35:00.000Z",
+      action_type: "wake_agent",
+      agent_id: "agent-1",
+      thread_id: "conv-1",
+      prompt: "記得喝水",
+      delivery_intent: {
+        contract: "personal_reminder_delivery.v1",
+        destination: "personal_reminder",
+      },
+    });
+    expect(
+      (init.headers as Record<string, string>)[
+        "x-lobu-personal-reminder-delivery-intent"
+      ]
+    ).toBe("personal_reminder_delivery.v1");
   });
 });
 

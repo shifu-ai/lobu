@@ -18,7 +18,6 @@ import { describe, expect, mock, test } from "bun:test";
 import type { ResolvedCourseExecutionContext } from "@lobu/core";
 import { handleWakeAgentTask, type WakeAgentTaskDeps } from "../jobs";
 import type { SqlLike } from "../scheduled-jobs-service";
-import type { ResolvedCourseExecutionContext } from "@lobu/core";
 
 const ORG = "org-1";
 const BARE_AGENT_ID = "shifu-u-302b8bcc3af1";
@@ -85,6 +84,81 @@ function makeDeps(
 }
 
 describe("handleWakeAgentTask — agent_id normalization (defense in depth)", () => {
+	test("trusted personal reminder reuses its exact conversation and enqueues one durable wake identity", async () => {
+		const { deps, enqueueMessage } = makeDeps([
+			{ id: BARE_AGENT_ID, organization_id: ORG },
+		]);
+		const personalReminder = {
+			schemaVersion: 1 as const,
+			contractVersion: "personal_reminder_delivery.v1" as const,
+			source: "personal_scheduled_reminder" as const,
+			toolboxUserId: "user-1",
+			lobuAgentId: BARE_AGENT_ID,
+			conversationId: "existing-thread-1",
+			reminderContent: "提醒我回覆客戶",
+		};
+
+		await handleWakeAgentTask(deps, {
+			__organization_id: ORG,
+			__created_by_user: "user-1",
+			__created_by_agent: BARE_AGENT_ID,
+			__scheduled_job_id: "job-personal-1",
+			__scheduled_task_run_id: 77,
+			agent_id: BARE_AGENT_ID,
+			prompt: "提醒我回覆客戶",
+			thread_id: "forged-thread-that-must-not-win",
+			personalReminder,
+		});
+
+		expect(enqueueMessage).toHaveBeenCalledTimes(1);
+		expect(enqueueMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				conversationId: "existing-thread-1",
+				messageId: "scheduled-job-personal-1-run-77",
+				platformMetadata: expect.objectContaining({
+					scheduledPersonalReminder: expect.objectContaining({
+						jobId: "job-personal-1",
+						runId: 77,
+					}),
+				}),
+			}),
+			{
+				singletonKey: "scheduled-job-personal-1-run-77",
+				durableSingleton: true,
+			},
+		);
+		const message = (enqueueMessage.mock.calls[0][0] as any).messageText;
+		expect(message).not.toContain("send_daily_digest");
+	});
+
+	test("rejects forged personal reminder ownership before touching a conversation", async () => {
+		const { deps, enqueueMessage, getSession, touchSession } = makeDeps([
+			{ id: BARE_AGENT_ID, organization_id: ORG },
+		]);
+		await handleWakeAgentTask(deps, {
+			__organization_id: ORG,
+			__created_by_user: "user-1",
+			__created_by_agent: BARE_AGENT_ID,
+			__scheduled_job_id: "job-personal-forged",
+			__scheduled_task_run_id: 78,
+			agent_id: BARE_AGENT_ID,
+			prompt: "提醒我回覆客戶",
+			personalReminder: {
+				schemaVersion: 1,
+				contractVersion: "personal_reminder_delivery.v1",
+				source: "personal_scheduled_reminder",
+				toolboxUserId: "victim",
+				lobuAgentId: BARE_AGENT_ID,
+				conversationId: "victim-thread",
+				reminderContent: "偽造內容",
+			},
+		});
+
+		expect(enqueueMessage).not.toHaveBeenCalled();
+		expect(getSession).not.toHaveBeenCalled();
+		expect(touchSession).not.toHaveBeenCalled();
+	});
+
 	test("payload agent_id in CONVERSATION-id form → resolves to the bare agent, proceeds to enqueue", async () => {
 		const pauseCalls: string[] = [];
 		const { deps, enqueueMessage } = makeDeps(
@@ -429,7 +503,7 @@ describe("handleWakeAgentTask — trusted course fire gate",()=>{
     const resolveScheduledCourseContext=mock(async()=>resolved);
     await handleWakeAgentTask({sql:sql as never,sessionManager:{getSession:mock(async()=>({conversationId:'existing',channelId:'api_user-1',userId:'user-1',agentId:BARE_AGENT_ID,organizationId:ORG})),touchSession:mock(async()=>{})} as never,queueProducer:{enqueueMessage} as never,resolveScheduledCourseContext},{__organization_id:ORG,__created_by_user:'user-1',__created_by_agent:BARE_AGENT_ID,__scheduled_job_id:'job-1',__scheduled_job_external_key:'google_calendar:acct:event:opp_coach_rehearsal_prompt',__scheduled_job_tick:'2026-07-31T00:00:00Z',__scheduled_task_run_id:42,agent_id:BARE_AGENT_ID,prompt:'coach',thread_id:'existing',reason:'trusted-course-calendar-wake',trustedCourseWake:trustedWake});
     expect(resolveScheduledCourseContext).toHaveBeenCalledTimes(1);
-    expect(enqueueMessage).toHaveBeenCalledWith(expect.objectContaining({scheduledCourseContext:expect.objectContaining({source:'calendar_scheduled_wake',automationId:'auto-1',jobId:'job-1',runId:42,course:expect.objectContaining({courseEntityId:'course:a'})}),resolvedCourseContext:resolved}));
+    expect(enqueueMessage).toHaveBeenCalledWith(expect.objectContaining({scheduledCourseContext:expect.objectContaining({source:'calendar_scheduled_wake',automationId:'auto-1',jobId:'job-1',runId:42,course:expect.objectContaining({courseEntityId:'course:a'})}),resolvedCourseContext:resolved}),{singletonKey:'scheduled-job-1-run-42',durableSingleton:true});
   });
   test.each([
     ['bad provenance',{reason:'scheduled-wake'}],

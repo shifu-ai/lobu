@@ -35,6 +35,8 @@ export interface AuthContext {
   userId: string | null;
   memberRole: string | null;
   agentId: string | null;
+  conversationId?: string | null;
+  personalReminderDeliveryIntent?: boolean;
   requestedAgentId: string | null;
   isAuthenticated: boolean;
   clientId: string | null;
@@ -69,6 +71,9 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     // Previously hardcoded null — every direct-auth session looked
     // agent-less to downstream tool handlers.
     agentId: mcpAuthInfo?.agentId ?? null,
+    conversationId: mcpAuthInfo?.conversationId ?? null,
+    personalReminderDeliveryIntent:
+      mcpAuthInfo?.personalReminderDeliveryIntent === true,
     requestedAgentId: null,
     isAuthenticated: c.var.mcpIsAuthenticated || false,
     clientId: mcpAuthInfo?.clientId ?? null,
@@ -376,6 +381,9 @@ export function toToolContext(authCtx: AuthContext): ToolContext {
     userId: authCtx.userId,
     memberRole: authCtx.memberRole,
     agentId: authCtx.agentId,
+    conversationId: authCtx.conversationId,
+    personalReminderDeliveryIntent:
+      authCtx.personalReminderDeliveryIntent === true,
     isAuthenticated: authCtx.isAuthenticated,
     clientId: authCtx.clientId,
     scopes: authCtx.scopes,

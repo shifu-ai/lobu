@@ -130,7 +130,7 @@ describe("buildScheduledWakeMessage", () => {
     expect(msg).toContain("LINE");
   });
 
-  test("omits agent-driven delivery only for mechanically delivered course wakes", () => {
+  test("omits agent-driven delivery for any trusted mechanically delivered wake", () => {
     const msg = buildScheduledWakeMessage("準備課程提醒", { mechanicalDelivery: true });
     expect(msg).not.toContain("send_daily_digest");
     expect(msg).not.toContain("推送到他的 LINE");
