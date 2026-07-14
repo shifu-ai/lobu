@@ -29,7 +29,7 @@ function buildApp(
 	return app;
 }
 
-function requestBody(runAt = "2026-07-14T06:00:00.000Z") {
+function requestBody(runAt = "2027-07-14T06:00:00.000Z") {
 	return {
 		externalKey: "google_calendar:acct-1:event-1:opp_coach_event_prompt",
 		organizationId: ORGANIZATION_ID,
@@ -46,7 +46,7 @@ function requestBody(runAt = "2026-07-14T06:00:00.000Z") {
 				eventId: "event-1",
 				eventVersion: "v1",
 				eventTitle: "雷蒙銷講",
-				eventStartAt: "2026-07-15T14:00:00+08:00",
+				eventStartAt: "2027-07-15T14:00:00+08:00",
 			},
 			trustedCourseScope: {
 				ownerUserId: OWNER_USER_ID,
@@ -91,7 +91,7 @@ describe("course-aware wake routes", () => {
 		const second = await app.request("/api/internal/course-aware-wakes", {
 			method: "PUT",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify(requestBody("2026-07-14T07:00:00.000Z")),
+			body: JSON.stringify(requestBody("2027-07-14T07:00:00.000Z")),
 		});
 		expect(second.status).toBe(200);
 
@@ -106,11 +106,11 @@ describe("course-aware wake routes", () => {
       WHERE external_key = ${requestBody().externalKey}
     `;
 		expect(rows).toHaveLength(1);
-		expect(rows[0]?.next_run_at.toISOString()).toBe("2026-07-14T07:00:00.000Z");
+		expect(rows[0]?.next_run_at.toISOString()).toBe("2027-07-14T07:00:00.000Z");
 		expect(rows[0]?.paused).toBe(false);
 		expect(rows[0]?.action_args).toMatchObject({
 			agent_id: AGENT_ID,
-			trustedCourseWake: requestBody("2026-07-14T07:00:00.000Z").payload,
+			trustedCourseWake: requestBody("2027-07-14T07:00:00.000Z").payload,
 		});
 	});
 
@@ -289,7 +289,7 @@ describe("course-aware wake routes", () => {
 		expect(row).toMatchObject({ paused: true, schedule_revision: 1 });
 		expect(row?.last_fired_at).not.toBeNull();
 
-		const changed = requestBody("2026-07-14T08:00:00.000Z");
+		const changed = requestBody("2027-07-14T08:00:00.000Z");
 		changed.payload.calendarEventRef.eventVersion = "v2";
 		const changedResponse = await app.request(
 			"/api/internal/course-aware-wakes",
@@ -389,7 +389,7 @@ describe("course-aware wake routes", () => {
 		impossible.runAt = "2026-02-30T06:00:00.000Z";
 		impossible.payload.scheduledFor = impossible.runAt;
 		const mismatch = requestBody();
-		mismatch.payload.scheduledFor = "2026-07-14T06:01:00.000Z";
+		mismatch.payload.scheduledFor = "2027-07-14T06:01:00.000Z";
 
 		for (const body of [impossible, mismatch]) {
 			const response = await buildApp().request(

@@ -74,6 +74,8 @@ afterEach(async () => {
 
 function makeApp(overrides: Record<string, unknown> = {}) {
 	const enqueued: EnqueuedMessage[] = [];
+	const durableCompletionLookup =
+		overrides.durableCompletionLookup ?? mock(async () => null);
 	const enqueueMessage = mock(async (payload: EnqueuedMessage) => {
 		enqueued.push(payload);
 		return `job-${randomUUID()}`;
@@ -119,6 +121,7 @@ function makeApp(overrides: Record<string, unknown> = {}) {
 		agentSettingsStore: {
 			getSettings: mock(async () => undefined),
 		} as never,
+		durableCompletionLookup: durableCompletionLookup as never,
 		agentMetadataStore: {
 			getMetadata: mock(async () => ({
 				owner: { platform: "api", userId: "user-test" },
@@ -408,6 +411,113 @@ describe("direct API multipart attachments", () => {
 		expect(enqueueDurableMessage).toHaveBeenCalledTimes(2);
 		expect(enqueueMessage).not.toHaveBeenCalled();
 		expect(enqueued).toHaveLength(1);
+	});
+
+	test("returns stored completion for a completed durable duplicate", async () => {
+		const durableCompletionLookup = mock(async () => ({
+			status: "completed" as const,
+			finalText: "已更新排程。",
+			processedMessageIds: ["line-turn-a1b2c3"],
+		}));
+		const { app } = makeApp({ durableCompletionLookup });
+		const token = generateWorkerToken(
+			"user-test",
+			CONVERSATION_ID,
+			"api-shifu-u",
+			{
+				channelId: "api_user-test",
+				agentId: AGENT_ID,
+				organizationId: "org-test",
+				platform: "api",
+				tokenKind: "session",
+				trustedPlatformContext: true,
+			},
+		);
+		const request = () => app.request(
+			`/api/v1/agents/${CONVERSATION_ID}/messages`,
+			{
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					content: "確認修改排程",
+					messageId: "line-turn-a1b2c3",
+					durableMessage: true,
+				}),
+			},
+		);
+
+		expect(await (await request()).json()).toMatchObject({
+			deduplicated: false,
+		});
+		expect(await (await request()).json()).toMatchObject({
+			deduplicated: true,
+			completion: {
+				status: "completed",
+				finalText: "已更新排程。",
+				processedMessageIds: ["line-turn-a1b2c3"],
+			},
+		});
+		expect(durableCompletionLookup).toHaveBeenCalledTimes(1);
+		expect(durableCompletionLookup).toHaveBeenCalledWith({
+			organizationId: "org-test",
+			agentId: AGENT_ID,
+			userId: "user-test",
+			conversationId: CONVERSATION_ID,
+			channelId: "api_user-test",
+			messageId: "line-turn-a1b2c3",
+		});
+	});
+
+	test("returns stored terminal error for a failed durable duplicate", async () => {
+		const durableCompletionLookup = mock(async () => ({
+			status: "failed" as const,
+			error: "provider unavailable",
+			errorCode: "provider_error",
+			processedMessageIds: ["line-turn-error"],
+		}));
+		const { app } = makeApp({ durableCompletionLookup });
+		const token = generateWorkerToken(
+			"user-test",
+			CONVERSATION_ID,
+			"api-shifu-u",
+			{
+				channelId: "api_user-test",
+				agentId: AGENT_ID,
+				organizationId: "org-test",
+				platform: "api",
+				tokenKind: "session",
+				trustedPlatformContext: true,
+			},
+		);
+		const request = () => app.request(
+			`/api/v1/agents/${CONVERSATION_ID}/messages`,
+			{
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					content: "確認修改排程",
+					messageId: "line-turn-error",
+					durableMessage: true,
+				}),
+			},
+		);
+
+		await request();
+		expect(await (await request()).json()).toMatchObject({
+			deduplicated: true,
+			completion: {
+				status: "failed",
+				error: "provider unavailable",
+				errorCode: "provider_error",
+				processedMessageIds: ["line-turn-error"],
+			},
+		});
 	});
 
 	test("does not let an ordinary session caller enable durable enqueue", async () => {

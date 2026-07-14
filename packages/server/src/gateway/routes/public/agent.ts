@@ -9,6 +9,7 @@ import {
   type McpServerConfig,
   type NetworkConfig,
   normalizeDomainPatterns,
+  type ThreadResponsePayload,
   verifyWorkerToken,
 } from "@lobu/core";
 import type { Context } from "hono";
@@ -16,6 +17,7 @@ import { streamSSE } from "hono/streaming";
 import { bindRequestAbortToStream } from "../../../events/sse-abort-bridge.js";
 import { z } from "zod";
 import { DEFAULT_AGENT_ID } from "../../../auth/default-provisioning.js";
+import { getDb, type DbClient } from "../../../db/client.js";
 import type { AgentMetadataStore } from "../../auth/agent-metadata-store.js";
 import { getRevokedTokenStore } from "../../auth/revoked-token-store.js";
 import {
@@ -152,6 +154,17 @@ const SendMessageResponseSchema = z.object({
   eventsUrl: z.string().optional(),
   queued: z.boolean(),
   deduplicated: z.boolean().optional(),
+  completion: z
+    .object({
+      status: z.enum(["completed", "failed"]),
+      finalText: z.string().optional(),
+      error: z.string().optional(),
+      errorCode: z.string().optional(),
+      processedMessageIds: z.array(z.string()),
+      awaitingHumanDecision: z.boolean().optional(),
+    })
+    .nullable()
+    .optional(),
   traceparent: z.string().optional(),
 });
 
@@ -449,10 +462,95 @@ export interface AgentApiConfig {
   agentMetadataStore?: Pick<AgentMetadataStore, "getMetadata">;
   platformRegistry?: PlatformRegistry;
   transcriptionService?: DirectTranscriptionService;
+  durableCompletionLookup?: DurableCompletionLookup;
   approveToolCall?: (
     requestId: string,
     decision: string
   ) => Promise<{ success: boolean; error?: string }>;
+}
+
+export type DurableMessageCompletion =
+  | {
+      status: "completed";
+      finalText: string;
+      processedMessageIds: string[];
+      awaitingHumanDecision?: boolean;
+    }
+  | {
+      status: "failed";
+      error: string;
+      errorCode?: string;
+      processedMessageIds: string[];
+    };
+
+export interface DurableCompletionLookupInput {
+  organizationId?: string;
+  agentId: string;
+  userId: string;
+  conversationId: string;
+  channelId: string;
+  messageId: string;
+}
+
+export type DurableCompletionLookup = (
+  input: DurableCompletionLookupInput,
+) => Promise<DurableMessageCompletion | null>;
+
+function parseThreadResponseCompletion(
+  payload: ThreadResponsePayload,
+  messageId: string,
+): DurableMessageCompletion | null {
+  const processedMessageIds = Array.isArray(payload.processedMessageIds)
+    ? payload.processedMessageIds.filter((id): id is string => typeof id === "string")
+    : [];
+  if (!processedMessageIds.includes(messageId)) return null;
+
+  if (typeof payload.error === "string" && payload.error.trim().length > 0) {
+    return {
+      status: "failed",
+      error: payload.error,
+      ...(typeof payload.errorCode === "string" && payload.errorCode.trim().length > 0
+        ? { errorCode: payload.errorCode }
+        : {}),
+      processedMessageIds,
+    };
+  }
+
+  if (typeof payload.finalText === "string" && payload.finalText.trim().length > 0) {
+    return {
+      status: "completed",
+      finalText: payload.finalText,
+      processedMessageIds,
+      ...(typeof payload.awaitingHumanDecision === "boolean"
+        ? { awaitingHumanDecision: payload.awaitingHumanDecision }
+        : {}),
+    };
+  }
+
+  return null;
+}
+
+export async function lookupDurableMessageCompletion(
+  input: DurableCompletionLookupInput,
+  db?: DbClient,
+): Promise<DurableMessageCompletion | null> {
+  const sql = db ?? getDb();
+  const rows = await sql<{ action_input: ThreadResponsePayload }>`
+    SELECT action_input
+    FROM public.runs
+    WHERE queue_name = 'thread_response'
+      AND action_input ? 'processedMessageIds'
+      AND action_input->'processedMessageIds' ? ${input.messageId}
+      AND action_input->>'conversationId' = ${input.conversationId}
+      AND action_input->>'channelId' = ${input.channelId}
+      AND action_input->>'userId' = ${input.userId}
+      AND action_input->>'agentId' = ${input.agentId}
+      AND organization_id IS NOT DISTINCT FROM ${input.organizationId ?? null}
+    ORDER BY id DESC
+    LIMIT 1
+  `;
+  const payload = rows[0]?.action_input;
+  return payload ? parseThreadResponseCompletion(payload, input.messageId) : null;
 }
 
 export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
@@ -465,6 +563,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     agentMetadataStore,
     platformRegistry,
     transcriptionService,
+    durableCompletionLookup = lookupDurableMessageCompletion,
   } = config;
   const sessMgr = config.sessionManager;
   const sseManager = config.sseManager;
@@ -1502,6 +1601,17 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
             jobId: await queueProducer.enqueueMessage(directPayload),
             deduplicated: false,
           };
+      const completion =
+        durableDispatch && disposition.deduplicated
+          ? await durableCompletionLookup({
+              organizationId: session.organizationId,
+              agentId: realAgentId,
+              userId: session.userId,
+              conversationId: directPayload.conversationId,
+              channelId,
+              messageId,
+            })
+          : undefined;
 
       rootSpan?.end();
 
@@ -1512,6 +1622,9 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         queued: true,
         ...(durableDispatch
           ? { deduplicated: disposition.deduplicated }
+          : {}),
+        ...(durableDispatch && disposition.deduplicated
+          ? { completion: completion ?? null }
           : {}),
         traceparent: traceparent || undefined,
       });
