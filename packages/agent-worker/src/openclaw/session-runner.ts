@@ -223,6 +223,7 @@ export function buildToolRouterJourneyEventInput(params: {
       selection_diverged: selectionTrace.selectionDiverged,
       semantic_clarification_required:
         selectionTrace.semanticClarificationRequired,
+      semantic_computed: selectionTrace.semanticComputed,
       blocked_tools: selectionTrace.blockedToolNames
         .slice(0, 20)
         .map((value) => boundedRouterString(value)),

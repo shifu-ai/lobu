@@ -25,6 +25,7 @@ export interface DynamicToolSelectionTrace {
 	semanticSelectedToolNames: string[];
 	selectionDiverged: boolean;
 	semanticClarificationRequired: boolean;
+	semanticComputed: boolean;
 	primaryIntent: ToolIntent;
 	budget: number;
 	totalTools: number;
@@ -208,6 +209,32 @@ function selectEntriesForTurn(
 		normalizedAllowedToolNames,
 	);
 	const primaryIntent = classifyToolIntent(message);
+	const legacySelection = selectLegacyRankedEntries(
+		eligibleEntries,
+		primaryIntent,
+		budget,
+	);
+	if (routerMode === "legacy") {
+		return {
+			primaryIntent,
+			selectedEntries: legacySelection.selectedEntries,
+			eligibleEntries,
+			pinnedBudgetOverflow: legacySelection.pinnedBudgetOverflow,
+			routerMode,
+			route: {
+				routerVersion: "semantic-v1",
+				inventoryFingerprint: "legacy-bypass",
+				cacheHit: false,
+				estimatedIndexBytes: 0,
+				cacheEvictionCount: 0,
+				timingMs: { build: 0, retrieve: 0, rank: 0 },
+				selectedEntries: legacySelection.selectedEntries,
+				candidates: [],
+				explicitDestinations: [],
+				fallback: null,
+			},
+		};
+	}
 	const { selectedEntries: rankedEntries } = selectLegacyRankedEntries(
 		entries,
 		primaryIntent,
@@ -231,12 +258,6 @@ function selectEntriesForTurn(
 		reservedEntries,
 		allowedToolNames: normalizedAllowedToolNames,
 	});
-	const legacySelection = selectLegacyRankedEntries(
-		eligibleEntries,
-		primaryIntent,
-		budget,
-	);
-
 	return {
 		primaryIntent,
 		selectedEntries:
@@ -277,6 +298,7 @@ function routeTraceFields(
 	| "semanticSelectedToolNames"
 	| "selectionDiverged"
 	| "semanticClarificationRequired"
+	| "semanticComputed"
 > {
 	const selectedToolNames = selectedEntries.map(displayToolName);
 	const semanticSelectedToolNames = route.selectedEntries.map(displayToolName);
@@ -290,6 +312,7 @@ function routeTraceFields(
 				(name, index) => name !== semanticSelectedToolNames[index],
 			),
 		semanticClarificationRequired: route.clarification !== undefined,
+		semanticComputed: routerMode !== "legacy",
 		routerVersion: route.routerVersion,
 		explicitDestinations: route.explicitDestinations,
 		clarificationRequired:

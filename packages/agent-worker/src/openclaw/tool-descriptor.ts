@@ -5,6 +5,12 @@ import type { ToolDestination, ToolOperation } from "./tool-route-query";
 
 const MAX_INDEXED_TEXT_BYTES = 16 * 1024;
 const DESCRIPTOR_VERSION = 1;
+const MAX_DESCRIPTOR_SNAPSHOTS_PER_TOOL = 8;
+const immutableDescriptorSources = new WeakSet<object>();
+const descriptorSnapshotCache = new WeakMap<
+	McpToolDef,
+	Map<string, ToolDescriptor>
+>();
 
 export function toolIdentityKey(mcpId: string, name: string): string {
 	return JSON.stringify([mcpId, name]);
@@ -33,6 +39,43 @@ export interface ToolDescriptor {
 	priority: ToolPriority;
 	originalIndex: number;
 	indexedTextBytes: number;
+}
+
+function isDeeplyImmutable(
+	value: unknown,
+	visited = new WeakSet<object>(),
+): boolean {
+	if (value === null || typeof value !== "object") return true;
+	if (immutableDescriptorSources.has(value)) return true;
+	if (visited.has(value)) return true;
+	if (!Object.isFrozen(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	if (
+		!Array.isArray(value) &&
+		prototype !== Object.prototype &&
+		prototype !== null
+	) {
+		return false;
+	}
+	visited.add(value);
+	for (const nested of Object.values(value)) {
+		if (!isDeeplyImmutable(nested, visited)) return false;
+	}
+	immutableDescriptorSources.add(value);
+	return true;
+}
+
+function freezeDescriptorSnapshot(descriptor: ToolDescriptor): ToolDescriptor {
+	return Object.freeze({
+		...descriptor,
+		aliases: Object.freeze([...descriptor.aliases]),
+		parameterNames: Object.freeze([...descriptor.parameterNames]),
+		parameterDescriptions: Object.freeze([...descriptor.parameterDescriptions]),
+		operations: Object.freeze([...descriptor.operations]),
+		destinations: Object.freeze([...descriptor.destinations]),
+		positiveExamples: Object.freeze([...descriptor.positiveExamples]),
+		negativeExamples: Object.freeze([...descriptor.negativeExamples]),
+	}) as ToolDescriptor;
 }
 
 interface DescriptorOverride {
@@ -274,6 +317,37 @@ export function buildToolDescriptor(
 	};
 
 	boundSearchableText(descriptor);
+	return descriptor;
+}
+
+export function getOrBuildToolDescriptor(
+	tool: McpToolDef,
+	mcpId: string,
+	originalIndex: number,
+): ToolDescriptor {
+	if (!isDeeplyImmutable(tool)) {
+		return buildToolDescriptor(tool, mcpId, originalIndex);
+	}
+	const cacheKey = JSON.stringify([mcpId, originalIndex]);
+	const existingSnapshots = descriptorSnapshotCache.get(tool);
+	const cached = existingSnapshots?.get(cacheKey);
+	if (cached) {
+		existingSnapshots?.delete(cacheKey);
+		existingSnapshots?.set(cacheKey, cached);
+		return cached;
+	}
+
+	const descriptor = freezeDescriptorSnapshot(
+		buildToolDescriptor(tool, mcpId, originalIndex),
+	);
+	const snapshots = descriptorSnapshotCache.get(tool) ?? new Map();
+	snapshots.set(cacheKey, descriptor);
+	while (snapshots.size > MAX_DESCRIPTOR_SNAPSHOTS_PER_TOOL) {
+		const oldestKey = snapshots.keys().next().value;
+		if (oldestKey === undefined) break;
+		snapshots.delete(oldestKey);
+	}
+	descriptorSnapshotCache.set(tool, snapshots);
 	return descriptor;
 }
 

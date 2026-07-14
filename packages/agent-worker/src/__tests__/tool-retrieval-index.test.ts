@@ -3,6 +3,7 @@ import type { McpToolDef } from "@lobu/core";
 import { catalogEntryForTool } from "../openclaw/tool-catalog";
 import {
 	buildToolDescriptor,
+	getOrBuildToolDescriptor,
 	inventoryFingerprint,
 	type ToolDescriptor,
 	toolIdentityKey,
@@ -49,6 +50,49 @@ describe("tool tokenizer", () => {
 });
 
 describe("tool descriptors", () => {
+	test("reuses deeply immutable descriptor snapshots without identity staleness", () => {
+		const source = Object.freeze({
+			...tool("search_students", "Find students", {
+				email: Object.freeze({
+					type: "string",
+					description: "Student email",
+				}),
+			}),
+			inputSchema: Object.freeze({
+				type: "object",
+				properties: Object.freeze({
+					email: Object.freeze({
+						type: "string",
+						description: "Student email",
+					}),
+				}),
+			}),
+		});
+
+		const first = getOrBuildToolDescriptor(source, "school", 0);
+		const second = getOrBuildToolDescriptor(source, "school", 0);
+		const reordered = getOrBuildToolDescriptor(source, "school", 1);
+
+		expect(first).toBe(second);
+		expect(reordered).not.toBe(first);
+		expect(reordered.originalIndex).toBe(1);
+		expect(inventoryFingerprint([first])).not.toBe(
+			inventoryFingerprint([reordered]),
+		);
+	});
+
+	test("does not cache mutable descriptor sources across mutations", () => {
+		const source = tool("search_students", "Find students");
+		const first = getOrBuildToolDescriptor(source, "school", 0);
+		source.description = "Find active students by cohort";
+		const second = getOrBuildToolDescriptor(source, "school", 0);
+
+		expect(second).not.toBe(first);
+		expect(second.description).toBe("Find active students by cohort");
+		expect(inventoryFingerprint([second])).not.toBe(
+			inventoryFingerprint([first]),
+		);
+	});
 	test("bounds searchable text and applies the exact reminder override", () => {
 		const descriptor = buildToolDescriptor(
 			tool("manage_schedules", "x".repeat(40_000), {
@@ -607,5 +651,34 @@ describe("tool router retrieval integration", () => {
 		expect(second.cacheEvictionCount).toBe(0);
 		expect(second.selectedEntries).toEqual([]);
 		expect(second.candidates).toEqual([]);
+	});
+
+	test("invalidates warmed route indexes after source mutation or order change", () => {
+		clearToolRetrievalIndexCacheForTests();
+		const alpha = tool("alpha_search", "Find alpha records");
+		const beta = tool("beta_search", "Find beta records");
+		const entries = [
+			catalogEntryForTool(alpha, 0, "school"),
+			catalogEntryForTool(beta, 1, "school"),
+		];
+		const route = (inventory: typeof entries) =>
+			routeToolEntries({
+				entries: inventory,
+				message: "Find records",
+				budget: 2,
+				reservedEntries: [],
+			});
+
+		const initial = route(entries);
+		alpha.description = "Find changed alpha records";
+		const mutated = route(entries);
+		const reordered = route([...entries].reverse());
+
+		expect(mutated.cacheHit).toBe(false);
+		expect(mutated.inventoryFingerprint).not.toBe(initial.inventoryFingerprint);
+		expect(reordered.cacheHit).toBe(false);
+		expect(reordered.inventoryFingerprint).not.toBe(
+			mutated.inventoryFingerprint,
+		);
 	});
 });

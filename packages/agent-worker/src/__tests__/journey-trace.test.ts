@@ -189,6 +189,8 @@ describe("worker journey trace", () => {
       module: "agent-worker",
       status: "ok",
       router_version: "semantic-v1",
+      router_mode: "semantic",
+      semantic_computed: true,
       cache_hit: expect.any(Boolean),
       tool_count: expect.any(Number),
       eligible_tool_count: expect.any(Number),

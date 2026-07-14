@@ -1,5 +1,5 @@
 import type { ToolCatalogEntry } from "./tool-catalog";
-import { buildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
+import { getOrBuildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
 import {
 	getOrBuildToolRetrievalIndex,
 	searchToolRetrievalIndex,
@@ -212,7 +212,7 @@ export function routeToolEntries({
 	const buildStartedAt = performance.now();
 	const query = buildToolRouteQuery(message);
 	const descriptors = entries.map((entry) =>
-		buildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex),
+		getOrBuildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex),
 	);
 	const cachedIndex = getOrBuildToolRetrievalIndex(descriptors);
 	const index = cachedIndex.index;

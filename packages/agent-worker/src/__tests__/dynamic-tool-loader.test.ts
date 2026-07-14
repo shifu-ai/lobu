@@ -7,6 +7,10 @@ import {
 	selectMcpToolsByMcpForTurn,
 	selectMcpToolsForTurn,
 } from "../openclaw/dynamic-tool-loader";
+import {
+	clearToolRetrievalIndexCacheForTests,
+	toolRetrievalIndexCacheStats,
+} from "../openclaw/tool-retrieval-index";
 
 function tool(name: string, extras: Record<string, unknown> = {}): McpToolDef {
 	return {
@@ -607,9 +611,11 @@ describe("selectMcpToolsForTurn", () => {
 			"lobu-memory/manage_schedules",
 		);
 		expect(result.trace.selectionDiverged).toBe(true);
+		expect(result.trace.semanticComputed).toBe(true);
 	});
 
 	test("legacy mode preserves priority and intent visibility without semantic enforcement", () => {
+		clearToolRetrievalIndexCacheForTests();
 		const result = selectMcpToolsByMcpForTurn({
 			toolsByMcp: {
 				aaa: Array.from({ length: 20 }, (_, index) =>
@@ -629,10 +635,14 @@ describe("selectMcpToolsForTurn", () => {
 			"aaa/aaa_distractor_2",
 			"aaa/aaa_distractor_3",
 		]);
-		expect(result.trace.semanticSelectedToolNames).toContain(
-			"lobu-memory/manage_schedules",
+		expect(result.trace.semanticSelectedToolNames).toEqual(
+			result.trace.selectedToolNames,
 		);
 		expect(result.trace.clarificationRequired).toBe(false);
+		expect(result.trace.inventoryFingerprint).toBe("legacy-bypass");
+		expect(result.trace.candidates).toEqual([]);
+		expect(result.trace.semanticComputed).toBe(false);
+		expect(toolRetrievalIndexCacheStats().entries).toBe(0);
 	});
 
 	test("semantic mode enforces semantic selection", () => {

@@ -1,23 +1,40 @@
 import { describe, expect, test } from "bun:test";
 import type { McpToolDef } from "@lobu/core";
+import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
+import { catalogEntryForTool } from "../openclaw/tool-catalog";
 import { buildToolDescriptor } from "../openclaw/tool-descriptor";
 import {
 	clearToolRetrievalIndexCacheForTests,
 	getOrBuildToolRetrievalIndex,
 	searchToolRetrievalIndex,
 } from "../openclaw/tool-retrieval-index";
+import { routeToolEntries } from "../openclaw/tool-router";
 
 function syntheticTool(index: number): McpToolDef {
-	return {
+	return Object.freeze({
 		name: `synthetic_tool_${index}`,
 		description: `Search synthetic course record ${index}`,
-		inputSchema: {
+		inputSchema: Object.freeze({
 			type: "object",
-			properties: {
-				query: { type: "string", description: `record ${index} query` },
-			},
-		},
-	};
+			properties: Object.freeze({
+				query: Object.freeze({
+					type: "string",
+					description: `record ${index} query`,
+				}),
+			}),
+		}),
+	});
+}
+
+function immutableReminderTool(): McpToolDef {
+	return Object.freeze({
+		name: "manage_schedules",
+		description: "Create and manage delayed personal reminders",
+		inputSchema: Object.freeze({
+			type: "object",
+			properties: Object.freeze({}),
+		}),
+	});
 }
 
 function percentile(values: number[], ratio: number): number {
@@ -29,48 +46,117 @@ function percentile(values: number[], ratio: number): number {
 
 describe("semantic tool router repeatable performance guard", () => {
 	for (const size of [100, 500, 1_000, 2_000]) {
-		test(`keeps reminder retrieval correct at ${size} tools; product SLO remains 10ms@500 and 25ms@2000`, () => {
+		test(`production route guard at ${size} tools; CI ceiling is not the product SLO`, () => {
 			clearToolRetrievalIndexCacheForTests();
-			const descriptors = Array.from({ length: size }, (_, index) =>
-				buildToolDescriptor(syntheticTool(index), "synthetic", index),
+			const entries = Array.from({ length: size }, (_, index) =>
+				catalogEntryForTool(syntheticTool(index), index, "synthetic"),
 			);
-			descriptors[size - 1] = buildToolDescriptor(
-				{
-					name: "manage_schedules",
-					description: "Create and manage delayed personal reminders",
-					inputSchema: { type: "object", properties: {} },
-				},
-				"lobu-memory",
+			entries[size - 1] = catalogEntryForTool(
+				immutableReminderTool(),
 				size - 1,
+				"lobu-memory",
 			);
-
-			getOrBuildToolRetrievalIndex(descriptors);
-			const warmed = getOrBuildToolRetrievalIndex(descriptors);
-			expect(warmed.cacheHit).toBe(true);
+			const allowedToolNames = entries.map(
+				(entry) => `${entry.mcpId}/${entry.name}`,
+			);
+			const route = () =>
+				routeToolEntries({
+					entries,
+					message: "五分鐘後提醒我喝水",
+					budget: 48,
+					reservedEntries: [],
+					allowedToolNames,
+				});
+			route();
 			const latencies: number[] = [];
-			let matches = searchToolRetrievalIndex(
-				warmed.index,
-				"五分鐘後提醒我喝水",
-				5,
-			);
+			let result = route();
 			for (let iteration = 0; iteration < 50; iteration++) {
 				const startedAt = performance.now();
-				matches = searchToolRetrievalIndex(
-					warmed.index,
-					"五分鐘後提醒我喝水",
-					5,
-				);
+				result = route();
 				latencies.push(performance.now() - startedAt);
 			}
 
 			const p50Ms = percentile(latencies, 0.5);
 			const p95Ms = percentile(latencies, 0.95);
+			const productSloMs = size <= 500 ? 10 : 25;
 			console.info(
-				`semantic-router benchmark size=${size} p50=${p50Ms.toFixed(3)}ms p95=${p95Ms.toFixed(3)}ms estimatedBytes=${warmed.index.estimatedBytes}`,
+				`semantic-router production-route size=${size} p50=${p50Ms.toFixed(3)}ms p95=${p95Ms.toFixed(3)}ms productSlo=${productSloMs}ms productSloPass=${p95Ms < productSloMs} ciCeiling=${size <= 500 ? 30 : 75}ms estimatedBytes=${result.estimatedIndexBytes}`,
 			);
-			expect(matches[0]?.descriptor.key).toBe("lobu-memory/manage_schedules");
+			expect(result.selectedEntries[0]?.name).toBe("manage_schedules");
+			expect(result.cacheHit).toBe(true);
 			// CI ceilings are regression guards, not a production SLO claim.
 			expect(p95Ms).toBeLessThan(size <= 500 ? 30 : 75);
 		});
 	}
+
+	test("labels warm search-only latency as a microbenchmark", () => {
+		const descriptors = Array.from({ length: 2_000 }, (_, index) =>
+			buildToolDescriptor(syntheticTool(index), "synthetic", index),
+		);
+		descriptors[1_999] = buildToolDescriptor(
+			immutableReminderTool(),
+			"lobu-memory",
+			1_999,
+		);
+		const index = getOrBuildToolRetrievalIndex(descriptors).index;
+		const latencies: number[] = [];
+		let matches = searchToolRetrievalIndex(index, "五分鐘後提醒我喝水", 5);
+		for (let iteration = 0; iteration < 50; iteration++) {
+			const startedAt = performance.now();
+			matches = searchToolRetrievalIndex(index, "五分鐘後提醒我喝水", 5);
+			latencies.push(performance.now() - startedAt);
+		}
+		console.info(
+			`semantic-router search-only-microbenchmark size=2000 p95=${percentile(latencies, 0.95).toFixed(3)}ms`,
+		);
+		expect(matches[0]?.descriptor.key).toBe("lobu-memory/manage_schedules");
+	});
+
+	test("measures rollout-mode selection separately from the production route core", () => {
+		const toolsByMcp = {
+			aaa: Array.from({ length: 1_999 }, (_, index) => syntheticTool(index)),
+			"lobu-memory": [immutableReminderTool()],
+		};
+		const allowedToolNames = [
+			...toolsByMcp.aaa.map((tool) => `aaa/${tool.name}`),
+			"lobu-memory/manage_schedules",
+		];
+		const measure = (routerMode: "shadow" | "semantic") => {
+			const latencies: number[] = [];
+			let result = selectMcpToolsByMcpForTurn({
+				toolsByMcp,
+				message: "五分鐘後提醒我喝水",
+				budget: 48,
+				allowedToolNames,
+				routerMode,
+			});
+			for (let iteration = 0; iteration < 50; iteration++) {
+				const startedAt = performance.now();
+				result = selectMcpToolsByMcpForTurn({
+					toolsByMcp,
+					message: "五分鐘後提醒我喝水",
+					budget: 48,
+					allowedToolNames,
+					routerMode,
+				});
+				latencies.push(performance.now() - startedAt);
+			}
+			return { result, p95Ms: percentile(latencies, 0.95) };
+		};
+
+		const shadow = measure("shadow");
+		const semantic = measure("semantic");
+		console.info(
+			`semantic-router rollout-selector size=2000 shadowP95=${shadow.p95Ms.toFixed(3)}ms semanticP95=${semantic.p95Ms.toFixed(3)}ms ciCeiling=75ms`,
+		);
+		expect(shadow.result.trace.routerMode).toBe("shadow");
+		expect(shadow.result.trace.selectedToolNames).not.toContain(
+			"lobu-memory/manage_schedules",
+		);
+		expect(semantic.result.trace.selectedToolNames).toContain(
+			"lobu-memory/manage_schedules",
+		);
+		expect(shadow.p95Ms).toBeLessThan(75);
+		expect(semantic.p95Ms).toBeLessThan(75);
+	});
 });
