@@ -211,6 +211,26 @@ describe("semantic tool routing authorization and write ambiguity", () => {
 		expect(collision.trace.omittedToolNames).toEqual([]);
 	});
 
+	test("treats slash allow names exclusively as qualified names", () => {
+		const result = selectMcpToolsByMcpForTurn({
+			toolsByMcp: {
+				a: [tool("b", "Find authorized records")],
+				x: [tool("a/b", "Find unauthorized records")],
+			},
+			message: "find records",
+			budget: 2,
+			allowedToolNames: ["a/b"],
+		});
+
+		expect(result.trace.selectedToolNames).toEqual(["a/b"]);
+		expect(result.selectedTools.x).toBeUndefined();
+		expect(result.trace.candidates.map((candidate) => candidate.key)).toEqual([
+			"a/b",
+		]);
+		expect(result.trace.omittedToolNames).not.toContain("x/a/b");
+		expect(result.trace.omitted).not.toContain("x/a/b");
+	});
+
 	test("does not backfill unrelated read-only tools", () => {
 		const result = selectMcpToolsByMcpForTurn({
 			toolsByMcp: {

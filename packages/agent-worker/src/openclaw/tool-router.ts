@@ -90,7 +90,7 @@ function eligibleIdentityKeys(
 					entry.mcpId ? `${entry.mcpId}/${entry.name}` : entry.name,
 				);
 				return (
-					allowed.has(plainName) ||
+					(!plainName.includes("/") && allowed.has(plainName)) ||
 					(allowed.has(qualifiedName) &&
 						qualifiedNameCounts.get(qualifiedName) === 1)
 				);
