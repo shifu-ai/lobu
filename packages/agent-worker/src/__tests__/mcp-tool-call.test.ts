@@ -68,6 +68,23 @@ function extractText(result: {
     .join("\n");
 }
 
+function parseFetchBodies(fetchMock: ReturnType<typeof mock>) {
+  return fetchMock.mock.calls.map((call) =>
+    JSON.parse(String((call as unknown as [string, RequestInit])[1].body))
+  );
+}
+
+function expectNoRawIdentifiers(
+  bodies: unknown[],
+  identifiers: Array<string | undefined>
+): void {
+  const serialized = JSON.stringify(bodies);
+  for (const identifier of identifiers) {
+    if (!identifier) continue;
+    expect(serialized).not.toContain(identifier);
+  }
+}
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
   if (originalObsEnv.enabled === undefined) {
@@ -626,8 +643,8 @@ describe("worker MCP tool registration observability", () => {
       },
       conversationId: "conv-1",
       sessionId: "session-1",
-      agentId: "agent-1",
-      userId: "toolbox-user-secret",
+      agentId: "shifu-u-a4175b7e71f4",
+      userId: "toolbox-user-raw-123",
       event: "lobu.worker.started",
       status: "started",
       fields: {
@@ -637,11 +654,8 @@ describe("worker MCP tool registration observability", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    const journeyPayload = JSON.parse(
-      String(
-        (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body
-      )
-    );
+    const bodies = parseFetchBodies(fetchMock);
+    const journeyPayload = bodies[0];
     expect(journeyPayload).toMatchObject({
       schemaVersion: "journey.trace.v1",
       payload: {
@@ -655,10 +669,12 @@ describe("worker MCP tool registration observability", () => {
         mcp_exposure: "tools",
       },
     });
-    const serialized = JSON.stringify(journeyPayload);
-    expect(serialized).not.toContain("U-line-secret");
-    expect(serialized).not.toContain("toolbox-user-secret");
-    expect(serialized).not.toContain("worker-token-secret");
+    expectNoRawIdentifiers(bodies, [
+      "U-line-secret",
+      "shifu-u-a4175b7e71f4",
+      "toolbox-user-raw-123",
+      "worker-token-secret",
+    ]);
   });
 
   test("emits worker lifecycle events with incoming trace lineage", async () => {
@@ -680,8 +696,8 @@ describe("worker MCP tool registration observability", () => {
       },
       conversationId: "conv-1",
       sessionId: "session-1",
-      agentId: "agent-1",
-      userId: "user-secret-1",
+      agentId: "shifu-u-b5286c8f82a5",
+      userId: "toolbox-user-raw-456",
       event: "lobu.worker.completed",
       status: "ok",
       durationMs: 37,
@@ -692,11 +708,8 @@ describe("worker MCP tool registration observability", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    const journeyPayload = JSON.parse(
-      String(
-        (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body
-      )
-    );
+    const bodies = parseFetchBodies(fetchMock);
+    const journeyPayload = bodies[0];
     expect(journeyPayload).toMatchObject({
       schemaVersion: "journey.trace.v1",
       payload: {
@@ -715,15 +728,8 @@ describe("worker MCP tool registration observability", () => {
         session_id: "session-1",
       },
     });
-    const serialized = JSON.stringify(journeyPayload);
-    expect(serialized).not.toContain("user-secret-1");
-    expect(serialized).not.toContain("leaked-token");
 
-    const obsPayload = JSON.parse(
-      String(
-        (fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1].body
-      )
-    );
+    const obsPayload = bodies[1];
     expect(obsPayload).toMatchObject({
       eventName: "lobu.worker.completed",
       status: "ok",
@@ -732,7 +738,6 @@ describe("worker MCP tool registration observability", () => {
       turnId: "turn_workerlife123",
       conversationId: "conv-1",
       sessionId: "session-1",
-      agentId: "agent-1",
       metadata: {
         journey_id: "line_reply",
         parent_span_id: "sp_gatewayparent123",
@@ -742,7 +747,14 @@ describe("worker MCP tool registration observability", () => {
         output_chars: 42,
       },
     });
-    expect(JSON.stringify(obsPayload)).not.toContain("leaked-token");
+    expect(obsPayload).not.toHaveProperty("agentId");
+    expect(obsPayload).not.toHaveProperty("userId");
+    expect(obsPayload).not.toHaveProperty("toolboxUserId");
+    expectNoRawIdentifiers(bodies, [
+      "shifu-u-b5286c8f82a5",
+      "toolbox-user-raw-456",
+      "leaked-token",
+    ]);
   });
 
   test("emits failed MCP tool lifecycle events with trace lineage and redaction", async () => {
@@ -764,8 +776,8 @@ describe("worker MCP tool registration observability", () => {
       },
       conversationId: "conv-1",
       sessionId: "session-1",
-      agentId: "shifu-u-agent-secret",
-      userId: "toolbox-user-secret",
+      agentId: "shifu-u-c6397d9f93b6",
+      userId: "toolbox-user-raw-789",
       toolCallId: "call-1",
       toolName: "calendar_events_list",
       isError: true,
@@ -805,11 +817,15 @@ describe("worker MCP tool registration observability", () => {
         duration_ms: 25,
       },
     });
-    const serialized = JSON.stringify(journeyPayload);
-    expect(serialized).not.toContain("shifu-u-agent-secret");
-    expect(serialized).not.toContain("toolbox-user-secret");
-    expect(serialized).not.toContain("tool-token-secret");
-    expect(serialized).not.toContain("sk-tool-secret");
+    expectNoRawIdentifiers(
+      [journeyPayload],
+      [
+        "shifu-u-c6397d9f93b6",
+        "toolbox-user-raw-789",
+        "tool-token-secret",
+        "sk-tool-secret",
+      ]
+    );
   });
 
   test("does not wait for tools_registered observability ingest response", async () => {
@@ -950,13 +966,19 @@ describe("worker MCP tool registration observability", () => {
       traceId: "tr_workerobs123456",
       turnId: "turn_workerobs123",
       conversationId: "conv-1",
-      agentId: "agent-1",
       metadata: {
         module: "agent-worker",
         tool_count: 1,
         mcp_tool_count: 1,
       },
     });
+    expect(payload).not.toHaveProperty("agentId");
+    expect(payload).not.toHaveProperty("userId");
+    expect(payload).not.toHaveProperty("toolboxUserId");
+    expectNoRawIdentifiers(parseFetchBodies(fetchMock), [
+      gw.agentId,
+      gw.userId,
+    ]);
     expect(payload.metadata.mcp_ids).toEqual(["lobu"]);
   });
 });

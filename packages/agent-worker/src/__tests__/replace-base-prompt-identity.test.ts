@@ -19,6 +19,16 @@ const originalObsEnv = {
   toolboxSecret: process.env.TOOLBOX_INTERNAL_SECRET,
 };
 
+function expectNoRawIdentifiers(
+  bodies: unknown[],
+  identifiers: string[]
+): void {
+  const serialized = JSON.stringify(bodies);
+  for (const identifier of identifiers) {
+    expect(serialized).not.toContain(identifier);
+  }
+}
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
   if (originalObsEnv.enabled === undefined) {
@@ -190,8 +200,8 @@ describe("worker model observability", () => {
       traceSource: "incoming" as const,
     },
     conversationId: "conv-1",
-    agentId: "shifu-u-agent-secret",
-    userId: "toolbox-user-secret",
+    agentId: "shifu-u-a4175b7e71f4",
+    userId: "toolbox-user-raw-123",
     provider: "openai",
     modelId: "gpt-4.1",
     toolCount: 7,
@@ -288,8 +298,10 @@ describe("worker model observability", () => {
         },
       },
     });
-    expect(JSON.stringify(events[0])).not.toContain("shifu-u-agent-secret");
-    expect(JSON.stringify(events[0])).not.toContain("toolbox-user-secret");
+    expectNoRawIdentifiers(events, [
+      "shifu-u-a4175b7e71f4",
+      "toolbox-user-raw-123",
+    ]);
     expect(events[1]).toMatchObject({
       eventName: "provider.call.started",
       status: "started",
