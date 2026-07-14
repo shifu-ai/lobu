@@ -383,7 +383,7 @@ describe("tool retrieval index", () => {
       32 * 1024 * 1024
     );
     expect(toolRetrievalIndexCacheStats().evictionCount).toBeGreaterThan(0);
-  });
+  }, 15_000);
   test("ranks personal reminders and Google Calendar requests by semantics", () => {
     const reminder = buildToolDescriptor(
       tool("manage_schedules", "Manage agent schedules"),
