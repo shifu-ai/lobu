@@ -1,9 +1,45 @@
+import { createHash } from "node:crypto";
+
 const MAX_RETAINED_BYTES = 32 * 1024 * 1024;
 const MAX_ENTRY_BYTES = 16 * 1024 * 1024;
 
 interface RetainedEntry {
   bytes: number;
   onEvict: () => void;
+  expiresAtMs?: number;
+}
+
+/** Authority/provenance dimensions that make a router cache entry reusable. */
+export interface ToolRouterCacheContext {
+  environment: string;
+  agentId: string;
+  releaseId: string;
+  releaseSequence: number;
+  snapshotDigest: string;
+  snapshotExpiresAt: string;
+  effectiveInventoryFingerprint: string;
+  effectivePolicyFingerprint: string;
+  grantProjectionFingerprint: string;
+}
+
+export function serializeToolRouterCacheContext(
+  context: ToolRouterCacheContext
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        context.environment,
+        context.agentId,
+        context.releaseId,
+        context.releaseSequence,
+        context.snapshotDigest,
+        context.snapshotExpiresAt,
+        context.effectiveInventoryFingerprint,
+        context.effectivePolicyFingerprint,
+        context.grantProjectionFingerprint,
+      ])
+    )
+    .digest("hex");
 }
 
 const retainedEntries = new Map<string, RetainedEntry>();
@@ -19,11 +55,18 @@ export function retainToolRouterCacheEntry(params: {
   key: string;
   estimatedBytes: number;
   onEvict: () => void;
+  expiresAtMs?: number;
 }): { retained: boolean; evictionCount: number; evictedNamespaces: string[] } {
   if (
     params.estimatedBytes < 0 ||
     params.estimatedBytes > MAX_ENTRY_BYTES ||
     !Number.isFinite(params.estimatedBytes)
+  ) {
+    return { retained: false, evictionCount: 0, evictedNamespaces: [] };
+  }
+  if (
+    params.expiresAtMs !== undefined &&
+    (!Number.isFinite(params.expiresAtMs) || params.expiresAtMs <= Date.now())
   ) {
     return { retained: false, evictionCount: 0, evictedNamespaces: [] };
   }
@@ -52,6 +95,7 @@ export function retainToolRouterCacheEntry(params: {
   retainedEntries.set(key, {
     bytes: params.estimatedBytes,
     onEvict: params.onEvict,
+    expiresAtMs: params.expiresAtMs,
   });
   retainedBytes += params.estimatedBytes;
   return {
@@ -64,11 +108,21 @@ export function retainToolRouterCacheEntry(params: {
 export function touchToolRouterCacheEntry(
   namespace: string,
   key: string
-): void {
+): boolean {
   const retained = retainedEntries.get(retainedKey(namespace, key));
-  if (!retained) return;
+  if (!retained) return false;
+  if (
+    retained.expiresAtMs !== undefined &&
+    (!Number.isFinite(retained.expiresAtMs) ||
+      retained.expiresAtMs <= Date.now())
+  ) {
+    releaseToolRouterCacheEntry(namespace, key);
+    retained.onEvict();
+    return false;
+  }
   retainedEntries.delete(retainedKey(namespace, key));
   retainedEntries.set(retainedKey(namespace, key), retained);
+  return true;
 }
 
 export function releaseToolRouterCacheEntry(

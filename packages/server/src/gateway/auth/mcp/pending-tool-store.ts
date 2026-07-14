@@ -34,7 +34,7 @@ export interface PendingToolInvocation {
   };
 	releaseState?: ReleaseCapabilityState;
 	releaseBinding?: {
-		routerMode: "semantic";
+		routerMode: "legacy" | "shadow" | "semantic";
 		effectiveInventoryFingerprint: string;
 		releaseId: string;
 		releaseSequence: number;
@@ -84,6 +84,8 @@ export function stableReleaseAuthorizationDigest(
 			releaseId: claim.releaseId,
 			releaseSequence: claim.releaseSequence,
 			capabilityIds: [...claim.capabilityIds].sort(),
+			snapshotDigest: claim.snapshotDigest,
+			expiresAt: claim.expiresAt,
 		}))
 		.digest("hex");
 }

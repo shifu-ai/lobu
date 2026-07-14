@@ -29,6 +29,7 @@ import {
   type ToolRouteDecision,
 } from "./tool-router";
 import { deriveTurnExecutionIntent } from "./turn-execution-intent";
+import type { ToolRouterCacheContext } from "./tool-router-memory-budget";
 
 export type PersonalReminderDeliveryBlockedReason =
   | "capability_inactive"
@@ -70,6 +71,17 @@ export interface DynamicToolSelectionTrace {
   effectiveReleaseReason?: string;
   configuredRouterMode?: ToolRouterMode;
   routerGateReason?: string;
+  releaseEnvironment?: string;
+  releaseAgentId?: string;
+  releaseId?: string;
+  releaseSequence?: number;
+  releaseSnapshotDigest?: string;
+  releaseSnapshotExpiresAt?: string;
+  releaseSnapshotExpired?: boolean;
+  executionIntent?: string;
+  effectiveAllowedToolCount?: number;
+  effectiveBlockedToolCount?: number;
+  effectiveBlockedReasons?: string[];
   cacheHit: boolean;
   estimatedIndexBytes: number;
   cacheEvictionCount: number;
@@ -88,6 +100,7 @@ export interface SelectMcpToolsForTurnParams {
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
   personalReminderDeliveryBlockedReason?: PersonalReminderDeliveryBlockedReason;
+  cacheContext?: ToolRouterCacheContext;
 }
 
 export interface SelectMcpToolsForTurnResult {
@@ -105,6 +118,7 @@ export interface SelectGroupedMcpToolsForTurnParams {
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
   personalReminderDeliveryBlockedReason?: PersonalReminderDeliveryBlockedReason;
+  cacheContext?: ToolRouterCacheContext;
 }
 
 export interface SelectGroupedMcpToolsForTurnResult {
@@ -122,6 +136,7 @@ export interface SelectMcpToolsByMcpForTurnParams {
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
   personalReminderDeliveryBlockedReason?: PersonalReminderDeliveryBlockedReason;
+  cacheContext?: ToolRouterCacheContext;
 }
 
 function blocksPersonalReminderTool(
@@ -417,7 +432,8 @@ function selectEntriesForTurn(
   routerMode: ToolRouterMode = "shadow",
   provenanceById?: McpCatalogProvenanceById,
   trustedOrigins?: ReadonlySet<string>,
-  calendarAssist = false
+  calendarAssist = false,
+  cacheContext?: ToolRouterCacheContext
 ): SharedToolSelection {
   const normalizedAllowedToolNames =
     allowedToolNames === undefined ? undefined : [...allowedToolNames];
@@ -434,6 +450,28 @@ function selectEntriesForTurn(
     trustedOrigins,
     calendarAssist
   );
+  if (!message.trim()) {
+    return {
+      primaryIntent,
+      selectedEntries: [],
+      eligibleEntries,
+      pinnedBudgetOverflow: [],
+      routerMode,
+      route: {
+        routerVersion: "semantic-v1",
+        inventoryFingerprint: "empty-query",
+        cacheHit: false,
+        estimatedIndexBytes: 0,
+        cacheEvictionCount: 0,
+        timingMs: { build: 0, retrieve: 0, rank: 0 },
+        selectedEntries: [],
+        candidates: [],
+        explicitDestinations: [],
+        fallback: "empty_query",
+        semanticLookupSkippedReason: "definite_non_tool",
+      },
+    };
+  }
   if (routerMode === "legacy") {
     return {
       primaryIntent,
@@ -509,6 +547,7 @@ function selectEntriesForTurn(
     budget,
     reservedEntries,
     allowedToolNames: normalizedAllowedToolNames,
+    cacheContext,
   });
   return {
     primaryIntent,
@@ -687,7 +726,8 @@ export function selectMcpToolsForTurn(
     params.routerMode,
     params.mcpProvenanceById,
     params.trustedShifuToolboxOrigins,
-    calendarAssist
+    calendarAssist,
+    params.cacheContext
   );
   const selectedKeys = new Set(
     selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))
@@ -784,7 +824,8 @@ export function selectMcpToolsByMcpForTurn(
     params.routerMode,
     params.mcpProvenanceById,
     params.trustedShifuToolboxOrigins,
-    calendarAssist
+    calendarAssist,
+    params.cacheContext
   );
   const selectedKeys = new Set(
     selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))

@@ -100,8 +100,32 @@ describe("CLI gateway pending-tool approval replay", () => {
       makeApp(execute, grant, { userId: "user-2", organizationId: "org-1" }),
       "cli-wrong-caller",
     );
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(403);
     expect(await getPendingTool("cli-wrong-caller")).not.toBeNull();
+    expect(grant).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["missing", undefined],
+    ["mismatched", "org-2"],
+  ])("%s caller organization fails closed and retains the approval", async (_label, organizationId) => {
+    await storePendingTool("cli-org-bound", {
+      mcpId: "github",
+      toolName: "create_issue",
+      args: {},
+      agentId: "agent-1",
+      userId: "user-1",
+      organizationId: "org-1",
+    }, 60);
+    const execute = mock(async () => ({ content: [], isError: false }));
+    const grant = mock(async () => undefined);
+    const response = await approve(
+      makeApp(execute, grant, { userId: "user-1", organizationId }),
+      "cli-org-bound",
+    );
+    expect(response.status).toBe(403);
+    expect(await getPendingTool("cli-org-bound")).not.toBeNull();
     expect(grant).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
   });
@@ -152,6 +176,37 @@ describe("CLI gateway pending-tool approval replay", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  test("active CLI continuation without a release binding fails closed", async () => {
+    await storePendingTool("cli-missing-binding", {
+      mcpId: "github",
+      toolName: "create_issue",
+      args: {},
+      agentId: "agent-1",
+      userId: "user-1",
+      organizationId: "org-1",
+      releaseState: {
+        status: "active",
+        claim: {
+          environment: "production",
+          toolboxUserId: "user-1",
+          agentId: "agent-1",
+          releaseId: "release-1",
+          releaseSequence: 1,
+          snapshotDigest: `sha256:${"a".repeat(64)}`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          capabilityIds: [],
+        },
+      },
+    }, 60);
+    const execute = mock(async () => ({ content: [], isError: false }));
+    const grant = mock(async () => undefined);
+    const response = await approve(makeApp(execute, grant), "cli-missing-binding");
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "approval_inventory_stale" });
+    expect(grant).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   test("reserved automation approval forwards identity, channel, and existing course scope", async () => {
     const expectedMcpIdentity = {
       upstreamOrigin: "https://mcp.shifu-ai.org",
@@ -185,7 +240,7 @@ describe("CLI gateway pending-tool approval replay", () => {
         courseToolScope,
         expectedMcpIdentity,
         organizationId: "org-1",
-				releaseState: { status: "active", claim: releaseCapability },
+        releaseState: { status: "legacy_unenrolled" },
       },
 			60,
     );
@@ -212,7 +267,7 @@ describe("CLI gateway pending-tool approval replay", () => {
 				expectedMcpIdentity,
 				channelId: "line-user-1",
 				organizationId: "org-1",
-				releaseState: { status: "active", claim: releaseCapability },
+				releaseState: { status: "legacy_unenrolled" },
 			},
     );
   });
@@ -233,6 +288,7 @@ describe("CLI gateway pending-tool approval replay", () => {
         userId: "user-1",
         channelId: "line-user-1",
         expectedMcpIdentity,
+        organizationId: "org-1",
       },
 			60,
     );
@@ -261,7 +317,12 @@ describe("CLI gateway pending-tool approval replay", () => {
       "shifu-toolbox",
       "list_automations",
       {},
-			{ approvalReplay: true, expectedMcpIdentity, channelId: "line-user-1" },
+			{
+        approvalReplay: true,
+        expectedMcpIdentity,
+        channelId: "line-user-1",
+        organizationId: "org-1",
+      },
     );
   });
 

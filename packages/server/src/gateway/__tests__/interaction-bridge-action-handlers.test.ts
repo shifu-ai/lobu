@@ -32,6 +32,7 @@ function setup(
     withGrantStore?: boolean;
     organizationId?: string;
     continuationValid?: boolean;
+    continuationResults?: boolean[];
   } = {}
 ): Harness {
   const {
@@ -73,16 +74,19 @@ function setup(
     undefined,
     undefined,
     undefined,
-    options.continuationValid === undefined
+    options.continuationValid === undefined && !options.continuationResults
       ? undefined
-      : mock(async () => options.continuationValid
+      : mock(async () => (options.continuationResults?.shift() ?? options.continuationValid)
           ? ({ valid: true } as const)
           : ({ valid: false, diagnosticCode: "approval_inventory_stale" } as const))
   );
 
   if (!captured) throw new Error("onAction handler not registered");
   return {
-    handler: captured,
+    handler: async (event) => captured!({
+      ...event,
+      user: "user" in event ? event.user : { userId: "user-1" },
+    }),
     grantStore,
     executeToolDirect,
     post,
@@ -110,6 +114,23 @@ describe("registerActionHandlers — tool approval", () => {
 
   beforeEach(async () => {
     await resetTestDatabase();
+  });
+
+  test.each([
+    ["wrong", { userId: "user-2" }],
+    ["missing", null],
+  ])("%s interaction user cannot consume another user's approval", async (_label, user) => {
+    await seedPending("req-owner-bound");
+    const harness = setup();
+    await harness.handler({
+      actionId: "tool:req-owner-bound:once",
+      thread: harness.thread,
+      user,
+    });
+
+    expect(await getPendingTool("req-owner-bound")).not.toBeNull();
+    expect(harness.grantStore.grant).not.toHaveBeenCalled();
+    expect(harness.executeToolDirect).not.toHaveBeenCalled();
   });
 
   test("stale semantic approval never grants or executes", async () => {
@@ -204,6 +225,77 @@ describe("registerActionHandlers — tool approval", () => {
       thread: h.thread,
     });
     expect(await getPendingTool("req-cross-tenant")).not.toBeNull();
+    expect(h.grantStore.grant).not.toHaveBeenCalled();
+    expect(h.executeToolDirect).not.toHaveBeenCalled();
+  });
+
+  test("authority revoked after validation but before execution never grants or executes", async () => {
+    const claim = {
+      environment: "production" as const,
+      toolboxUserId: "user-1",
+      agentId: "agent-1",
+      releaseId: "release-1",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
+    };
+    const stableAuthorizationDigest = stableReleaseAuthorizationDigest(claim);
+    await storePendingTool("req-toctou", {
+      ...PENDING,
+      organizationId: "org-1",
+      releaseState: { status: "active", claim },
+      releaseBinding: {
+        routerMode: "shadow",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: claim.releaseId,
+        releaseSequence: claim.releaseSequence,
+        snapshotDigest: claim.snapshotDigest,
+        authorizationExpiresAt: claim.expiresAt,
+        stableAuthorizationDigest,
+        eligibilityBindingDigest: stableToolEligibilityDigest({
+          mcpId: PENDING.mcpId,
+          toolName: PENDING.toolName,
+          effectiveInventoryFingerprint: "b".repeat(64),
+          stableAuthorizationDigest,
+        }),
+      },
+    }, 60);
+    const h = setup({
+      organizationId: "org-1",
+      continuationResults: [true, false],
+    });
+    await h.handler({
+      actionId: "tool:req-toctou:always",
+      thread: h.thread,
+    });
+    expect(h.grantStore.grant).not.toHaveBeenCalled();
+    expect(h.executeToolDirect).not.toHaveBeenCalled();
+  });
+
+  test("active interaction continuation without a release binding fails closed", async () => {
+    await storePendingTool("req-missing-binding", {
+      ...PENDING,
+      organizationId: "org-1",
+      releaseState: {
+        status: "active",
+        claim: {
+          environment: "production",
+          toolboxUserId: "user-1",
+          agentId: "agent-1",
+          releaseId: "release-1",
+          releaseSequence: 1,
+          snapshotDigest: `sha256:${"a".repeat(64)}`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          capabilityIds: [],
+        },
+      },
+    }, 60);
+    const h = setup({ organizationId: "org-1" });
+    await h.handler({
+      actionId: "tool:req-missing-binding:always",
+      thread: h.thread,
+    });
     expect(h.grantStore.grant).not.toHaveBeenCalled();
     expect(h.executeToolDirect).not.toHaveBeenCalled();
   });

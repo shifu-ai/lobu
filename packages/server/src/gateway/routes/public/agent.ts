@@ -467,7 +467,7 @@ export interface AgentApiConfig {
     requestId: string,
     decision: string,
     caller: { userId?: string; organizationId?: string; agentId?: string },
-  ) => Promise<{ success: boolean; error?: string }>;
+  ) => Promise<{ success: boolean; error?: string; status?: 400 | 403 }>;
 }
 
 export type DurableMessageCompletion =
@@ -1660,7 +1660,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         agentId: typeof agentId === "string" ? agentId : undefined,
       });
       if (!result.success) {
-        return errorResponse(c, result.error || "Approval failed", 400);
+        return errorResponse(c, result.error || "Approval failed", result.status ?? 400);
       }
       return c.json({ success: true });
     });

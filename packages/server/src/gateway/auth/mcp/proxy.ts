@@ -1007,7 +1007,7 @@ export class McpProxy {
       expectedMcpIdentity?: ExpectedMcpConfigIdentity;
 			releaseState?: import("@lobu/core").ReleaseCapabilityState;
 			effectiveToolInventoryFingerprint?: string;
-			effectiveToolRouterMode?: "semantic";
+			effectiveToolRouterMode?: "legacy" | "shadow" | "semantic";
 			personalReminderDeliveryIntent?: true;
     } = {},
   ): Promise<{
@@ -2263,13 +2263,18 @@ export class McpProxy {
 	const inventoryFingerprint = c.req.header(
 		"x-lobu-effective-tool-inventory-fingerprint",
 	);
+	const effectiveToolRouterMode = c.req.header(
+		"x-lobu-effective-tool-router-mode",
+	);
 	if (
 		auth.tokenData.tokenKind === "run" &&
-		c.req.header("x-lobu-effective-tool-router-mode") === "semantic" &&
+		(effectiveToolRouterMode === "legacy" ||
+			effectiveToolRouterMode === "shadow" ||
+			effectiveToolRouterMode === "semantic") &&
 		/^[0-9a-f]{64}$/.test(inventoryFingerprint ?? "")
 	) {
 		auth.tokenData.effectiveToolInventoryFingerprint = inventoryFingerprint;
-		auth.tokenData.effectiveToolRouterMode = "semantic";
+		auth.tokenData.effectiveToolRouterMode = effectiveToolRouterMode;
 	}
     const healthKey = this.buildServerHealthKey(agentId, mcpId);
 
@@ -3276,16 +3281,15 @@ export class McpProxy {
 					: {}),
 				...(verifiedRunMatches &&
 					verifiedRun?.releaseState?.status === "active" &&
-					tokenData.effectiveToolRouterMode === "semantic" &&
+					(tokenData.effectiveToolRouterMode === "legacy" ||
+						tokenData.effectiveToolRouterMode === "shadow" ||
+						tokenData.effectiveToolRouterMode === "semantic") &&
 					/^[0-9a-f]{64}$/.test(
 						tokenData.effectiveToolInventoryFingerprint ?? "",
-					) &&
-					verifiedRun.releaseState.claim.capabilityIds.includes(
-						"semantic_tool_router.effective_inventory.v1",
 					)
 					? {
 						releaseBinding: {
-							routerMode: "semantic" as const,
+							routerMode: tokenData.effectiveToolRouterMode,
 							effectiveInventoryFingerprint:
 								tokenData.effectiveToolInventoryFingerprint!,
 							releaseId: verifiedRun.releaseState.claim.releaseId,

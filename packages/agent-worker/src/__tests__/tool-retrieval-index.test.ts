@@ -322,6 +322,56 @@ describe("tool retrieval index", () => {
     expect(second.cacheHit).toBe(true);
   });
 
+  test("does not reuse an equal descriptor index across release authority", () => {
+    clearToolRetrievalIndexCacheForTests();
+    const descriptors = [
+      buildToolDescriptor(tool("search", "Search"), "mcp", 0),
+    ];
+    const base = {
+      environment: "production",
+      agentId: "shifu-u-1",
+      releaseId: "release-1",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      snapshotExpiresAt: "2099-01-01T00:00:00.000Z",
+      effectiveInventoryFingerprint: "b".repeat(64),
+      effectivePolicyFingerprint: "c".repeat(64),
+      grantProjectionFingerprint: "d".repeat(64),
+    };
+    const first = getOrBuildToolRetrievalIndex(descriptors, {
+      cacheContext: base,
+    });
+    const same = getOrBuildToolRetrievalIndex(descriptors, {
+      cacheContext: base,
+    });
+    const advanced = getOrBuildToolRetrievalIndex(descriptors, {
+      cacheContext: { ...base, releaseSequence: 2 },
+    });
+    const policyChanged = getOrBuildToolRetrievalIndex(descriptors, {
+      cacheContext: { ...base, effectivePolicyFingerprint: "e".repeat(64) },
+    });
+    const authorityChanges = (
+      [
+        { environment: "staging" },
+        { agentId: "shifu-u-2" },
+        { releaseId: "release-2" },
+        { snapshotDigest: `sha256:${"f".repeat(64)}` },
+        { snapshotExpiresAt: "2099-01-02T00:00:00.000Z" },
+        { effectiveInventoryFingerprint: "1".repeat(64) },
+        { grantProjectionFingerprint: "2".repeat(64) },
+      ] as const
+    ).map((change) =>
+      getOrBuildToolRetrievalIndex(descriptors, {
+        cacheContext: { ...base, ...change },
+      })
+    );
+    expect(same.cacheHit).toBe(true);
+    expect(same.index).toBe(first.index);
+    expect(advanced.cacheHit).toBe(false);
+    expect(policyChanged.cacheHit).toBe(false);
+    expect(authorityChanges.every((entry) => !entry.cacheHit)).toBe(true);
+  });
+
   test("does not retain an index above the per-index cache budget", () => {
     clearToolRetrievalIndexCacheForTests();
     const descriptors = Array.from({ length: 600 }, (_, index) =>

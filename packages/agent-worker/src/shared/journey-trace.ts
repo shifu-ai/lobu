@@ -73,6 +73,14 @@ function isSensitiveKey(key: string) {
 function sanitizeFields(fields: Record<string, unknown> = {}) {
   const sanitized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(fields)) {
+    if (
+      key === "release_agent_id" &&
+      typeof value === "string" &&
+      /^shifu-u-[a-zA-Z0-9_-]{1,80}$/.test(value)
+    ) {
+      sanitized[key] = value;
+      continue;
+    }
     if (key === "body" || isSensitiveKey(key)) continue;
     sanitized[key] = value;
   }

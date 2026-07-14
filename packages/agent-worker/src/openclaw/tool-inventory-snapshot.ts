@@ -5,6 +5,8 @@ import {
   releaseToolRouterCacheEntry,
   retainToolRouterCacheEntry,
   touchToolRouterCacheEntry,
+  serializeToolRouterCacheContext,
+  type ToolRouterCacheContext,
 } from "./tool-router-memory-budget";
 import { assertWellFormedUnicode } from "./well-formed-unicode";
 
@@ -198,10 +200,11 @@ function snapshotCacheKey(serialized: string): string {
 }
 
 export function snapshotToolsByMcp(
-  toolsByMcp: Record<string, McpToolDef[]>
+  toolsByMcp: Record<string, McpToolDef[]>,
+  options: { cacheContext?: ToolRouterCacheContext } = {}
 ): Record<string, McpToolDef[]> {
   assertJsonLike(toolsByMcp);
-  if (isDeeplyImmutableJsonLike(toolsByMcp)) {
+  if (!options.cacheContext && isDeeplyImmutableJsonLike(toolsByMcp)) {
     immutableInventoryReuses++;
     return toolsByMcp;
   }
@@ -209,12 +212,18 @@ export function snapshotToolsByMcp(
   if (serialized === null) {
     throw new TypeError("non-JSON tool inventory value: serialization failed");
   }
-  const cacheKey = snapshotCacheKey(serialized);
+  const context = options.cacheContext;
+  const contextSerialized = context
+    ? serializeToolRouterCacheContext(context)
+    : "";
+  const cacheKey = snapshotCacheKey(`${serialized}\u0000${contextSerialized}`);
   const cached = snapshotCache.get(cacheKey);
-  if (cached?.serialized === serialized) {
+  if (
+    cached?.serialized === serialized &&
+    touchToolRouterCacheEntry(CACHE_NAMESPACE, cacheKey)
+  ) {
     snapshotCache.delete(cacheKey);
     snapshotCache.set(cacheKey, cached);
-    touchToolRouterCacheEntry(CACHE_NAMESPACE, cacheKey);
     snapshotCacheHits++;
     return cached.snapshot;
   }
@@ -234,6 +243,7 @@ export function snapshotToolsByMcp(
     namespace: CACHE_NAMESPACE,
     key: cacheKey,
     estimatedBytes,
+    ...(context ? { expiresAtMs: Date.parse(context.snapshotExpiresAt) } : {}),
     onEvict: () => {
       const evicted = snapshotCache.get(cacheKey);
       if (!evicted) return;

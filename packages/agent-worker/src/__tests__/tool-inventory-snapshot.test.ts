@@ -292,6 +292,43 @@ describe("external-turn immutable tool inventory snapshots", () => {
     expect(Object.isFrozen(first.school[0]?.inputSchema)).toBe(true);
   });
 
+  test("partitions equal inventories by release authority and caps reuse at snapshot expiry", () => {
+    clearToolInventorySnapshotCacheForTests();
+    const source = { school: [tool("search_students", "Find students")] };
+    const base = {
+      environment: "production",
+      agentId: "shifu-u-1",
+      releaseId: "release-1",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      snapshotExpiresAt: "2099-01-01T00:00:00.000Z",
+      effectiveInventoryFingerprint: "b".repeat(64),
+      effectivePolicyFingerprint: "c".repeat(64),
+      grantProjectionFingerprint: "d".repeat(64),
+    };
+    const first = snapshotToolsByMcp(source, { cacheContext: base });
+    const same = snapshotToolsByMcp(structuredClone(source), {
+      cacheContext: base,
+    });
+    const advanced = snapshotToolsByMcp(structuredClone(source), {
+      cacheContext: { ...base, releaseSequence: 2 },
+    });
+    const changedDigest = snapshotToolsByMcp(structuredClone(source), {
+      cacheContext: { ...base, snapshotDigest: `sha256:${"e".repeat(64)}` },
+    });
+    const expired = snapshotToolsByMcp(structuredClone(source), {
+      cacheContext: { ...base, snapshotExpiresAt: "2000-01-01T00:00:00.000Z" },
+    });
+    const expiredAgain = snapshotToolsByMcp(structuredClone(source), {
+      cacheContext: { ...base, snapshotExpiresAt: "2000-01-01T00:00:00.000Z" },
+    });
+
+    expect(same).toBe(first);
+    expect(advanced).not.toBe(first);
+    expect(changedDigest).not.toBe(first);
+    expect(expiredAgain).not.toBe(expired);
+  });
+
   test("reuses production initialization caches while applying authorization per turn", () => {
     clearToolInventorySnapshotCacheForTests();
     clearToolRetrievalIndexCacheForTests();

@@ -108,16 +108,14 @@ export function isPendingReleaseBindingCurrent(
 ): boolean {
   const binding = pending.releaseBinding;
   if (!binding || current.status !== "active") return false;
-  return Date.parse(current.claim.expiresAt) > now.getTime() &&
+  return Date.parse(binding.authorizationExpiresAt) > now.getTime() &&
+    Date.parse(current.claim.expiresAt) > now.getTime() &&
     current.claim.agentId === pending.agentId &&
     current.claim.toolboxUserId === pending.userId &&
     current.claim.releaseId === binding.releaseId &&
     current.claim.releaseSequence === binding.releaseSequence &&
     stableReleaseAuthorizationDigest(current.claim) ===
-      binding.stableAuthorizationDigest &&
-    current.claim.capabilityIds.includes(
-      "semantic_tool_router.effective_inventory.v1",
-    );
+      binding.stableAuthorizationDigest;
 }
 
 async function revalidateReleaseBinding(
@@ -134,6 +132,8 @@ async function revalidateReleaseBinding(
   if (state?.status !== "active") return false;
   const claim = state.claim;
   if (
+    Date.parse(binding.authorizationExpiresAt) <= Date.now() ||
+    Date.parse(claim.expiresAt) <= Date.now() ||
     claim.agentId !== pending.agentId ||
     claim.toolboxUserId !== pending.userId ||
     claim.releaseId !== binding.releaseId ||
@@ -150,10 +150,7 @@ async function revalidateReleaseBinding(
       courseToolScope: pending.courseToolScope,
       effectiveInventoryFingerprint: binding.effectiveInventoryFingerprint,
       stableAuthorizationDigest: binding.stableAuthorizationDigest,
-    }) !== binding.eligibilityBindingDigest ||
-    !claim.capabilityIds.includes(
-      "semantic_tool_router.effective_inventory.v1",
-    )
+    }) !== binding.eligibilityBindingDigest
   ) return false;
   const snapshot = await (
     deps.resolveReleaseSnapshot ?? resolveRuntimeCapabilitySnapshot
@@ -187,7 +184,11 @@ export async function validatePendingToolContinuation(
     "resolveReleaseSnapshot" | "readReleaseState" | "revalidateEligibility" | "mcpProxy"
   >> = {},
 ): Promise<{ valid: true } | { valid: false; diagnosticCode: "approval_inventory_stale" }> {
-  if (!pending.releaseBinding) return { valid: true };
+  if (!pending.releaseBinding) {
+    return pending.releaseState?.status === "active"
+      ? { valid: false, diagnosticCode: "approval_inventory_stale" }
+      : { valid: true };
+  }
   const valid = await revalidateReleaseBinding(
     pending,
     organizationId,
@@ -276,6 +277,21 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
         pending.userId !== candidate.userId
       ) {
         return { status: "expired" };
+      }
+
+      // The atomic claim closes duplicate execution, but external authority can
+      // change between the first validation and the side-effect boundary.
+      if (pending.releaseBinding || pending.releaseState?.status === "active") {
+        const claimOrganizationId = organizationIdFor(input, deps.organizationId);
+        if (!claimOrganizationId) return { status: "forbidden" };
+        const validation = await validatePendingToolContinuation(
+          pending,
+          claimOrganizationId,
+          deps,
+        );
+        if (!validation.valid) {
+          return { status: "stale", diagnosticCode: validation.diagnosticCode };
+        }
       }
 
       const specificPattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;

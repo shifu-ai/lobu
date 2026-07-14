@@ -1388,12 +1388,15 @@ export async function callMcpTool(
       // agent has been seeing. External MCP servers ignore the header.
       if (wantsJson) headers["x-mcp-format"] = "json";
       if (
-        gw.effectiveToolRouterMode === "semantic" &&
+        (gw.effectiveToolRouterMode === "legacy" ||
+          gw.effectiveToolRouterMode === "shadow" ||
+          gw.effectiveToolRouterMode === "semantic") &&
         /^[0-9a-f]{64}$/.test(gw.effectiveToolInventoryFingerprint ?? "")
       ) {
         headers["x-lobu-effective-tool-inventory-fingerprint"] =
           gw.effectiveToolInventoryFingerprint!;
-        headers["x-lobu-effective-tool-router-mode"] = "semantic";
+        headers["x-lobu-effective-tool-router-mode"] =
+          gw.effectiveToolRouterMode;
       }
       if (
         options.personalReminderDelivery &&

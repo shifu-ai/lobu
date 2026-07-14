@@ -741,6 +741,16 @@ export function registerActionHandlers(
       const candidate = await getPendingTool(requestId).catch(
         () => null
       );
+      const clickerUserId = String(
+        event.userId ?? event.user?.userId ?? event.user?.id ?? "",
+      ).trim();
+      if (candidate && (!clickerUserId || clickerUserId !== candidate.userId)) {
+        logger.warn(
+          { requestId, hasClickerIdentity: clickerUserId.length > 0 },
+          "Ignoring tool approval from a non-owning interaction user",
+        );
+        return;
+      }
       if (candidate?.releaseBinding) {
         if (
           candidate.organizationId !== connection.organizationId ||
@@ -808,6 +818,22 @@ export function registerActionHandlers(
           );
         }
         return;
+      }
+
+      if (pending.releaseBinding || pending.releaseState?.status === "active") {
+        const validation = !connection.organizationId
+          ? { valid: false as const, diagnosticCode: "approval_inventory_stale" as const }
+          : continuationValidator
+            ? await continuationValidator(pending, connection.organizationId)
+            : await validatePendingToolContinuation(
+                pending,
+                connection.organizationId,
+                { revalidateEligibility: revalidatePendingToolEligibility },
+              );
+        if (!validation.valid) {
+          await thread.post(validation.diagnosticCode).catch(() => undefined);
+          return;
+        }
       }
 
       const pattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;

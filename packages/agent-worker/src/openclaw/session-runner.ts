@@ -129,7 +129,10 @@ import {
   enforceBashCommandPolicy,
   isToolAllowedByPolicy,
 } from "./tool-policy";
-import { toolRouterRetainedMemoryStats } from "./tool-router-memory-budget";
+import {
+  toolRouterRetainedMemoryStats,
+  type ToolRouterCacheContext,
+} from "./tool-router-memory-budget";
 import { buildToolUseEventPayload } from "./tool-use-events";
 import { createOpenClawTools } from "./tools";
 import { clearSnapshots, hydrateFromSnapshot } from "./transcript-snapshot";
@@ -240,9 +243,31 @@ export function buildToolRouterJourneyEventInput(params: {
       effective_release_reason: selectionTrace.effectiveReleaseReason
         ? boundedRouterString(selectionTrace.effectiveReleaseReason, 80)
         : undefined,
+      release_environment: selectionTrace.releaseEnvironment,
+      release_agent_id: selectionTrace.releaseAgentId,
+      release_id: selectionTrace.releaseId,
+      release_sequence: selectionTrace.releaseSequence,
+      release_snapshot_digest: selectionTrace.releaseSnapshotDigest?.slice(
+        0,
+        16
+      ),
+      release_snapshot_expires_at: selectionTrace.releaseSnapshotExpiresAt,
+      release_snapshot_expired: selectionTrace.releaseSnapshotExpired,
+      execution_intent: selectionTrace.executionIntent,
+      reminder_correlation_id: params.trace.turnId,
       cache_hit: selectionTrace.cacheHit,
       tool_count: boundedRouterCount(selectionTrace.totalTools),
       eligible_tool_count: boundedRouterCount(selectionTrace.eligibleToolCount),
+      effective_allowed_tool_count: boundedRouterCount(
+        selectionTrace.effectiveAllowedToolCount ??
+          selectionTrace.eligibleToolCount
+      ),
+      effective_blocked_tool_count: boundedRouterCount(
+        selectionTrace.effectiveBlockedToolCount ?? 0
+      ),
+      effective_blocked_reasons: (selectionTrace.effectiveBlockedReasons ?? [])
+        .slice(0, 12)
+        .map((value) => boundedRouterString(value, 80)),
       explicit_destinations: selectionTrace.explicitDestinations
         .slice(0, 8)
         .map((value) => boundedRouterString(value, 80)),
@@ -397,6 +422,9 @@ export function initializeExternalTurnToolRouting(
     effectiveReleaseReason?: string;
     configuredRouterMode?: ToolRouterMode;
     routerGateReason?: string;
+    effectiveAllowedToolCount?: number;
+    effectiveBlockedToolCount?: number;
+    effectiveBlockedReasons?: string[];
   },
   dependencies: Partial<ExternalTurnToolRoutingDependencies> = {}
 ): ExternalTurnToolRouting {
@@ -410,10 +438,15 @@ export function initializeExternalTurnToolRouting(
     effectiveReleaseReason,
     configuredRouterMode,
     routerGateReason,
+    effectiveAllowedToolCount,
+    effectiveBlockedToolCount,
+    effectiveBlockedReasons,
     ...rawSelectionParams
   } = params;
   const evictionCountBefore = toolRouterRetainedMemoryStats().evictions;
-  const toolsByMcp = snapshotToolsByMcp(params.toolsByMcp);
+  const toolsByMcp = snapshotToolsByMcp(params.toolsByMcp, {
+    cacheContext: params.cacheContext,
+  });
   const allowedToolNames = params.allowedToolNames
     ? freezeStringArray([...params.allowedToolNames])
     : undefined;
@@ -438,6 +471,22 @@ export function initializeExternalTurnToolRouting(
       effectiveReleaseReason,
       configuredRouterMode,
       routerGateReason,
+      releaseEnvironment: params.cacheContext?.environment,
+      releaseAgentId: params.cacheContext?.agentId,
+      releaseId: params.cacheContext?.releaseId,
+      releaseSequence: params.cacheContext?.releaseSequence,
+      releaseSnapshotDigest: params.cacheContext?.snapshotDigest,
+      releaseSnapshotExpiresAt: params.cacheContext?.snapshotExpiresAt,
+      releaseSnapshotExpired: params.cacheContext
+        ? Date.parse(params.cacheContext.snapshotExpiresAt) <= Date.now()
+        : undefined,
+      executionIntent: (() => {
+        const intent = deriveTurnExecutionIntent(params.message);
+        return `${intent.destination}:${intent.operation ?? "none"}:${intent.confidence}`;
+      })(),
+      effectiveAllowedToolCount,
+      effectiveBlockedToolCount,
+      effectiveBlockedReasons,
     },
   });
   const routeTotalMs = Math.max(0, now() - routeStartedAt);
@@ -1803,6 +1852,23 @@ export async function runAISession(
         : context.releaseState?.status === "active"
           ? "release_capability_or_identity_mismatch"
           : `release_${context.releaseState?.status ?? "legacy_unenrolled"}`;
+  const toolRouterCacheContext: ToolRouterCacheContext | undefined =
+    context.releaseState?.status === "active"
+      ? {
+          environment: context.releaseState.claim.environment,
+          agentId: context.releaseState.claim.agentId,
+          releaseId: context.releaseState.claim.releaseId,
+          releaseSequence: context.releaseState.claim.releaseSequence,
+          snapshotDigest: context.releaseState.claim.snapshotDigest,
+          snapshotExpiresAt: context.releaseState.claim.expiresAt,
+          effectiveInventoryFingerprint: effectiveTools.fingerprint,
+          // The effective inventory fingerprint is a projection of both
+          // policy and grants. Keep explicit dimensions in the cache contract
+          // so they can split independently when upstream exposes them.
+          effectivePolicyFingerprint: effectiveTools.fingerprint,
+          grantProjectionFingerprint: effectiveTools.fingerprint,
+        }
+      : undefined;
   const toolRouting = initializeExternalTurnToolRouting(
     {
       toolsByMcp: effectiveTools.toolsByMcp,
@@ -1821,6 +1887,12 @@ export async function runAISession(
         personalReminderDeliveryBlockedReason,
       configuredRouterMode: configuredToolRouterMode,
       routerGateReason,
+      effectiveAllowedToolCount: effectiveTools.allowedToolKeys.length,
+      effectiveBlockedToolCount: effectiveTools.blocked.length,
+      effectiveBlockedReasons: [
+        ...new Set(effectiveTools.blocked.map((entry) => entry.reason)),
+      ],
+      cacheContext: toolRouterCacheContext,
       trace: shifuTrace,
     },
     runAISessionDependencies

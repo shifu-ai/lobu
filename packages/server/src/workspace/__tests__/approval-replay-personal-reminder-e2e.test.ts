@@ -14,7 +14,11 @@ import {
 } from "../../__tests__/setup/test-fixtures.js";
 import { getTestDb } from "../../__tests__/setup/test-db.js";
 import { McpProxy } from "../../gateway/auth/mcp/proxy.js";
-import { storePendingTool } from "../../gateway/auth/mcp/pending-tool-store.js";
+import {
+  stableReleaseAuthorizationDigest,
+  stableToolEligibilityDigest,
+  storePendingTool,
+} from "../../gateway/auth/mcp/pending-tool-store.js";
 import { createToolApprovalService } from "../../gateway/auth/mcp/tool-approval-service.js";
 import {
   ensureDbForGatewayTests,
@@ -95,7 +99,10 @@ function activeState(input: {
       releaseSequence: 1,
       snapshotDigest: input.sha,
       expiresAt: input.expiresAt ?? new Date(Date.now() + 30_000).toISOString(),
-      capabilityIds: ["personal_reminder_delivery.v1"],
+      capabilityIds: [
+        "personal_reminder_delivery.v1",
+        "semantic_tool_router.effective_inventory.v1",
+      ],
     },
   };
 }
@@ -108,8 +115,12 @@ async function replay(input: {
   approvalId: string;
   identityAgentId?: string;
   omitOriginalRunIdentity?: boolean;
+  forceRevoked?: boolean;
 }) {
   const conversationId = `${input.agentId}_${input.ownerId}_line-e2e`;
+  const stableAuthorizationDigest = input.releaseState.status === "active"
+    ? stableReleaseAuthorizationDigest(input.releaseState.claim)
+    : "";
   await storePendingTool(input.approvalId, {
     mcpId: "lobu-memory",
     toolName: "manage_schedules",
@@ -134,6 +145,25 @@ async function replay(input: {
     conversationId,
     channelId: "line-user-e2e",
     releaseState: input.releaseState,
+    ...(input.releaseState.status === "active"
+      ? {
+          releaseBinding: {
+            routerMode: "semantic" as const,
+            effectiveInventoryFingerprint: "b".repeat(64),
+            releaseId: input.releaseState.claim.releaseId,
+            releaseSequence: input.releaseState.claim.releaseSequence,
+            snapshotDigest: input.releaseState.claim.snapshotDigest,
+            authorizationExpiresAt: input.releaseState.claim.expiresAt,
+            stableAuthorizationDigest,
+            eligibilityBindingDigest: stableToolEligibilityDigest({
+              mcpId: "lobu-memory",
+              toolName: "manage_schedules",
+              effectiveInventoryFingerprint: "b".repeat(64),
+              stableAuthorizationDigest,
+            }),
+          },
+        }
+      : {}),
     ...(input.omitOriginalRunIdentity
       ? {}
       : { originalRunIdentity: { runId: 91, deploymentName: "worker-e2e" } }),
@@ -185,6 +215,35 @@ async function replay(input: {
       mcpProxy: proxy,
       userAgentsStore: { ownsAgent: mock(async () => true) },
       organizationId: input.org.id,
+      ...(input.releaseState.status === "active" && !input.forceRevoked
+        ? {
+            resolveReleaseSnapshot: mock(async () => ({
+              schemaVersion: 1 as const,
+              environment: input.releaseState.status === "active"
+                ? input.releaseState.claim.environment
+                : "production" as const,
+              toolboxUserId: input.ownerId,
+              agentId: input.agentId,
+              capabilities: input.releaseState.status === "active"
+                ? [...input.releaseState.claim.capabilityIds]
+                : [],
+              appliedReleaseId: input.releaseState.status === "active"
+                ? input.releaseState.claim.releaseId
+                : undefined,
+              appliedReleaseSequence: input.releaseState.status === "active"
+                ? input.releaseState.claim.releaseSequence
+                : undefined,
+              snapshotDigest: input.releaseState.status === "active"
+                ? input.releaseState.claim.snapshotDigest
+                : undefined,
+              expiresAt: input.releaseState.status === "active"
+                ? input.releaseState.claim.expiresAt
+                : undefined,
+            })),
+            readReleaseState: mock(async () => input.releaseState),
+            revalidateEligibility: mock(async () => true),
+          }
+        : {}),
     }).submit({
       action: "approve_once",
       approvalId: input.approvalId,
@@ -236,12 +295,15 @@ describe("personal reminder approval replay trust bridge E2E", () => {
         approvalId: `approval-${failure}-e2e`,
         ...(failure === "identity_mismatch" ? { identityAgentId: "shifu-u-other" } : {}),
         ...(failure === "missing_identity" ? { omitOriginalRunIdentity: true } : {}),
+        ...(failure === "revoked" ? { forceRevoked: true } : {}),
       });
-      expect(result.status).toBe("executed");
-      if (failure === "identity_mismatch" || failure === "missing_identity") {
-        expect(result).toMatchObject({ result: { isError: true } });
+      if (failure === "expired" || failure === "revoked" || failure === "identity_mismatch") {
+        expect(result.status).toBe("stale");
       } else {
-        expect(JSON.stringify(result)).toContain("personal_reminder_release_inactive");
+        expect(result.status).toBe("executed");
+      }
+      if (failure === "missing_identity") {
+        expect(result).toMatchObject({ result: { isError: true } });
       }
       const [{ count }] = await getTestDb()<{ count: number }>`SELECT count(*)::int AS count FROM scheduled_jobs`;
       expect(count).toBe(0);

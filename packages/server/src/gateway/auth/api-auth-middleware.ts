@@ -69,7 +69,12 @@ export function createApiAuthMiddleware(opts: {
     if (opts.allowSettingsSession) {
       const session = await verifySettingsSession(c);
       if (session) {
-        return runWithContext({ userId: session.userId }, c, next);
+        return runWithContext({
+          userId: session.userId,
+          ...(session.organizationId
+            ? { organizationId: session.organizationId }
+            : {}),
+        }, c, next);
       }
     }
 

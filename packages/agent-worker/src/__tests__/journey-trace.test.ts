@@ -344,4 +344,55 @@ describe("worker journey trace", () => {
     });
     expect(String(inactiveEvent.effective_tools_fingerprint)).toHaveLength(16);
   });
+
+  test("emits bounded release provenance while rejecting arbitrary agent identifiers", () => {
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {},
+      message: "提醒我喝水",
+      budget: 1,
+    });
+    const trace = parseWorkerShifuTrace({
+      shifuTrace: {
+        trace_id: "tr_release_trace_1",
+        journey_id: "line_text_agent_turn",
+        turn_id: "turn-release-1",
+      },
+    });
+    const base = {
+      ...selection.trace,
+      releaseEnvironment: "production",
+      releaseAgentId: "shifu-u-safe_1",
+      releaseId: "release-17",
+      releaseSequence: 17,
+      releaseSnapshotDigest: `sha256:${"a".repeat(64)}`,
+      releaseSnapshotExpiresAt: "2099-01-01T00:00:00.000Z",
+      releaseSnapshotExpired: false,
+      executionIntent: "personal_reminder:create:explicit",
+    };
+    const safe = journeyEvent(
+      buildToolRouterJourneyEventInput({
+        trace,
+        selectionTrace: base,
+        totalMs: 1,
+      })
+    );
+    expect(safe).toMatchObject({
+      release_environment: "production",
+      release_agent_id: "shifu-u-safe_1",
+      release_id: "release-17",
+      release_sequence: 17,
+      release_snapshot_digest: "sha256:aaaaaaaaa",
+      release_snapshot_expired: false,
+      execution_intent: "personal_reminder:create:explicit",
+      reminder_correlation_id: "turn-release-1",
+    });
+    const unsafe = journeyEvent(
+      buildToolRouterJourneyEventInput({
+        trace,
+        selectionTrace: { ...base, releaseAgentId: "user@example.com" },
+        totalMs: 1,
+      })
+    );
+    expect(unsafe.release_agent_id).toBeUndefined();
+  });
 });

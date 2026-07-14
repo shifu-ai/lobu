@@ -10,6 +10,7 @@ import {
   searchToolRetrievalIndex,
   type ToolCandidateMatch,
 } from "./tool-retrieval-index";
+import type { ToolRouterCacheContext } from "./tool-router-memory-budget";
 import {
   buildToolRouteQuery,
   type ToolDestination,
@@ -59,6 +60,7 @@ export interface RouteToolEntriesParams {
   budget: number;
   reservedEntries: ToolCatalogEntry[];
   allowedToolNames?: Iterable<string>;
+  cacheContext?: ToolRouterCacheContext;
   retrieval?: {
     getOrBuild?: (
       descriptors: ReturnType<typeof getOrBuildToolDescriptor>[]
@@ -317,10 +319,11 @@ export function routeToolEntries({
   reservedEntries,
   allowedToolNames,
   retrieval,
+  cacheContext,
 }: RouteToolEntriesParams): ToolRouteDecision {
   const query = buildToolRouteQuery(message);
   if (!normalizeToolText(message)) {
-    return fallbackDecision(
+    const decision = fallbackDecision(
       {
         entries,
         message,
@@ -328,10 +331,12 @@ export function routeToolEntries({
         reservedEntries,
         allowedToolNames,
         retrieval,
+        cacheContext,
       },
       "empty_query",
       query.explicitDestinations
     );
+    return { ...decision, selectedEntries: [] };
   }
   try {
     const buildStartedAt = performance.now();
@@ -339,7 +344,8 @@ export function routeToolEntries({
       getOrBuildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex)
     );
     const cachedIndex = (retrieval?.getOrBuild ?? getOrBuildToolRetrievalIndex)(
-      descriptors
+      descriptors,
+      { cacheContext }
     );
     const index = cachedIndex.index;
     const eligibleKeys = eligibleIdentityKeys(entries, allowedToolNames);

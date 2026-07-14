@@ -460,6 +460,34 @@ describe("callMcpTool", () => {
     expect(capturedContentType).toBe("application/json");
   });
 
+  test.each([
+    "legacy",
+    "shadow",
+    "semantic",
+  ] as const)("binds the effective inventory for %s approval continuations", async (routerMode) => {
+    let headers = new Headers();
+    globalThis.fetch = mock(async (_url, init) => {
+      headers = new Headers(init?.headers);
+      return Response.json({ content: [], isError: false });
+    }) as unknown as typeof fetch;
+
+    await callMcpTool(
+      {
+        ...gw,
+        effectiveToolRouterMode: routerMode,
+        effectiveToolInventoryFingerprint: "a".repeat(64),
+      },
+      "lobu",
+      "search_memory",
+      {}
+    );
+
+    expect(headers.get("x-lobu-effective-tool-router-mode")).toBe(routerMode);
+    expect(headers.get("x-lobu-effective-tool-inventory-fingerprint")).toBe(
+      "a".repeat(64)
+    );
+  });
+
   test("sends POST method", async () => {
     let capturedMethod = "";
     globalThis.fetch = mock(

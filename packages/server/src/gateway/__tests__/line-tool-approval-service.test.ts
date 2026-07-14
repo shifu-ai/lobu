@@ -361,7 +361,7 @@ describe("createToolApprovalService", () => {
     }, new Date("2026-07-15T00:00:00.000Z"))).toBe(true);
   });
 
-  test("expired original carrier remains valid after a fresh stable renewal", () => {
+  test("expired original carrier cannot be blessed by a fresh same-release renewal", () => {
     const pending: PendingToolInvocation = {
       ...LINE_PENDING,
       releaseBinding: {
@@ -382,7 +382,7 @@ describe("createToolApprovalService", () => {
         snapshotDigest: `sha256:${"f".repeat(64)}`,
         expiresAt: "2099-01-01T00:01:00.000Z",
       },
-    }, new Date("2026-07-15T00:00:00.000Z"))).toBe(true);
+    }, new Date("2026-07-15T00:00:00.000Z"))).toBe(false);
   });
 
   test("rejects a stale semantic release before approve_all can grant or execute", async () => {
@@ -498,7 +498,73 @@ describe("createToolApprovalService", () => {
     expect(executeToolDirect).not.toHaveBeenCalled();
   });
 
-  test("executes semantic approve_all after an expired original carrier is freshly renewed", async () => {
+  test("active LINE continuation without a release binding fails closed", async () => {
+    await seedLinePending("ta-missing-binding", {
+      releaseState: { status: "active", claim: SEMANTIC_CLAIM },
+    });
+    const { grantStore, mcpProxy, service } = setupService();
+    expect(await service.submit({
+      action: "approve_once",
+      approvalId: "ta-missing-binding",
+      toolboxUserId: "toolbox-user-1",
+      lineUserId: "line-user-1",
+      agentId: "shifu-u-1",
+    })).toEqual({
+      status: "stale",
+      diagnosticCode: "approval_inventory_stale",
+    });
+    expect(grantStore.grant).not.toHaveBeenCalled();
+    expect(mcpProxy.executeToolDirect).not.toHaveBeenCalled();
+  });
+
+  test("deny introduced after claim is revalidated at the side-effect boundary", async () => {
+    await seedLinePending("ta-toctou", {
+      releaseState: { status: "active", claim: SEMANTIC_CLAIM },
+      releaseBinding: {
+        routerMode: "shadow",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: SEMANTIC_CLAIM.releaseId,
+        releaseSequence: SEMANTIC_CLAIM.releaseSequence,
+        snapshotDigest: SEMANTIC_CLAIM.snapshotDigest,
+        authorizationExpiresAt: SEMANTIC_CLAIM.expiresAt,
+        stableAuthorizationDigest: STABLE_SEMANTIC_DIGEST,
+        eligibilityBindingDigest: STABLE_ELIGIBILITY_DIGEST,
+      },
+    });
+    const eligibility = [true, false];
+    const grant = mock(async () => undefined);
+    const executeToolDirect = mock(async () => ({ content: [], isError: false }));
+    const service = createToolApprovalService({
+      grantStore: { grant, hasGrant: mock(async () => false), revoke: mock(async () => undefined) },
+      mcpProxy: { executeToolDirect },
+      userAgentsStore: { ownsAgent: mock(async () => true) },
+      organizationId: "org-1",
+      resolveReleaseSnapshot: mock(async () => ({
+        schemaVersion: 1 as const,
+        environment: "production" as const,
+        toolboxUserId: SEMANTIC_CLAIM.toolboxUserId,
+        agentId: SEMANTIC_CLAIM.agentId,
+        capabilities: [...SEMANTIC_CLAIM.capabilityIds],
+        appliedReleaseId: SEMANTIC_CLAIM.releaseId,
+        appliedReleaseSequence: SEMANTIC_CLAIM.releaseSequence,
+        snapshotDigest: SEMANTIC_CLAIM.snapshotDigest,
+        expiresAt: SEMANTIC_CLAIM.expiresAt,
+      })),
+      readReleaseState: mock(async () => ({ status: "active" as const, claim: SEMANTIC_CLAIM })),
+      revalidateEligibility: mock(async () => eligibility.shift() ?? false),
+    });
+    expect(await service.submit({
+      action: "approve_all",
+      approvalId: "ta-toctou",
+      toolboxUserId: "toolbox-user-1",
+      lineUserId: "line-user-1",
+      agentId: "shifu-u-1",
+    })).toEqual({ status: "stale", diagnosticCode: "approval_inventory_stale" });
+    expect(grant).not.toHaveBeenCalled();
+    expect(executeToolDirect).not.toHaveBeenCalled();
+  });
+
+  test("rejects semantic approve_all after an expired original carrier is freshly renewed", async () => {
     const releaseState = {
       status: "active" as const,
       claim: {
@@ -570,9 +636,12 @@ describe("createToolApprovalService", () => {
       })),
     });
 
-    expect((await submitApproveAll(service)).status).toBe("executed");
-    expect(grantStore.grant).toHaveBeenCalledTimes(1);
-    expect(mcpProxy.executeToolDirect).toHaveBeenCalledTimes(1);
+    expect(await submitApproveAll(service)).toEqual({
+      status: "stale",
+      diagnosticCode: "approval_inventory_stale",
+    });
+    expect(grantStore.grant).not.toHaveBeenCalled();
+    expect(mcpProxy.executeToolDirect).not.toHaveBeenCalled();
   });
 
   test("approve_all stores a global wildcard grant and executes one pending MCP tool", async () => {
@@ -722,19 +791,6 @@ describe("createToolApprovalService", () => {
       environment: "production" as const,
       reason: "capability_expired" as const,
     },
-    {
-      status: "active" as const,
-      claim: {
-        environment: "production" as const,
-        toolboxUserId: "toolbox-user-1",
-        agentId: "shifu-u-1",
-        releaseId: "release-expired",
-        releaseSequence: 1,
-        snapshotDigest: `sha256:${"a".repeat(64)}`,
-        expiresAt: new Date(Date.now() - 1_000).toISOString(),
-        capabilityIds: ["personal_reminder_delivery.v1"],
-      },
-    },
   ])("ordinary approval replay remains available for release state %#", async (releaseState) => {
     const originalFetch = globalThis.fetch;
     const approvalId = `ordinary-release-${releaseState.status}`;
@@ -820,9 +876,13 @@ describe("createToolApprovalService", () => {
         releaseSequence: 3,
         snapshotDigest: `sha256:${"a".repeat(64)}`,
         expiresAt: new Date(Date.now() + 30_000).toISOString(),
-        capabilityIds: ["personal_reminder_delivery.v1"],
+        capabilityIds: [
+          "personal_reminder_delivery.v1",
+          "semantic_tool_router.effective_inventory.v1",
+        ],
       },
     };
+    const stableAuthorizationDigest = stableReleaseAuthorizationDigest(releaseState.claim);
     await seedLinePending("ta-resign-run", {
       organizationId: "org-1",
       conversationId: "conv-1",
@@ -831,6 +891,22 @@ describe("createToolApprovalService", () => {
       toolName: "manage_schedules",
       args: { action: "list" },
       releaseState,
+      releaseBinding: {
+        routerMode: "legacy",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: releaseState.claim.releaseId,
+        releaseSequence: releaseState.claim.releaseSequence,
+        snapshotDigest: releaseState.claim.snapshotDigest,
+        authorizationExpiresAt: releaseState.claim.expiresAt,
+        stableAuthorizationDigest,
+        eligibilityBindingDigest: stableToolEligibilityDigest({
+          mcpId: "lobu-memory",
+          toolName: "manage_schedules",
+          connectionId: LINE_PENDING.connectionId,
+          effectiveInventoryFingerprint: "b".repeat(64),
+          stableAuthorizationDigest,
+        }),
+      },
       originalRunIdentity,
     });
     const stored = await getPendingTool("ta-resign-run");
@@ -881,6 +957,19 @@ describe("createToolApprovalService", () => {
         mcpProxy: proxy,
         userAgentsStore: { ownsAgent: mock(async () => true) },
         organizationId: "org-1",
+        resolveReleaseSnapshot: mock(async () => ({
+          schemaVersion: 1 as const,
+          environment: "production" as const,
+          toolboxUserId: "toolbox-user-1",
+          agentId: "shifu-u-1",
+          capabilities: [...releaseState.claim.capabilityIds],
+          appliedReleaseId: releaseState.claim.releaseId,
+          appliedReleaseSequence: releaseState.claim.releaseSequence,
+          snapshotDigest: releaseState.claim.snapshotDigest,
+          expiresAt: releaseState.claim.expiresAt,
+        })),
+        readReleaseState: mock(async () => releaseState),
+        revalidateEligibility: mock(async () => true),
       });
       expect(await service.submit({
         action: "approve_once",
@@ -991,6 +1080,8 @@ describe("createToolApprovalService", () => {
             conversationId: "conv-1",
             organizationId: "org-1",
             personalReminderDeliveryIntent: true,
+            effectiveToolRouterMode: "shadow",
+            effectiveToolInventoryFingerprint: "b".repeat(64),
           },
         ),
       )).toMatchObject({ status: "blocked-notified" });
@@ -998,6 +1089,10 @@ describe("createToolApprovalService", () => {
       expect(pending).toMatchObject({
         originalRunIdentity: { runId: 73, deploymentName: "worker-original" },
         releaseState,
+        releaseBinding: {
+          routerMode: "shadow",
+          effectiveInventoryFingerprint: "b".repeat(64),
+        },
         personalReminderDeliveryIntent: true,
       });
       expect(JSON.stringify(pending)).not.toContain(workerToken);

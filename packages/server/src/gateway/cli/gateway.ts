@@ -31,6 +31,7 @@ import { createImageRoutes } from "../routes/internal/images.js";
 import { createInteractionRoutes } from "../routes/internal/interactions.js";
 import { createToolApprovalRoutes } from "../routes/internal/tool-approvals.js";
 import { createWorkStateRoutes } from "../routes/internal/work-state.js";
+import { orgContext } from "../../lobu/stores/org-context.js";
 import { registerAutoOpenApiRoutes } from "../routes/openapi-auto.js";
 import { createAgentApi } from "../routes/public/agent.js";
 import { createAgentConfigRoutes } from "../routes/public/agent-config.js";
@@ -341,11 +342,16 @@ export function createGatewayApp(
           if (
             !caller.userId ||
             candidate.userId !== caller.userId ||
-            (caller.organizationId !== undefined &&
-              candidate.organizationId !== caller.organizationId) ||
+            !caller.organizationId ||
+            !candidate.organizationId ||
+            candidate.organizationId !== caller.organizationId ||
             (caller.agentId !== undefined && candidate.agentId !== caller.agentId)
           ) {
-            return { success: false, error: "Approval identity mismatch" };
+            return {
+              success: false,
+              error: "Approval identity mismatch",
+              status: 403,
+            };
           }
           const candidateDigest = pendingToolContinuationDigest(candidate);
           const organizationId = candidate.organizationId;
@@ -374,47 +380,66 @@ export function createGatewayApp(
           );
           if (!pending)
             return { success: false, error: "Request not found or expired" };
+          if (
+            pending.releaseBinding ||
+            pending.releaseState?.status === "active"
+          ) {
+            if (!organizationId || !approveMcpProxy) {
+              return { success: false, error: "approval_inventory_stale" };
+            }
+            const validation = await validatePendingToolContinuation(
+              pending,
+              organizationId,
+              { mcpProxy: approveMcpProxy },
+            );
+            if (!validation.valid) {
+              return { success: false, error: validation.diagnosticCode };
+            }
+          }
           const pattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;
           const expiresMap: Record<string, number | null> = {
             "1h": Date.now() + 3_600_000,
             "24h": Date.now() + 86_400_000,
             always: null,
           };
-          if (decision === "deny") {
+          const continueApproval = async () => {
+            if (decision === "deny") {
+              await approveGrantStore?.grant(
+                pending.agentId,
+                pattern,
+                null,
+                true
+              );
+              return { success: true };
+            }
             await approveGrantStore?.grant(
               pending.agentId,
               pattern,
-              null,
-              true
+              decision in expiresMap ? expiresMap[decision]! : null
             );
+            if (approveMcpProxy) {
+              const options = buildPendingToolExecutionOptions(pending);
+              const result = options
+                ? await approveMcpProxy.executeToolDirect(
+                    pending.agentId,
+                    pending.userId,
+                    pending.mcpId,
+                    pending.toolName,
+                    pending.args,
+                    options
+                  )
+                : await approveMcpProxy.executeToolDirect(
+                    pending.agentId,
+                    pending.userId,
+                    pending.mcpId,
+                    pending.toolName,
+                    pending.args
+                  );
+              return { success: true, result } as any;
+            }
             return { success: true };
-          }
-          await approveGrantStore?.grant(
-            pending.agentId,
-            pattern,
-            decision in expiresMap ? expiresMap[decision]! : null
-          );
-          if (approveMcpProxy) {
-            const options = buildPendingToolExecutionOptions(pending);
-            const result = options
-              ? await approveMcpProxy.executeToolDirect(
-                  pending.agentId,
-                  pending.userId,
-                  pending.mcpId,
-                  pending.toolName,
-                  pending.args,
-                  options
-                )
-              : await approveMcpProxy.executeToolDirect(
-                  pending.agentId,
-                  pending.userId,
-                  pending.mcpId,
-                  pending.toolName,
-                  pending.args
-                );
-            return { success: true, result } as any;
-          }
-          return { success: true };
+          };
+          return orgContext.run({ organizationId }, continueApproval);
         },
       });
       app.route("", agentApi);
