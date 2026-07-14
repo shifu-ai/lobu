@@ -3,6 +3,7 @@ import type { McpToolDef } from "@lobu/core";
 import {
 	buildRuntimeToolCatalog,
 	resolveDynamicToolBudget,
+	resolveToolRouterMode,
 	selectMcpToolsByMcpForTurn,
 	selectMcpToolsForTurn,
 } from "../openclaw/dynamic-tool-loader";
@@ -567,5 +568,110 @@ describe("selectMcpToolsForTurn", () => {
 		expect(resolveDynamicToolBudget("-2")).toBe(48);
 		expect(resolveDynamicToolBudget("0")).toBe(48);
 		expect(resolveDynamicToolBudget(" 12.9 ")).toBe(12);
+	});
+
+	test("defaults the rollout guard to shadow and accepts only known modes", () => {
+		expect(resolveToolRouterMode(undefined)).toBe("shadow");
+		expect(resolveToolRouterMode("")).toBe("shadow");
+		expect(resolveToolRouterMode("SEMANTIC")).toBe("shadow");
+		expect(resolveToolRouterMode("legacy")).toBe("legacy");
+		expect(resolveToolRouterMode("shadow")).toBe("shadow");
+		expect(resolveToolRouterMode("semantic")).toBe("semantic");
+	});
+
+	test("shadow keeps legacy visibility while tracing one semantic comparison", () => {
+		const distractors = Array.from({ length: 60 }, (_, index) =>
+			tool(`aaa_distractor_${index}`, {
+				description: "Unrelated synthetic utility",
+			}),
+		);
+		const result = selectMcpToolsByMcpForTurn({
+			toolsByMcp: {
+				aaa: distractors,
+				"lobu-memory": [
+					tool("manage_schedules", {
+						description: "Create a personal reminder schedule",
+					}),
+				],
+			},
+			message: "五分鐘後提醒我喝水",
+			budget: 12,
+			routerMode: "shadow",
+		});
+
+		expect(result.trace.routerMode).toBe("shadow");
+		expect(result.trace.selectedToolNames).not.toContain(
+			"lobu-memory/manage_schedules",
+		);
+		expect(result.trace.semanticSelectedToolNames).toContain(
+			"lobu-memory/manage_schedules",
+		);
+		expect(result.trace.selectionDiverged).toBe(true);
+	});
+
+	test("legacy mode preserves priority and intent visibility without semantic enforcement", () => {
+		const result = selectMcpToolsByMcpForTurn({
+			toolsByMcp: {
+				aaa: Array.from({ length: 20 }, (_, index) =>
+					tool(`aaa_distractor_${index}`),
+				),
+				"lobu-memory": [tool("manage_schedules")],
+			},
+			message: "五分鐘後提醒我喝水",
+			budget: 4,
+			routerMode: "legacy",
+		});
+
+		expect(result.trace.routerMode).toBe("legacy");
+		expect(result.trace.selectedToolNames).toEqual([
+			"aaa/aaa_distractor_0",
+			"aaa/aaa_distractor_1",
+			"aaa/aaa_distractor_2",
+			"aaa/aaa_distractor_3",
+		]);
+		expect(result.trace.semanticSelectedToolNames).toContain(
+			"lobu-memory/manage_schedules",
+		);
+		expect(result.trace.clarificationRequired).toBe(false);
+	});
+
+	test("semantic mode enforces semantic selection", () => {
+		const result = selectMcpToolsByMcpForTurn({
+			toolsByMcp: {
+				aaa: Array.from({ length: 60 }, (_, index) =>
+					tool(`aaa_distractor_${index}`),
+				),
+				"lobu-memory": [tool("manage_schedules")],
+			},
+			message: "五分鐘後提醒我喝水",
+			budget: 12,
+			routerMode: "semantic",
+		});
+
+		expect(result.trace.routerMode).toBe("semantic");
+		expect(result.trace.selectedToolNames).toContain(
+			"lobu-memory/manage_schedules",
+		);
+		expect(result.trace.selectedToolNames).toEqual(
+			result.trace.semanticSelectedToolNames,
+		);
+		expect(result.trace.selectionDiverged).toBe(false);
+	});
+
+	test("shadow traces ambiguity without enforcing clarification blocks", () => {
+		const result = selectMcpToolsByMcpForTurn({
+			toolsByMcp: {
+				"lobu-memory": [tool("manage_schedules")],
+				google_workspace: [tool("gws_calendar_events_create")],
+			},
+			message: "幫我排明天下午三點跟老師開會",
+			budget: 8,
+			routerMode: "shadow",
+		});
+
+		expect(result.trace.semanticClarificationRequired).toBe(true);
+		expect(result.trace.clarificationRequired).toBe(false);
+		expect(result.trace.blockedToolIdentityKeys).toEqual([]);
+		expect(result.trace.selectedToolNames).toHaveLength(2);
 	});
 });

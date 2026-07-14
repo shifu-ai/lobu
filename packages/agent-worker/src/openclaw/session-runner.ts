@@ -102,6 +102,7 @@ import {
   type SelectMcpToolsByMcpForTurnParams,
   type SelectMcpToolsByMcpForTurnResult,
   resolveDynamicToolBudget,
+  resolveToolRouterMode,
   selectMcpToolsByMcpForTurn,
 } from "./dynamic-tool-loader";
 import {
@@ -205,6 +206,7 @@ export function buildToolRouterJourneyEventInput(params: {
     status: selectionTrace.fallback === "router_error" ? "degraded" : "ok",
     fields: {
       router_version: selectionTrace.routerVersion,
+      router_mode: selectionTrace.routerMode,
       inventory_fingerprint: selectionTrace.inventoryFingerprint.slice(0, 16),
       cache_hit: selectionTrace.cacheHit,
       tool_count: boundedRouterCount(selectionTrace.totalTools),
@@ -215,6 +217,12 @@ export function buildToolRouterJourneyEventInput(params: {
       selected_tools: selectionTrace.selectedToolNames
         .slice(0, 48)
         .map((value) => boundedRouterString(value)),
+      semantic_selected_tools: selectionTrace.semanticSelectedToolNames
+        .slice(0, 48)
+        .map((value) => boundedRouterString(value)),
+      selection_diverged: selectionTrace.selectionDiverged,
+      semantic_clarification_required:
+        selectionTrace.semanticClarificationRequired,
       blocked_tools: selectionTrace.blockedToolNames
         .slice(0, 20)
         .map((value) => boundedRouterString(value)),
@@ -351,6 +359,9 @@ function freezeToolRoutingSelection(
   const trace = Object.freeze({
     ...selection.trace,
     selectedToolNames: freezeStringArray(selection.trace.selectedToolNames),
+    semanticSelectedToolNames: freezeStringArray(
+      selection.trace.semanticSelectedToolNames
+    ),
     omittedToolNames: freezeStringArray(selection.trace.omittedToolNames),
     pinnedBudgetOverflow: freezeStringArray(
       selection.trace.pinnedBudgetOverflow
@@ -1631,12 +1642,16 @@ export async function runAISession(
   const dynamicToolBudget = resolveDynamicToolBudget(
     process.env.LOBU_DYNAMIC_TOOL_BUDGET
   );
+  const toolRouterMode = resolveToolRouterMode(
+    process.env.LOBU_TOOL_ROUTER_MODE
+  );
   const toolRouting = initializeExternalTurnToolRouting(
     {
       toolsByMcp: context.mcpTools,
       message: userPrompt,
       budget: dynamicToolBudget,
       allowedToolNames: catalogAllowedToolNames,
+      routerMode: toolRouterMode,
       trace: shifuTrace,
     },
     runAISessionDependencies
@@ -1868,7 +1883,7 @@ Use it when the user references past discussions or you need context.`);
   const clarificationInstruction = toolRouting.clarificationInstruction;
   if (clarificationInstruction) instructionParts.push(clarificationInstruction);
   logger.info(
-    `Dynamic MCP tool selection: router=${selection.trace.routerVersion}, selected=${selection.trace.selectedToolNames.length}, eligible=${selection.trace.eligibleToolCount}, total=${selection.trace.totalTools}, clarification=${selection.trace.clarificationRequired}, cacheHit=${selection.trace.cacheHit}, totalMs=${routeTotalMs.toFixed(2)}, fallback=${selection.trace.fallback ?? "none"}`
+    `Dynamic MCP tool selection: router=${selection.trace.routerVersion}, mode=${selection.trace.routerMode}, selected=${selection.trace.selectedToolNames.length}, eligible=${selection.trace.eligibleToolCount}, total=${selection.trace.totalTools}, clarification=${selection.trace.clarificationRequired}, cacheHit=${selection.trace.cacheHit}, totalMs=${routeTotalMs.toFixed(2)}, fallback=${selection.trace.fallback ?? "none"}`
   );
 
   let customTools = createOpenClawCustomTools({

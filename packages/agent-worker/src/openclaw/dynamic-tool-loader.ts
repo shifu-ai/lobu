@@ -21,6 +21,10 @@ import {
 } from "./tool-router";
 
 export interface DynamicToolSelectionTrace {
+	routerMode: ToolRouterMode;
+	semanticSelectedToolNames: string[];
+	selectionDiverged: boolean;
+	semanticClarificationRequired: boolean;
 	primaryIntent: ToolIntent;
 	budget: number;
 	totalTools: number;
@@ -55,6 +59,7 @@ export interface SelectMcpToolsForTurnParams {
 	budget: number;
 	mcpId?: string;
 	allowedToolNames?: Iterable<string>;
+	routerMode?: ToolRouterMode;
 }
 
 export interface SelectMcpToolsForTurnResult {
@@ -67,6 +72,7 @@ export interface SelectGroupedMcpToolsForTurnParams {
 	userMessage: string;
 	maxProviderVisibleTools: number;
 	allowedToolNames?: Iterable<string>;
+	routerMode?: ToolRouterMode;
 }
 
 export interface SelectGroupedMcpToolsForTurnResult {
@@ -79,6 +85,7 @@ export interface SelectMcpToolsByMcpForTurnParams {
 	message: string;
 	budget: number;
 	allowedToolNames?: Iterable<string>;
+	routerMode?: ToolRouterMode;
 }
 
 export interface SelectMcpToolsByMcpForTurnResult {
@@ -92,6 +99,17 @@ export function resolveDynamicToolBudget(value: string | undefined): number {
 	const parsed = Number(trimmed);
 	if (!Number.isFinite(parsed) || parsed <= 0) return 48;
 	return Math.floor(parsed);
+}
+
+export type ToolRouterMode = "legacy" | "shadow" | "semantic";
+
+export function resolveToolRouterMode(
+	value: string | undefined,
+): ToolRouterMode {
+	if (value === "legacy" || value === "shadow" || value === "semantic") {
+		return value;
+	}
+	return "shadow";
 }
 
 function intentBoost(
@@ -145,7 +163,7 @@ function isPinnedDirectTool(entry: ToolCatalogEntry): boolean {
 	);
 }
 
-function selectRankedEntries(
+function selectLegacyRankedEntries(
 	entries: ToolCatalogEntry[],
 	primaryIntent: ToolIntent,
 	budget: number,
@@ -173,6 +191,7 @@ interface SharedToolSelection {
 	eligibleEntries: ToolCatalogEntry[];
 	pinnedBudgetOverflow: ToolCatalogEntry[];
 	route: ToolRouteDecision;
+	routerMode: ToolRouterMode;
 }
 
 function selectEntriesForTurn(
@@ -180,6 +199,7 @@ function selectEntriesForTurn(
 	message: string,
 	budget: number,
 	allowedToolNames?: Iterable<string>,
+	routerMode: ToolRouterMode = "semantic",
 ): SharedToolSelection {
 	const normalizedAllowedToolNames =
 		allowedToolNames === undefined ? undefined : [...allowedToolNames];
@@ -188,7 +208,7 @@ function selectEntriesForTurn(
 		normalizedAllowedToolNames,
 	);
 	const primaryIntent = classifyToolIntent(message);
-	const { selectedEntries: rankedEntries } = selectRankedEntries(
+	const { selectedEntries: rankedEntries } = selectLegacyRankedEntries(
 		entries,
 		primaryIntent,
 		entries.length,
@@ -211,25 +231,29 @@ function selectEntriesForTurn(
 		reservedEntries,
 		allowedToolNames: normalizedAllowedToolNames,
 	});
-	const eligibleKeys = new Set(
-		eligibleEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name)),
+	const legacySelection = selectLegacyRankedEntries(
+		eligibleEntries,
+		primaryIntent,
+		budget,
 	);
 
 	return {
 		primaryIntent,
-		selectedEntries: route.selectedEntries,
+		selectedEntries:
+			routerMode === "semantic"
+				? route.selectedEntries
+				: legacySelection.selectedEntries,
 		eligibleEntries,
-		pinnedBudgetOverflow: pinnedEntries
-			.filter((entry) =>
-				eligibleKeys.has(catalogToolKey(entry.mcpId, entry.name)),
-			)
-			.slice(budget),
+		pinnedBudgetOverflow: legacySelection.pinnedBudgetOverflow,
 		route,
+		routerMode,
 	};
 }
 
 function routeTraceFields(
 	route: ToolRouteDecision,
+	routerMode: ToolRouterMode,
+	selectedEntries: ToolCatalogEntry[],
 ): Pick<
 	DynamicToolSelectionTrace,
 	| "routerVersion"
@@ -249,17 +273,45 @@ function routeTraceFields(
 	| "clarificationQuestion"
 	| "clarificationReason"
 	| "clarificationChoices"
+	| "routerMode"
+	| "semanticSelectedToolNames"
+	| "selectionDiverged"
+	| "semanticClarificationRequired"
 > {
+	const selectedToolNames = selectedEntries.map(displayToolName);
+	const semanticSelectedToolNames = route.selectedEntries.map(displayToolName);
+	const semanticEnforced = routerMode === "semantic";
 	return {
+		routerMode,
+		semanticSelectedToolNames,
+		selectionDiverged:
+			selectedToolNames.length !== semanticSelectedToolNames.length ||
+			selectedToolNames.some(
+				(name, index) => name !== semanticSelectedToolNames[index],
+			),
+		semanticClarificationRequired: route.clarification !== undefined,
 		routerVersion: route.routerVersion,
 		explicitDestinations: route.explicitDestinations,
-		clarificationRequired: route.clarification !== undefined,
-		blockedToolNames: route.clarification?.blockedToolNames ?? [],
-		blockedToolKeys: route.clarification?.blockedToolKeys ?? [],
-		blockedToolIdentityKeys: route.clarification?.blockedToolIdentityKeys ?? [],
-		clarificationQuestion: route.clarification?.question,
-		clarificationReason: route.clarification?.reason,
-		clarificationChoices: route.clarification?.blockedToolNames,
+		clarificationRequired:
+			semanticEnforced && route.clarification !== undefined,
+		blockedToolNames: semanticEnforced
+			? (route.clarification?.blockedToolNames ?? [])
+			: [],
+		blockedToolKeys: semanticEnforced
+			? (route.clarification?.blockedToolKeys ?? [])
+			: [],
+		blockedToolIdentityKeys: semanticEnforced
+			? (route.clarification?.blockedToolIdentityKeys ?? [])
+			: [],
+		clarificationQuestion: semanticEnforced
+			? route.clarification?.question
+			: undefined,
+		clarificationReason: semanticEnforced
+			? route.clarification?.reason
+			: undefined,
+		clarificationChoices: semanticEnforced
+			? route.clarification?.blockedToolNames
+			: undefined,
 		candidates: route.candidates,
 		fallback: route.fallback,
 		inventoryFingerprint: route.inventoryFingerprint,
@@ -286,6 +338,7 @@ export function selectMcpToolsForTurn(
 			message: params.userMessage,
 			budget: params.maxProviderVisibleTools,
 			allowedToolNames: params.allowedToolNames,
+			routerMode: params.routerMode,
 		});
 		return {
 			selected: result.selectedTools,
@@ -303,11 +356,13 @@ export function selectMcpToolsForTurn(
 		eligibleEntries,
 		pinnedBudgetOverflow,
 		route,
+		routerMode,
 	} = selectEntriesForTurn(
 		entries,
 		params.message,
 		budget,
 		params.allowedToolNames,
+		params.routerMode,
 	);
 	const selectedKeys = new Set(
 		selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name)),
@@ -332,7 +387,7 @@ export function selectMcpToolsForTurn(
 			pinnedBudgetOverflow: pinnedBudgetOverflow.map(displayToolName),
 			selected: selectedTraceNames,
 			omitted: omittedToolNames,
-			...routeTraceFields(route),
+			...routeTraceFields(route, routerMode, selectedEntries),
 		},
 	};
 }
@@ -365,11 +420,13 @@ export function selectMcpToolsByMcpForTurn(
 		eligibleEntries,
 		pinnedBudgetOverflow,
 		route,
+		routerMode,
 	} = selectEntriesForTurn(
 		entries,
 		params.message,
 		budget,
 		params.allowedToolNames,
+		params.routerMode,
 	);
 	const selectedKeys = new Set(
 		selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name)),
@@ -401,7 +458,7 @@ export function selectMcpToolsByMcpForTurn(
 			pinnedBudgetOverflow: pinnedBudgetOverflow.map(displayToolName),
 			selected: selectedTraceNames,
 			omitted: omittedTraceNames,
-			...routeTraceFields(route),
+			...routeTraceFields(route, routerMode, selectedEntries),
 		},
 	};
 }

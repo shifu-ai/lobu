@@ -9,7 +9,10 @@ import {
 } from "../openclaw/tool-descriptor";
 import {
 	buildToolRetrievalIndex,
+	clearToolRetrievalIndexCacheForTests,
+	getOrBuildToolRetrievalIndex,
 	searchToolRetrievalIndex,
+	toolRetrievalIndexCacheStats,
 } from "../openclaw/tool-retrieval-index";
 import { routeToolEntries } from "../openclaw/tool-router";
 import { tokenizeToolText } from "../openclaw/tool-tokenizer";
@@ -197,6 +200,87 @@ describe("tool descriptors", () => {
 });
 
 describe("tool retrieval index", () => {
+	test("reuses the same immutable inventory index", () => {
+		clearToolRetrievalIndexCacheForTests();
+		const descriptors = Array.from({ length: 500 }, (_, index) =>
+			buildToolDescriptor(
+				tool(`tool_${index}`, `Search synthetic record ${index}`),
+				"synthetic",
+				index,
+			),
+		);
+
+		const first = getOrBuildToolRetrievalIndex(descriptors);
+		const second = getOrBuildToolRetrievalIndex(descriptors);
+
+		expect(first.index).toBe(second.index);
+		expect(first.cacheHit).toBe(false);
+		expect(second.cacheHit).toBe(true);
+	});
+
+	test("does not retain an index above the per-index cache budget", () => {
+		clearToolRetrievalIndexCacheForTests();
+		const descriptors = Array.from({ length: 600 }, (_, index) =>
+			buildToolDescriptor(
+				tool(`large_${index}`, `${index}-${"x".repeat(16_000)}`),
+				"synthetic",
+				index,
+			),
+		);
+
+		const first = getOrBuildToolRetrievalIndex(descriptors);
+		const second = getOrBuildToolRetrievalIndex(descriptors);
+
+		expect(first.index.mode).toBe("linear");
+		expect(first.index.estimatedBytes).toBeGreaterThan(16 * 1024 * 1024);
+		expect(first.cacheHit).toBe(false);
+		expect(second.cacheHit).toBe(false);
+		expect(toolRetrievalIndexCacheStats().entries).toBe(0);
+	});
+
+	test("linear fallback keeps the final tool searchable", () => {
+		const descriptors = Array.from({ length: 2_001 }, (_, index) =>
+			buildToolDescriptor(
+				tool(`tool_${index}`, `Synthetic utility ${index}`),
+				"synthetic",
+				index,
+			),
+		);
+		descriptors[2_000] = buildToolDescriptor(
+			tool("manage_schedules", "Manage delayed reminders"),
+			"lobu-memory",
+			2_000,
+		);
+
+		const index = buildToolRetrievalIndex(descriptors, { maxIndexBytes: 1 });
+
+		expect(index.mode).toBe("linear");
+		expect(
+			searchToolRetrievalIndex(index, "五分鐘後提醒我", 5)[0]?.descriptor.key,
+		).toBe("lobu-memory/manage_schedules");
+	});
+
+	test("LRU estimated bytes never exceed the worker cache budget", () => {
+		clearToolRetrievalIndexCacheForTests();
+		for (let version = 0; version < 20; version++) {
+			const descriptors = Array.from({ length: 500 }, (_, index) =>
+				buildToolDescriptor(
+					tool(
+						`tool_${version}_${index}`,
+						`Search version ${version} synthetic record ${index} ${"x".repeat(3_000)}`,
+					),
+					"synthetic",
+					index,
+				),
+			);
+			getOrBuildToolRetrievalIndex(descriptors);
+		}
+
+		expect(toolRetrievalIndexCacheStats().estimatedBytes).toBeLessThanOrEqual(
+			32 * 1024 * 1024,
+		);
+		expect(toolRetrievalIndexCacheStats().evictionCount).toBeGreaterThan(0);
+	});
 	test("ranks personal reminders and Google Calendar requests by semantics", () => {
 		const reminder = buildToolDescriptor(
 			tool("manage_schedules", "Manage agent schedules"),
@@ -289,9 +373,9 @@ describe("tool retrieval index", () => {
 		const inverted = buildToolRetrievalIndex(descriptors);
 		const linear = buildToolRetrievalIndex(descriptors, { maxIndexBytes: 1 });
 
-		expect(searchToolRetrievalIndex(inverted, "completely unrelated", 2)).toEqual(
-			[],
-		);
+		expect(
+			searchToolRetrievalIndex(inverted, "completely unrelated", 2),
+		).toEqual([]);
 		expect(searchToolRetrievalIndex(linear, "completely unrelated", 2)).toEqual(
 			[],
 		);
@@ -488,5 +572,40 @@ describe("tool router retrieval integration", () => {
 
 		expect(route.selectedEntries[0]?.name).toBe("search_students");
 		expect(route.fallback).toBeNull();
+	});
+
+	test("reuses inventory only while applying authorization per turn", () => {
+		clearToolRetrievalIndexCacheForTests();
+		const entries = [
+			catalogEntryForTool(tool("list_courses", "List courses"), 0, "school"),
+			catalogEntryForTool(
+				tool("search_students", "Search students", {
+					email: { type: "string", description: "學員電子郵件" },
+				}),
+				1,
+				"school",
+			),
+		];
+		const first = routeToolEntries({
+			entries,
+			message: "用 email 查學員",
+			budget: 1,
+			reservedEntries: [],
+			allowedToolNames: ["school/search_students"],
+		});
+		const second = routeToolEntries({
+			entries,
+			message: "用 email 查學員",
+			budget: 1,
+			reservedEntries: [],
+			allowedToolNames: ["school/list_courses"],
+		});
+
+		expect(first.cacheHit).toBe(false);
+		expect(second.cacheHit).toBe(true);
+		expect(second.estimatedIndexBytes).toBeGreaterThan(0);
+		expect(second.cacheEvictionCount).toBe(0);
+		expect(second.selectedEntries).toEqual([]);
+		expect(second.candidates).toEqual([]);
 	});
 });

@@ -1,7 +1,7 @@
 import type { ToolCatalogEntry } from "./tool-catalog";
 import { buildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
 import {
-	buildToolRetrievalIndex,
+	getOrBuildToolRetrievalIndex,
 	searchToolRetrievalIndex,
 	type ToolCandidateMatch,
 } from "./tool-retrieval-index";
@@ -214,7 +214,8 @@ export function routeToolEntries({
 	const descriptors = entries.map((entry) =>
 		buildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex),
 	);
-	const index = buildToolRetrievalIndex(descriptors);
+	const cachedIndex = getOrBuildToolRetrievalIndex(descriptors);
+	const index = cachedIndex.index;
 	const eligibleKeys = eligibleIdentityKeys(entries, allowedToolNames);
 	const buildMs = performance.now() - buildStartedAt;
 	const retrieveStartedAt = performance.now();
@@ -303,9 +304,9 @@ export function routeToolEntries({
 	return {
 		routerVersion: "semantic-v1",
 		inventoryFingerprint: index.fingerprint,
-		cacheHit: false,
+		cacheHit: cachedIndex.cacheHit,
 		estimatedIndexBytes: index.estimatedBytes,
-		cacheEvictionCount: 0,
+		cacheEvictionCount: cachedIndex.cacheEvictionCount,
 		timingMs: {
 			build: buildMs,
 			retrieve: retrieveMs,

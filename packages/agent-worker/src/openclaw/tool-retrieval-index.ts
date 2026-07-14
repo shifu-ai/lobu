@@ -2,7 +2,9 @@ import { TOOL_PRIORITY_WEIGHT } from "./tool-catalog";
 import { inventoryFingerprint, type ToolDescriptor } from "./tool-descriptor";
 import { normalizeToolText, tokenizeToolText } from "./tool-tokenizer";
 
-const DEFAULT_MAX_INDEX_BYTES = 16 * 1024 * 1024;
+const MAX_INDEX_BYTES = 16 * 1024 * 1024;
+const MAX_CACHE_BYTES = 32 * 1024 * 1024;
+const TOOL_RETRIEVAL_INDEX_SCHEMA = "semantic-v1";
 const MAX_QUERY_BYTES = 4 * 1024;
 const MAX_QUERY_TOKENS = 128;
 const SCORE_TIE_EPSILON = 1e-9;
@@ -38,6 +40,22 @@ export interface ToolRetrievalIndex {
 	readonly postings: ReadonlyMap<string, readonly number[]>;
 	readonly documentIdsByIdentity: ReadonlyMap<string, readonly number[]>;
 }
+
+export interface CachedToolRetrievalIndex {
+	index: ToolRetrievalIndex;
+	cacheHit: boolean;
+	buildMs: number;
+	cacheEvictionCount: number;
+}
+
+interface ToolRetrievalIndexCacheEntry {
+	index: ToolRetrievalIndex;
+	estimatedBytes: number;
+}
+
+const toolRetrievalIndexCache = new Map<string, ToolRetrievalIndexCacheEntry>();
+let toolRetrievalIndexCacheBytes = 0;
+let toolRetrievalIndexCacheEvictions = 0;
 
 interface TokenizedDescriptorFields {
 	allPositive: string[];
@@ -181,7 +199,7 @@ export function buildToolRetrievalIndex(
 ): ToolRetrievalIndex {
 	const immutableDescriptors = Object.freeze(descriptors.map(freezeDescriptor));
 	const fingerprint = inventoryFingerprint([...immutableDescriptors]);
-	const maxIndexBytes = options.maxIndexBytes ?? DEFAULT_MAX_INDEX_BYTES;
+	const maxIndexBytes = options.maxIndexBytes ?? MAX_INDEX_BYTES;
 	let estimatedBytes = immutableDescriptors.reduce(
 		(total, descriptor) => total + estimateDescriptorBytes(descriptor),
 		0,
@@ -294,6 +312,77 @@ export function buildToolRetrievalIndex(
 		postings: immutablePostings,
 		documentIdsByIdentity: immutableDocumentIdsByIdentity,
 	});
+}
+
+function retrievalIndexCacheKey(descriptors: ToolDescriptor[]): string {
+	return `${TOOL_RETRIEVAL_INDEX_SCHEMA}:${inventoryFingerprint(descriptors)}`;
+}
+
+export function getOrBuildToolRetrievalIndex(
+	descriptors: ToolDescriptor[],
+): CachedToolRetrievalIndex {
+	const startedAt = performance.now();
+	const cacheKey = retrievalIndexCacheKey(descriptors);
+	const cached = toolRetrievalIndexCache.get(cacheKey);
+	if (cached) {
+		toolRetrievalIndexCache.delete(cacheKey);
+		toolRetrievalIndexCache.set(cacheKey, cached);
+		return {
+			index: cached.index,
+			cacheHit: true,
+			buildMs: performance.now() - startedAt,
+			cacheEvictionCount: 0,
+		};
+	}
+
+	const index = buildToolRetrievalIndex(descriptors, {
+		maxIndexBytes: MAX_INDEX_BYTES,
+	});
+	let cacheEvictionCount = 0;
+	if (index.estimatedBytes <= MAX_INDEX_BYTES) {
+		while (
+			toolRetrievalIndexCache.size > 0 &&
+			toolRetrievalIndexCacheBytes + index.estimatedBytes > MAX_CACHE_BYTES
+		) {
+			const oldestKey = toolRetrievalIndexCache.keys().next().value;
+			if (oldestKey === undefined) break;
+			const oldest = toolRetrievalIndexCache.get(oldestKey);
+			toolRetrievalIndexCache.delete(oldestKey);
+			toolRetrievalIndexCacheBytes -= oldest?.estimatedBytes ?? 0;
+			cacheEvictionCount++;
+			toolRetrievalIndexCacheEvictions++;
+		}
+		toolRetrievalIndexCache.set(cacheKey, {
+			index,
+			estimatedBytes: index.estimatedBytes,
+		});
+		toolRetrievalIndexCacheBytes += index.estimatedBytes;
+	}
+
+	return {
+		index,
+		cacheHit: false,
+		buildMs: performance.now() - startedAt,
+		cacheEvictionCount,
+	};
+}
+
+export function toolRetrievalIndexCacheStats(): {
+	entries: number;
+	estimatedBytes: number;
+	evictionCount: number;
+} {
+	return {
+		entries: toolRetrievalIndexCache.size,
+		estimatedBytes: toolRetrievalIndexCacheBytes,
+		evictionCount: toolRetrievalIndexCacheEvictions,
+	};
+}
+
+export function clearToolRetrievalIndexCacheForTests(): void {
+	toolRetrievalIndexCache.clear();
+	toolRetrievalIndexCacheBytes = 0;
+	toolRetrievalIndexCacheEvictions = 0;
 }
 
 interface ScoringContext {
