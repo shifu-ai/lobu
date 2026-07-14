@@ -59,7 +59,6 @@ export interface RuntimeToolSearchMatch {
 
 interface RuntimeToolSearchContext {
   fingerprint: string;
-  indexRef: WeakRef<ToolRetrievalIndex>;
   entriesByIdentityKey: ReadonlyMap<string, RuntimeToolCatalogEntry>;
 }
 
@@ -77,7 +76,6 @@ function buildRuntimeToolSearchContext(
   const index = getOrBuildToolRetrievalIndex(descriptors).index;
   return {
     fingerprint: index.fingerprint,
-    indexRef: new WeakRef(index),
     entriesByIdentityKey: new Map(
       catalog.map(
         (entry) => [toolIdentityKey(entry.mcpId, entry.name), entry] as const,
@@ -88,22 +86,14 @@ function buildRuntimeToolSearchContext(
 
 function resolveRuntimeToolSearchIndex(
   catalog: RuntimeToolCatalogEntry[],
-  context: RuntimeToolSearchContext,
 ): ToolRetrievalIndex {
-  const previousIndex = context.indexRef.deref();
-  const descriptors =
-    previousIndex?.fingerprint === context.fingerprint
-      ? [...previousIndex.descriptors]
-      : catalog.map((entry) =>
-          getOrBuildToolDescriptor(
-            entry.tool,
-            entry.mcpId,
-            entry.originalIndex,
-          ),
-        );
+  const descriptors = catalog.map((entry) =>
+    getOrBuildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex),
+  );
   const index = getOrBuildToolRetrievalIndex(descriptors).index;
-  context.fingerprint = index.fingerprint;
-  context.indexRef = new WeakRef(index);
+  // The context intentionally retains no complete retrieval index. A cache
+  // eviction must rebuild through the shared, accounted coordinator instead
+  // of reviving an evicted index (or its descriptors) from a weak seed.
   return index;
 }
 
@@ -294,7 +284,7 @@ export function searchRuntimeToolCatalog(
       )
       .map((entry) => toolIdentityKey(entry.mcpId, entry.name)),
   );
-  const index = resolveRuntimeToolSearchIndex(catalog, context);
+  const index = resolveRuntimeToolSearchIndex(catalog);
   return searchToolRetrievalIndex(index, params.query, limit, eligibleKeys)
     .map((match) => {
       const entry = context.entriesByIdentityKey.get(

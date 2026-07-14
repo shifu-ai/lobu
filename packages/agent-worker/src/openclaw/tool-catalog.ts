@@ -151,6 +151,14 @@ function parseShifuToolMetadata(
   };
 }
 
+export function hasTrustedReadOnlyToolMetadata(
+  tool: McpToolDef,
+  mcpId: string
+): boolean {
+  const metadata = parseShifuToolMetadata(tool, mcpId);
+  return metadata?.readOnly === true && metadata.mutatesState === false;
+}
+
 export function catalogEntryForTool(
   tool: McpToolDef,
   originalIndex = 0,

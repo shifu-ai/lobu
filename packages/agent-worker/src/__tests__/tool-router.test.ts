@@ -189,21 +189,24 @@ describe("semantic tool routing authorization and write ambiguity", () => {
 		const plain = selectMcpToolsByMcpForTurn({
 			toolsByMcp: {
 				one: [
-					tool("shared", "Find shared records", {
+					tool("get_shared", "Find shared records", {
 						annotations: { readOnlyHint: true },
 					}),
 				],
 				two: [
-					tool("shared", "Find shared records", {
+					tool("get_shared", "Find shared records", {
 						annotations: { readOnlyHint: true },
 					}),
 				],
 			},
 			message: "shared",
 			budget: 2,
-			allowedToolNames: ["shared"],
+			allowedToolNames: ["get_shared"],
 		});
-		expect(plain.trace.selectedToolNames).toEqual(["one/shared", "two/shared"]);
+		expect(plain.trace.selectedToolNames).toEqual([
+			"one/get_shared",
+			"two/get_shared",
+		]);
 
 		const collision = selectMcpToolsByMcpForTurn({
 			toolsByMcp: {
@@ -222,18 +225,10 @@ describe("semantic tool routing authorization and write ambiguity", () => {
 	test("treats slash allow names exclusively as qualified names", () => {
 		const result = selectMcpToolsByMcpForTurn({
 			toolsByMcp: {
-				a: [
-					tool("b", "Find authorized records", {
-						annotations: { readOnlyHint: true },
-					}),
-				],
-				x: [
-					tool("a/b", "Find unauthorized records", {
-						annotations: { readOnlyHint: true },
-					}),
-				],
+				a: [tool("b", "Handle authorized records")],
+				x: [tool("a/b", "Handle unauthorized records")],
 			},
-			message: "find records",
+			message: "authorized records",
 			budget: 2,
 			allowedToolNames: ["a/b"],
 		});
@@ -426,7 +421,7 @@ describe("semantic tool routing authorization and write ambiguity", () => {
 		expect(result.trace.selectedToolNames).toEqual([expected]);
 	});
 
-	test("uses standard read-only annotations without trusting arbitrary metadata", () => {
+	test("uses recognized read names and conservative standard annotations", () => {
 		const result = selectMcpToolsByMcpForTurn({
 			toolsByMcp: {
 				read: [
@@ -445,6 +440,33 @@ describe("semantic tool routing authorization and write ambiguity", () => {
 			routerMode: "semantic",
 		});
 		expect(result.trace.clarificationRequired).toBe(false);
+	});
+
+	test("does not let untrusted read-only annotations downgrade opaque tools", () => {
+		const result = selectMcpToolsByMcpForTurn({
+			toolsByMcp: {
+				alpha: [
+					tool("do_alpha", "Handle shared request", {
+						annotations: { readOnlyHint: true },
+					}),
+				],
+				beta: [
+					tool("do_beta", "Handle shared request", {
+						annotations: { readOnlyHint: true },
+					}),
+				],
+			},
+			message: "handle shared request",
+			budget: 2,
+			routerMode: "semantic",
+		});
+
+		expect(result.trace.clarificationRequired).toBe(true);
+		expect(result.trace.blockedToolNames.sort()).toEqual([
+			"alpha/do_alpha",
+			"beta/do_beta",
+		]);
+		expect(result.trace.selectedToolNames).toEqual([]);
 	});
 
 	test("never interpolates an untrusted title into clarification text", () => {

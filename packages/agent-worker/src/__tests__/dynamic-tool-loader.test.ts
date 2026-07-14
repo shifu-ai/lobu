@@ -269,18 +269,18 @@ describe("selectMcpToolsForTurn", () => {
 	test("preserves original order for tools with equal ranking", () => {
 		const result = selectMcpToolsForTurn({
 			tools: [
-				tool("unknown_alpha", { annotations: { readOnlyHint: true } }),
-				tool("unknown_beta", { annotations: { readOnlyHint: true } }),
-				tool("unknown_gamma", { annotations: { readOnlyHint: true } }),
+				tool("search_unknown_alpha", { annotations: { readOnlyHint: true } }),
+				tool("search_unknown_beta", { annotations: { readOnlyHint: true } }),
+				tool("search_unknown_gamma", { annotations: { readOnlyHint: true } }),
 			],
 			message: "unknown",
 			budget: 3,
 		});
 
 		expect(result.selected.map((toolDef) => toolDef.name)).toEqual([
-			"unknown_alpha",
-			"unknown_beta",
-			"unknown_gamma",
+			"search_unknown_alpha",
+			"search_unknown_beta",
+			"search_unknown_gamma",
 		]);
 	});
 

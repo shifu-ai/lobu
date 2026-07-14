@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import type { McpToolDef } from "@lobu/core";
-import { catalogEntryForTool, type ToolPriority } from "./tool-catalog";
+import {
+	catalogEntryForTool,
+	hasTrustedReadOnlyToolMetadata,
+	type ToolPriority,
+} from "./tool-catalog";
 import type { ToolDestination, ToolOperation } from "./tool-route-query";
 import {
 	releaseToolRouterCacheEntry,
@@ -443,11 +447,15 @@ export function buildToolDescriptor(
 	const annotations = standardToolAnnotations(tool);
 	const hasMutatingAction = tokens.some((token) => MUTATING_ACTIONS.has(token));
 	const hasReadAction = tokens.some((token) => READ_ACTIONS.has(token));
+	const hasTrustedReadOnlyMetadata = hasTrustedReadOnlyToolMetadata(
+		tool,
+		mcpId,
+	);
 	const inferredMutating =
 		hasMutatingAction ||
 		annotations.destructiveHint === true ||
 		annotations.readOnlyHint === false ||
-		(!hasReadAction && annotations.readOnlyHint !== true);
+		(!hasReadAction && !hasTrustedReadOnlyMetadata);
 	const mutatesState =
 		override?.mutatesState ?? (entry.mutatesState || inferredMutating);
 	const descriptor: ToolDescriptor = {

@@ -210,8 +210,34 @@ describe("tool descriptors", () => {
 			"untrusted-remote",
 			1,
 		);
+		const selfLabeledOpaqueRead = buildToolDescriptor(
+			tool(
+				"do_alpha",
+				"Handle alpha",
+				{},
+				{
+					annotations: { readOnlyHint: true },
+				},
+			),
+			"untrusted-remote",
+			2,
+		);
+		const trustedOpaqueRead = buildToolDescriptor(
+			tool(
+				"do_alpha",
+				"Handle alpha",
+				{},
+				{
+					_meta: { shifuTool: { readOnly: true, mutatesState: false } },
+				},
+			),
+			"shifu-toolbox",
+			3,
+		);
 		expect(destructiveReadName.mutatesState).toBe(true);
 		expect(selfLabeledSave.mutatesState).toBe(true);
+		expect(selfLabeledOpaqueRead.mutatesState).toBe(true);
+		expect(trustedOpaqueRead.mutatesState).toBe(false);
 	});
 
 	test("reads metadata titles using dispatcher precedence", () => {
