@@ -85,6 +85,16 @@ function eligibleIdentityKeys(
 	);
 }
 
+export function filterEligibleToolEntries(
+	entries: ToolCatalogEntry[],
+	allowedToolNames: Iterable<string> | undefined,
+): ToolCatalogEntry[] {
+	const eligibleKeys = eligibleIdentityKeys(entries, allowedToolNames);
+	return entries.filter(
+		(entry) => !eligibleKeys || eligibleKeys.has(canonicalToolKey(entry)),
+	);
+}
+
 function retrievalQuery(
 	message: string,
 	operations: readonly string[],
@@ -101,15 +111,15 @@ function retrievalQuery(
 }
 
 function conflictsWithExplicitDestination(
-	match: ToolCandidateMatch,
+	descriptor: ToolCandidateMatch["descriptor"],
 	explicitDestinations: readonly ToolDestination[],
 ): boolean {
-	if (!match.descriptor.mutatesState || explicitDestinations.length === 0) {
+	if (!descriptor.mutatesState || explicitDestinations.length === 0) {
 		return false;
 	}
 	return (
-		match.descriptor.destinations.length > 0 &&
-		!match.descriptor.destinations.some((destination) =>
+		descriptor.destinations.length > 0 &&
+		!descriptor.destinations.some((destination) =>
 			explicitDestinations.includes(destination),
 		)
 	);
@@ -179,7 +189,15 @@ export function routeToolEntries({
 		eligibleKeys,
 	).filter(
 		(match) =>
-			!conflictsWithExplicitDestination(match, query.explicitDestinations),
+			!conflictsWithExplicitDestination(
+				match.descriptor,
+				query.explicitDestinations,
+			),
+	);
+	const descriptorsByIdentityKey = new Map(
+		descriptors.map(
+			(descriptor) => [descriptor.identityKey, descriptor] as const,
+		),
 	);
 	const entriesByIdentityKey = new Map(
 		descriptors.flatMap((descriptor, index) => {
@@ -199,18 +217,24 @@ export function routeToolEntries({
 	const blockedKeys = new Set(
 		blockedMatches.map((match) => match.descriptor.identityKey),
 	);
-	const eligibleEntries = entries.filter(
-		(entry) => !eligibleKeys || eligibleKeys.has(canonicalToolKey(entry)),
-	);
+	const eligibleEntries = filterEligibleToolEntries(entries, allowedToolNames);
 	const selectedEntries: ToolCatalogEntry[] = [];
 	const selectedKeys = new Set<string>();
 
 	for (const entry of [
-		...reservedEntries.filter(
-			(entry) =>
-				(!eligibleKeys || eligibleKeys.has(canonicalToolKey(entry))) &&
-				!blockedKeys.has(canonicalToolKey(entry)),
-		),
+		...reservedEntries.filter((entry) => {
+			const identityKey = canonicalToolKey(entry);
+			const descriptor = descriptorsByIdentityKey.get(identityKey);
+			return (
+				(!eligibleKeys || eligibleKeys.has(identityKey)) &&
+				!blockedKeys.has(identityKey) &&
+				descriptor !== undefined &&
+				!conflictsWithExplicitDestination(
+					descriptor,
+					query.explicitDestinations,
+				)
+			);
+		}),
 		...scoredEntries
 			.filter(({ entry, score }) => {
 				if (blockedKeys.has(canonicalToolKey(entry)) || score.totalScore <= 0) {
@@ -221,8 +245,8 @@ export function routeToolEntries({
 						candidate.descriptor.identityKey === canonicalToolKey(entry),
 				);
 				return (
-					!entry.mutatesState ||
-					(match !== undefined &&
+					match !== undefined &&
+					(!match.descriptor.mutatesState ||
 						isRelevantMutatingMatch(
 							match,
 							query.operations,
@@ -231,9 +255,18 @@ export function routeToolEntries({
 				);
 			})
 			.map(({ entry }) => entry),
-		...eligibleEntries.filter(
-			(entry) => entry.readOnly && !blockedKeys.has(canonicalToolKey(entry)),
-		),
+		...eligibleEntries.filter((entry) => {
+			const identityKey = canonicalToolKey(entry);
+			const descriptor = descriptorsByIdentityKey.get(identityKey);
+			return (
+				descriptor?.readOnly === true &&
+				!blockedKeys.has(identityKey) &&
+				!conflictsWithExplicitDestination(
+					descriptor,
+					query.explicitDestinations,
+				)
+			);
+		}),
 	]) {
 		if (selectedEntries.length >= budget) break;
 		const key = canonicalToolKey(entry);
@@ -253,7 +286,7 @@ export function routeToolEntries({
 						reason: "conflicting_destination",
 						question: CLARIFICATION_QUESTION,
 						blockedToolKeys: blockedMatches.map(
-							(match) => match.descriptor.identityKey,
+							(match) => match.descriptor.key,
 						),
 						blockedToolNames: blockedMatches
 							.map((match) => match.descriptor.key)

@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { McpToolDef } from "@lobu/core";
 import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
+import { catalogEntryForTool } from "../openclaw/tool-catalog";
+import { buildToolRouteQuery } from "../openclaw/tool-route-query";
+import { routeToolEntries } from "../openclaw/tool-router";
 
 function tool(name: string, description: string): McpToolDef {
 	return {
@@ -70,13 +73,19 @@ describe("semantic tool routing authorization and write ambiguity", () => {
 		expect(result.trace.clarificationChoices ?? []).not.toContain(
 			"google_workspace/gws_calendar_events_create",
 		);
+		expect(result.trace.omittedToolNames).not.toContain(
+			"google_workspace/gws_calendar_events_create",
+		);
+		expect(result.trace.omitted).not.toContain(
+			"google_workspace/gws_calendar_events_create",
+		);
 	});
 
 	test("selects only the reminder destination when explicitly requested", () => {
 		const result = selectMcpToolsByMcpForTurn({
 			toolsByMcp: schedulingTools(),
 			message: "五分鐘後提醒我吃午餐",
-			budget: 1,
+			budget: 12,
 		});
 
 		expect(result.trace.clarificationRequired).toBe(false);
@@ -89,12 +98,34 @@ describe("semantic tool routing authorization and write ambiguity", () => {
 		const result = selectMcpToolsByMcpForTurn({
 			toolsByMcp: schedulingTools(),
 			message: "放進 Google Calendar",
-			budget: 1,
+			budget: 12,
 		});
 
 		expect(result.trace.clarificationRequired).toBe(false);
 		expect(result.trace.selectedToolNames).toEqual([
 			"google_workspace/gws_calendar_events_create",
+		]);
+	});
+
+	test("extracts read operations from Chinese requests", () => {
+		expect(buildToolRouteQuery("讀取會議紀錄").operations).toContain("read");
+	});
+
+	test("exposes qualified display keys in the clarification contract", () => {
+		const entries = [
+			catalogEntryForTool(manageSchedules, 0, "lobu-memory"),
+			catalogEntryForTool(createCalendarEvent, 1, "google_workspace"),
+		];
+		const route = routeToolEntries({
+			entries,
+			message: "幫我排明天下午三點跟老師開會",
+			budget: 12,
+			reservedEntries: [],
+		});
+
+		expect(route.clarification?.blockedToolKeys.sort()).toEqual([
+			"google_workspace/gws_calendar_events_create",
+			"lobu-memory/manage_schedules",
 		]);
 	});
 

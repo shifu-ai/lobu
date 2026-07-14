@@ -19,8 +19,9 @@ export interface ToolRouteQuery {
 const PERSONAL_REMINDER_PATTERN = /提醒我|叫我|稍後提醒|稍后提醒|remind\s+me/;
 const GOOGLE_CALENDAR_PATTERN = /google\s*calendar|行事曆|行事历|日曆|日历/;
 const OPERATION_PATTERNS: ReadonlyArray<
-	readonly [Exclude<ToolOperation, "read" | "unknown">, RegExp]
+	readonly [Exclude<ToolOperation, "unknown">, RegExp]
 > = [
+	["read", /讀取|读取|閱讀|阅读|read|get|list/],
 	["search", /搜尋|搜索|查找|幫我查|帮我查|search|find|lookup/],
 	["create", /建立|新增|創建|创建|create|add/],
 	["update", /更新|修改|編輯|编辑|update|edit/],

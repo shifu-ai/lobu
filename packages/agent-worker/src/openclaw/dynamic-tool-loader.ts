@@ -11,8 +11,10 @@ export {
 	type RuntimeToolCatalogEntry,
 } from "./tool-catalog-dispatcher";
 
+import { toolIdentityKey } from "./tool-descriptor";
 import { classifyToolIntent, type ToolIntent } from "./tool-intent";
 import {
+	filterEligibleToolEntries,
 	routeToolEntries,
 	type ToolCandidateScore,
 	type ToolRouteDecision,
@@ -159,6 +161,7 @@ function selectRankedEntries(
 interface SharedToolSelection {
 	primaryIntent: ToolIntent;
 	selectedEntries: ToolCatalogEntry[];
+	eligibleEntries: ToolCatalogEntry[];
 	pinnedBudgetOverflow: ToolCatalogEntry[];
 	route: ToolRouteDecision;
 }
@@ -169,6 +172,12 @@ function selectEntriesForTurn(
 	budget: number,
 	allowedToolNames?: Iterable<string>,
 ): SharedToolSelection {
+	const normalizedAllowedToolNames =
+		allowedToolNames === undefined ? undefined : [...allowedToolNames];
+	const eligibleEntries = filterEligibleToolEntries(
+		entries,
+		normalizedAllowedToolNames,
+	);
 	const primaryIntent = classifyToolIntent(message);
 	const { selectedEntries: rankedEntries } = selectRankedEntries(
 		entries,
@@ -191,13 +200,21 @@ function selectEntriesForTurn(
 		message,
 		budget,
 		reservedEntries,
-		allowedToolNames,
+		allowedToolNames: normalizedAllowedToolNames,
 	});
+	const eligibleKeys = new Set(
+		eligibleEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name)),
+	);
 
 	return {
 		primaryIntent,
 		selectedEntries: route.selectedEntries,
-		pinnedBudgetOverflow: pinnedEntries.slice(budget),
+		eligibleEntries,
+		pinnedBudgetOverflow: pinnedEntries
+			.filter((entry) =>
+				eligibleKeys.has(catalogToolKey(entry.mcpId, entry.name)),
+			)
+			.slice(budget),
 		route,
 	};
 }
@@ -255,19 +272,27 @@ export function selectMcpToolsForTurn(
 	const entries = params.tools.map((tool, index) =>
 		catalogEntryForTool(tool, index, params.mcpId),
 	);
-	const { primaryIntent, selectedEntries, pinnedBudgetOverflow, route } =
-		selectEntriesForTurn(
-			entries,
-			params.message,
-			budget,
-			params.allowedToolNames,
-		);
-	const selectedToolNames = new Set(
-		selectedEntries.map((entry) => entry.name).filter(Boolean),
+	const {
+		primaryIntent,
+		selectedEntries,
+		eligibleEntries,
+		pinnedBudgetOverflow,
+		route,
+	} = selectEntriesForTurn(
+		entries,
+		params.message,
+		budget,
+		params.allowedToolNames,
 	);
-	const omittedToolNames = entries
+	const selectedKeys = new Set(
+		selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name)),
+	);
+	const omittedToolNames = eligibleEntries
+		.filter(
+			(entry) => !selectedKeys.has(catalogToolKey(entry.mcpId, entry.name)),
+		)
 		.map((entry) => entry.name)
-		.filter((name) => name && !selectedToolNames.has(name));
+		.filter(Boolean);
 	const selectedTraceNames = selectedEntries.map((entry) => entry.name);
 
 	return {
@@ -275,7 +300,7 @@ export function selectMcpToolsForTurn(
 		trace: {
 			primaryIntent,
 			budget,
-			totalTools: params.tools.length,
+			totalTools: eligibleEntries.length,
 			selectedToolNames: selectedTraceNames,
 			omittedToolNames,
 			pinnedBudgetOverflow: pinnedBudgetOverflow.map(displayToolName),
@@ -287,7 +312,7 @@ export function selectMcpToolsForTurn(
 }
 
 function catalogToolKey(mcpId: string, toolName: string): string {
-	return `${mcpId}\u0000${toolName}`;
+	return toolIdentityKey(mcpId, toolName);
 }
 
 function displayToolName(entry: ToolCatalogEntry): string {
@@ -308,13 +333,18 @@ export function selectMcpToolsByMcpForTurn(
 		}
 	}
 
-	const { primaryIntent, selectedEntries, pinnedBudgetOverflow, route } =
-		selectEntriesForTurn(
-			entries,
-			params.message,
-			budget,
-			params.allowedToolNames,
-		);
+	const {
+		primaryIntent,
+		selectedEntries,
+		eligibleEntries,
+		pinnedBudgetOverflow,
+		route,
+	} = selectEntriesForTurn(
+		entries,
+		params.message,
+		budget,
+		params.allowedToolNames,
+	);
 	const selectedKeys = new Set(
 		selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name)),
 	);
@@ -327,7 +357,7 @@ export function selectMcpToolsByMcpForTurn(
 	}
 
 	const selectedTraceNames = selectedEntries.map(displayToolName);
-	const omittedTraceNames = entries
+	const omittedTraceNames = eligibleEntries
 		.filter(
 			(entry) => !selectedKeys.has(catalogToolKey(entry.mcpId, entry.name)),
 		)
@@ -338,7 +368,7 @@ export function selectMcpToolsByMcpForTurn(
 		trace: {
 			primaryIntent,
 			budget,
-			totalTools: entries.length,
+			totalTools: eligibleEntries.length,
 			selectedToolNames: selectedTraceNames,
 			omittedToolNames: omittedTraceNames,
 			pinnedBudgetOverflow: pinnedBudgetOverflow.map(displayToolName),
