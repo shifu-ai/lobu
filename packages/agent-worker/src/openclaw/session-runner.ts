@@ -91,6 +91,7 @@ import {
   isToolAllowedByPolicy,
 } from "./tool-policy";
 import { buildToolUseEventPayload } from "./tool-use-events";
+import { toolIdentityKey } from "./tool-descriptor";
 import { createOpenClawTools } from "./tools";
 import { clearSnapshots, hydrateFromSnapshot } from "./transcript-snapshot";
 import {
@@ -177,7 +178,11 @@ function boundedRouterString(value: string, maxLength = 160): string {
 }
 
 function boundedRouterNumber(value: number): number {
-  return Number.isFinite(value) ? value : 0;
+  return Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function boundedRouterCount(value: number): number {
+  return Math.floor(boundedRouterNumber(value));
 }
 
 export function buildToolRouterClarificationInstruction(
@@ -202,8 +207,8 @@ export function buildToolRouterJourneyEventInput(params: {
       router_version: selectionTrace.routerVersion,
       inventory_fingerprint: selectionTrace.inventoryFingerprint.slice(0, 16),
       cache_hit: selectionTrace.cacheHit,
-      tool_count: selectionTrace.totalTools,
-      eligible_tool_count: selectionTrace.eligibleToolCount,
+      tool_count: boundedRouterCount(selectionTrace.totalTools),
+      eligible_tool_count: boundedRouterCount(selectionTrace.eligibleToolCount),
       explicit_destinations: selectionTrace.explicitDestinations
         .slice(0, 8)
         .map((value) => boundedRouterString(value, 80)),
@@ -245,13 +250,19 @@ export function buildToolRouterJourneyEventInput(params: {
             }
           : undefined,
       })),
-      candidate_count: selectionTrace.candidateCount,
+      candidate_count: boundedRouterCount(selectionTrace.candidateCount),
       timing_ms: {
-        ...selectionTrace.timingMs,
-        total: params.totalMs,
+        build: boundedRouterNumber(selectionTrace.timingMs.build),
+        retrieve: boundedRouterNumber(selectionTrace.timingMs.retrieve),
+        rank: boundedRouterNumber(selectionTrace.timingMs.rank),
+        total: boundedRouterNumber(params.totalMs),
       },
-      estimated_index_bytes: selectionTrace.estimatedIndexBytes,
-      cache_eviction_count: selectionTrace.cacheEvictionCount,
+      estimated_index_bytes: boundedRouterCount(
+        selectionTrace.estimatedIndexBytes
+      ),
+      cache_eviction_count: boundedRouterCount(
+        selectionTrace.cacheEvictionCount
+      ),
       fallback: selectionTrace.fallback,
     },
   };
@@ -266,12 +277,69 @@ export interface ExternalTurnToolRouting {
   }): RuntimeToolCatalogEntry[];
 }
 
-interface ExternalTurnToolRoutingDependencies {
+export interface ExternalTurnToolRoutingDependencies {
   selectTools: (
     params: SelectMcpToolsByMcpForTurnParams
   ) => SelectMcpToolsByMcpForTurnResult;
   emitEvent: typeof emitJourneyEvent;
   now: () => number;
+}
+
+export interface RunAISessionDependencies extends Partial<ExternalTurnToolRoutingDependencies> {
+  sessionContextLoader: typeof getOpenClawSessionContext;
+  agentSessionBuilder: typeof buildAgentSession;
+}
+
+function freezeStringArray(values: readonly string[]): string[] {
+  return Object.freeze([...values]) as unknown as string[];
+}
+
+function freezeToolRoutingSelection(
+  selection: SelectMcpToolsByMcpForTurnResult
+): SelectMcpToolsByMcpForTurnResult {
+  const selectedTools = Object.freeze(
+    Object.fromEntries(
+      Object.entries(selection.selectedTools).map(([mcpId, tools]) => [
+        mcpId,
+        Object.freeze([...tools]),
+      ])
+    )
+  ) as unknown as SelectMcpToolsByMcpForTurnResult["selectedTools"];
+  const candidates = Object.freeze(
+    selection.trace.candidates.map((candidate) =>
+      Object.freeze({
+        ...candidate,
+        reasons: freezeStringArray(candidate.reasons),
+        scoreBreakdown: candidate.scoreBreakdown
+          ? Object.freeze({ ...candidate.scoreBreakdown })
+          : undefined,
+      })
+    )
+  ) as unknown as DynamicToolSelectionTrace["candidates"];
+  const trace = Object.freeze({
+    ...selection.trace,
+    selectedToolNames: freezeStringArray(selection.trace.selectedToolNames),
+    omittedToolNames: freezeStringArray(selection.trace.omittedToolNames),
+    pinnedBudgetOverflow: freezeStringArray(
+      selection.trace.pinnedBudgetOverflow
+    ),
+    selected: freezeStringArray(selection.trace.selected),
+    omitted: freezeStringArray(selection.trace.omitted),
+    explicitDestinations: freezeStringArray(
+      selection.trace.explicitDestinations
+    ),
+    blockedToolNames: freezeStringArray(selection.trace.blockedToolNames),
+    blockedToolKeys: freezeStringArray(selection.trace.blockedToolKeys),
+    blockedToolIdentityKeys: freezeStringArray(
+      selection.trace.blockedToolIdentityKeys
+    ),
+    clarificationChoices: selection.trace.clarificationChoices
+      ? freezeStringArray(selection.trace.clarificationChoices)
+      : undefined,
+    candidates,
+    timingMs: Object.freeze({ ...selection.trace.timingMs }),
+  }) as DynamicToolSelectionTrace;
+  return Object.freeze({ selectedTools, trace });
 }
 
 export function initializeExternalTurnToolRouting(
@@ -285,7 +353,7 @@ export function initializeExternalTurnToolRouting(
   const now = dependencies.now ?? performance.now.bind(performance);
   const { trace, ...selectionParams } = params;
   const routeStartedAt = now();
-  const selection = selectTools(selectionParams);
+  const selection = freezeToolRoutingSelection(selectTools(selectionParams));
   const routeTotalMs = Math.max(0, now() - routeStartedAt);
   emitEvent(
     buildToolRouterJourneyEventInput({
@@ -311,7 +379,7 @@ export function initializeExternalTurnToolRouting(
         selectedTools: selection.selectedTools,
         providerVisibleTools,
         allowedToolNames: params.allowedToolNames,
-        clarificationBlockedToolKeys: selection.trace.blockedToolNames,
+        clarificationBlockedToolKeys: selection.trace.blockedToolIdentityKeys,
       }),
   });
 }
@@ -804,6 +872,8 @@ export interface RunAISessionParams {
     provider: string,
     modelId: string
   ) => string;
+  /** Injectable run seams; production always uses the module defaults. */
+  runAISessionDependencies?: Partial<RunAISessionDependencies>;
 }
 
 export function resolveGatewayWorkerToken(
@@ -1146,6 +1216,7 @@ export async function runAISession(
     loadImageAttachments,
     maybeRunPreCompactionMemoryFlush,
     maybeBuildAuthHintMessage,
+    runAISessionDependencies,
   } = params;
   const automationModificationTurn =
     buildTrustedAutomationModificationTurnContext({
@@ -1192,7 +1263,9 @@ export async function runAISession(
 
   // Fetch session context BEFORE model resolution. Pass `mcpExposure` so
   // MCP setup instructions use the right call syntax.
-  const context = await getOpenClawSessionContext({
+  const contextLoader =
+    runAISessionDependencies?.sessionContextLoader ?? getOpenClawSessionContext;
+  const context = await contextLoader({
     mcpExposure,
     shifuTrace,
   });
@@ -1493,6 +1566,41 @@ export async function runAISession(
       | undefined,
   });
 
+  const collectAllowedMcpTools = (
+    toolsByMcp: Record<string, McpToolDef[]>
+  ): { names: string[]; keys: string[] } => {
+    const names: string[] = [];
+    const keys: string[] = [];
+    for (const [mcpId, toolsForMcp] of Object.entries(toolsByMcp)) {
+      for (const tool of toolsForMcp) {
+        const toolName = tool.name?.trim();
+        if (!toolName || !isToolAllowedByPolicy(toolName, toolsPolicy))
+          continue;
+        names.push(toolName, `${mcpId}/${toolName}`);
+        keys.push(toolIdentityKey(mcpId, toolName));
+      }
+    }
+    return { names, keys };
+  };
+  const initialAllowedMcpTools = collectAllowedMcpTools(context.mcpTools);
+  const catalogAllowedToolNames = initialAllowedMcpTools.names;
+  const dynamicToolBudget = resolveDynamicToolBudget(
+    process.env.LOBU_DYNAMIC_TOOL_BUDGET
+  );
+  const toolRouting = initializeExternalTurnToolRouting(
+    {
+      toolsByMcp: context.mcpTools,
+      message: userPrompt,
+      budget: dynamicToolBudget,
+      allowedToolNames: catalogAllowedToolNames,
+      trace: shifuTrace,
+    },
+    runAISessionDependencies
+  );
+  const selection = toolRouting.selection;
+  const routeTotalMs = toolRouting.routeTotalMs;
+  const selectedMcpToolsForTurn = selection.selectedTools;
+
   // Build a mutable snapshot of MCP runtime state. The embedded CLI handlers
   // read through `mcpRuntimeRef.current` so that `auth check` / `logout` can
   // swap in refreshed tools/state without rebuilding Bash. `refresh()` re-
@@ -1503,6 +1611,8 @@ export async function runAISession(
       mcpTools: applyCapabilityLimitNotes(context.mcpTools),
       mcpStatus: context.mcpStatus,
       mcpContext: context.mcpContext,
+      allowedToolKeys: Object.freeze([...initialAllowedMcpTools.keys]),
+      clarificationBlockedToolKeys: selection.trace.blockedToolIdentityKeys,
     },
     ...(mcpExposure === "cli" && {
       refresh: async () => {
@@ -1511,10 +1621,16 @@ export async function runAISession(
             mcpExposure,
             shifuTrace,
           });
+          const refreshedAllowedMcpTools = collectAllowedMcpTools(
+            fresh.mcpTools
+          );
           return {
             mcpTools: applyCapabilityLimitNotes(fresh.mcpTools),
             mcpStatus: fresh.mcpStatus,
             mcpContext: fresh.mcpContext,
+            allowedToolKeys: Object.freeze([...refreshedAllowedMcpTools.keys]),
+            clarificationBlockedToolKeys:
+              selection.trace.blockedToolIdentityKeys,
           };
         } catch (err) {
           logger.warn(
@@ -1704,28 +1820,6 @@ Use it when the user references past discussions or you need context.`);
     },
   });
 
-  const dynamicToolBudget = resolveDynamicToolBudget(
-    process.env.LOBU_DYNAMIC_TOOL_BUDGET
-  );
-  const catalogAllowedToolNames: string[] = [];
-  for (const [mcpId, toolsForMcp] of Object.entries(context.mcpTools)) {
-    for (const tool of toolsForMcp) {
-      const toolName = tool.name?.trim();
-      if (!toolName || !isToolAllowedByPolicy(toolName, toolsPolicy)) continue;
-      catalogAllowedToolNames.push(toolName, `${mcpId}/${toolName}`);
-    }
-  }
-
-  const toolRouting = initializeExternalTurnToolRouting({
-    toolsByMcp: context.mcpTools,
-    message: userPrompt,
-    budget: dynamicToolBudget,
-    allowedToolNames: catalogAllowedToolNames,
-    trace: shifuTrace,
-  });
-  const selection = toolRouting.selection;
-  const routeTotalMs = toolRouting.routeTotalMs;
-  const selectedMcpToolsForTurn = selection.selectedTools;
   const clarificationInstruction = toolRouting.clarificationInstruction;
   if (clarificationInstruction) instructionParts.push(clarificationInstruction);
   logger.info(
@@ -2001,7 +2095,9 @@ Use it when the user references past discussions or you need context.`);
   };
 
   try {
-    const createdSession = await buildAgentSession({
+    const agentSessionBuilder =
+      runAISessionDependencies?.agentSessionBuilder ?? buildAgentSession;
+    const createdSession = await agentSessionBuilder({
       cwd: workspaceDir,
       model,
       // pi's createAgentSession() uses `tools` only to derive active tool

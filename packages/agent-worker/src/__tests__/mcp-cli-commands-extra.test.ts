@@ -12,6 +12,7 @@ import {
 } from "../embedded/mcp-cli-commands";
 import { capEmbeddedBashStreamOutput } from "../embedded/just-bash-bootstrap";
 import type { GatewayParams } from "../shared/tool-implementations";
+import { toolIdentityKey } from "../openclaw/tool-descriptor";
 
 const gw: GatewayParams = {
   gatewayUrl: "http://gateway",
@@ -28,6 +29,8 @@ function makeRef(overrides: Partial<McpRuntimeState> = {}): McpRuntimeRef {
       mcpTools: overrides.mcpTools ?? {},
       mcpStatus: overrides.mcpStatus ?? [],
       mcpContext: overrides.mcpContext ?? {},
+      allowedToolKeys: overrides.allowedToolKeys,
+      clarificationBlockedToolKeys: overrides.clarificationBlockedToolKeys,
     },
   };
 }
@@ -60,18 +63,12 @@ const undescribedTool: McpToolDef = {
 // ---------------------------------------------------------------------------
 
 describe("isMcpIdReserved (edge cases)", () => {
-  test.each([
-    "cd",
-    "echo",
-    "export",
-    "test",
-    "true",
-    "false",
-    "set",
-    "unset",
-  ])("rejects bash builtin %s", (name) => {
-    expect(isMcpIdReserved(name)).toContain("reserved");
-  });
+  test.each(["cd", "echo", "export", "test", "true", "false", "set", "unset"])(
+    "rejects bash builtin %s",
+    (name) => {
+      expect(isMcpIdReserved(name)).toContain("reserved");
+    }
+  );
 
   test.each([".", ":", "["])("rejects POSIX builtin %s", (name) => {
     expect(isMcpIdReserved(name)).toContain("reserved");
@@ -314,6 +311,43 @@ describe("auth subcommand routing", () => {
     expect(r.exitCode).toBe(0);
     expect(refreshCalls).toBe(1);
     expect(ref.current.mcpTools.lobu).toEqual([lobuTool]);
+  });
+
+  test("auth refresh preserves the turn-local clarification block", async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({ authenticated: true })
+    ) as unknown as typeof fetch;
+    const blockedKey = toolIdentityKey("lobu", "search_memory");
+    const gatewayCalls: string[] = [];
+    const ref: McpRuntimeRef = {
+      current: {
+        mcpTools: {},
+        mcpStatus: [],
+        mcpContext: {},
+        allowedToolKeys: [blockedKey],
+        clarificationBlockedToolKeys: [blockedKey],
+      },
+      refresh: async () => ({
+        mcpTools: { lobu: [lobuTool] },
+        mcpStatus: [],
+        mcpContext: {},
+      }),
+    };
+    const handler = buildMcpServerHandler("lobu", ref, gw, {
+      callTool: async () => {
+        gatewayCalls.push("called");
+        return { content: [] };
+      },
+    });
+
+    await handler(["auth", "check"], {});
+    const result = await handler(["search_memory"], {
+      stdin: '{"query":"secret"}',
+    });
+
+    expect(JSON.parse(result.stderr).error).toBe("clarification_required");
+    expect(gatewayCalls).toHaveLength(0);
+    expect(ref.current.clarificationBlockedToolKeys).toEqual([blockedKey]);
   });
 
   test("auth check refresh failure is swallowed (does not throw)", async () => {

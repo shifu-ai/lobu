@@ -34,6 +34,8 @@ export interface DynamicToolSelectionTrace {
 	explicitDestinations: string[];
 	clarificationRequired: boolean;
 	blockedToolNames: string[];
+	blockedToolKeys: string[];
+	blockedToolIdentityKeys: string[];
 	clarificationQuestion?: string;
 	clarificationReason?: string;
 	clarificationChoices?: string[];
@@ -234,6 +236,8 @@ function routeTraceFields(
 	| "explicitDestinations"
 	| "clarificationRequired"
 	| "blockedToolNames"
+	| "blockedToolKeys"
+	| "blockedToolIdentityKeys"
 	| "candidates"
 	| "fallback"
 	| "inventoryFingerprint"
@@ -251,6 +255,8 @@ function routeTraceFields(
 		explicitDestinations: route.explicitDestinations,
 		clarificationRequired: route.clarification !== undefined,
 		blockedToolNames: route.clarification?.blockedToolNames ?? [],
+		blockedToolKeys: route.clarification?.blockedToolKeys ?? [],
+		blockedToolIdentityKeys: route.clarification?.blockedToolIdentityKeys ?? [],
 		clarificationQuestion: route.clarification?.question,
 		clarificationReason: route.clarification?.reason,
 		clarificationChoices: route.clarification?.blockedToolNames,

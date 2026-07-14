@@ -40,6 +40,7 @@ export interface ToolRouteDecision {
 		reason: "conflicting_destination" | "conflicting_side_effect";
 		question: string;
 		blockedToolKeys: string[];
+		blockedToolIdentityKeys: string[];
 		blockedToolNames: string[];
 	};
 	fallback: null | "linear_scan" | "router_error" | "empty_query";
@@ -320,6 +321,9 @@ export function routeToolEntries({
 						question: CLARIFICATION_QUESTION,
 						blockedToolKeys: blockedMatches.map(
 							(match) => match.descriptor.key,
+						),
+						blockedToolIdentityKeys: blockedMatches.map(
+							(match) => match.descriptor.identityKey,
 						),
 						blockedToolNames: blockedMatches
 							.map((match) => match.descriptor.key)

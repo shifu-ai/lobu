@@ -197,4 +197,78 @@ describe("worker journey trace", () => {
       timing_ms: expect.objectContaining({ total: expect.any(Number) }),
     });
   });
+
+  test("normalizes every non-finite or negative router metric", () => {
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        lobu: [
+          {
+            name: "search_memory",
+            description: "Search memory",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      message: "search memory",
+      budget: 1,
+    });
+    const invalidTrace = {
+      ...selection.trace,
+      totalTools: Number.NaN,
+      eligibleToolCount: Number.POSITIVE_INFINITY,
+      candidateCount: Number.NEGATIVE_INFINITY,
+      estimatedIndexBytes: Number.NEGATIVE_INFINITY,
+      cacheEvictionCount: -1,
+      timingMs: {
+        build: Number.NaN,
+        retrieve: Number.POSITIVE_INFINITY,
+        rank: -1,
+      },
+      candidates: selection.trace.candidates.map((candidate) => ({
+        ...candidate,
+        totalScore: Number.NaN,
+        scoreBreakdown: candidate.scoreBreakdown
+          ? {
+              ...candidate.scoreBreakdown,
+              exactName: Number.POSITIVE_INFINITY,
+              negativePenalty: -1,
+            }
+          : undefined,
+      })),
+    };
+    const event = journeyEvent(
+      buildToolRouterJourneyEventInput({
+        trace: parseWorkerShifuTrace({}),
+        selectionTrace: invalidTrace,
+        totalMs: Number.POSITIVE_INFINITY,
+      })
+    );
+
+    expect(event).toMatchObject({
+      tool_count: 0,
+      eligible_tool_count: 0,
+      candidate_count: 0,
+      timing_ms: { build: 0, retrieve: 0, rank: 0, total: 0 },
+      estimated_index_bytes: 0,
+      cache_eviction_count: 0,
+    });
+    for (const candidate of event.candidates as Array<{
+      totalScore: number;
+      scoreBreakdown?: Record<string, number>;
+    }>) {
+      expect(candidate.totalScore).toBe(0);
+      expect(candidate.scoreBreakdown?.exactName).toBe(0);
+      expect(candidate.scoreBreakdown?.negativePenalty).toBe(0);
+    }
+    const serialized = JSON.stringify(event);
+    for (const field of [
+      "tool_count",
+      "eligible_tool_count",
+      "candidate_count",
+      "estimated_index_bytes",
+      "cache_eviction_count",
+    ]) {
+      expect(serialized).not.toContain(`"${field}":null`);
+    }
+  });
 });

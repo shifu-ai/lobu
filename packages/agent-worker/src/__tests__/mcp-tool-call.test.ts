@@ -31,7 +31,9 @@ import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
 import {
   emitWorkerToolsRegisteredObsEvent,
   initializeExternalTurnToolRouting,
+  runAISession,
 } from "../openclaw/session-runner";
+import { OpenClawProgressProcessor } from "../openclaw/processor";
 import {
   askUserQuestion,
   callMcpTool,
@@ -949,4 +951,198 @@ describe("external-turn tool router lifecycle", () => {
       event: "lobu.worker.tool_router_decision",
     });
   });
+
+  test("deep-freezes the decision used by provider and catalog projections", () => {
+    const routing = initializeExternalTurnToolRouting(
+      {
+        toolsByMcp: {
+          "lobu-memory": [
+            {
+              name: "manage_schedules",
+              description: "Create a reminder",
+              inputSchema: { type: "object", properties: {} },
+            },
+          ],
+          google_workspace: [
+            {
+              name: "gws_calendar_events_create",
+              description: "Create a calendar event",
+              inputSchema: { type: "object", properties: {} },
+            },
+          ],
+        },
+        message: "幫我排明天下午三點跟老師開會",
+        budget: 8,
+        trace: {
+          traceId: "tr_routerfreeze1234",
+          journeyId: "line_text_agent_turn",
+          actor: "worker",
+          traceSource: "incoming",
+        },
+      },
+      { emitEvent: () => undefined }
+    );
+
+    expect(Object.isFrozen(routing)).toBe(true);
+    expect(Object.isFrozen(routing.selection)).toBe(true);
+    expect(Object.isFrozen(routing.selection.selectedTools)).toBe(true);
+    expect(
+      Object.isFrozen(routing.selection.selectedTools["lobu-memory"])
+    ).toBe(true);
+    expect(Object.isFrozen(routing.selection.trace)).toBe(true);
+    expect(Object.isFrozen(routing.selection.trace.blockedToolNames)).toBe(
+      true
+    );
+    expect(Object.isFrozen(routing.selection.trace.candidates)).toBe(true);
+    expect(Object.isFrozen(routing.selection.trace.candidates[0])).toBe(true);
+    expect(
+      Object.isFrozen(routing.selection.trace.candidates[0]?.scoreBreakdown)
+    ).toBe(true);
+    expect(() =>
+      (routing.selection.trace.blockedToolNames as string[]).splice(0)
+    ).toThrow();
+    expect(() =>
+      (routing.selection.selectedTools["lobu-memory"] as unknown[]).splice(0)
+    ).toThrow();
+
+    const catalog = routing.buildRuntimeCatalog({ providerVisibleTools: {} });
+    expect(catalog.map((entry) => entry.callBlockedReason)).toEqual([
+      "clarification_required",
+      "clarification_required",
+    ]);
+  });
+
+  for (const mcpExposure of ["cli", "tools"] as const) {
+    test(`runAISession selects and emits once through a ${mcpExposure} provider continuation`, async () => {
+      const workspaceDir = mkdtempSync(
+        join(tmpdir(), `lobu-router-run-${mcpExposure}-`)
+      );
+      const selectCalls: unknown[] = [];
+      const emitted: unknown[] = [];
+      let providerIterations = 0;
+      const messages: unknown[] = [];
+      const listeners = new Set<(event: unknown) => void>();
+      const emit = (event: unknown) => {
+        for (const listener of listeners) listener(event);
+      };
+
+      try {
+        const result = await runAISession({
+          userPrompt: "搜尋記憶後回答",
+          customInstructions: "",
+          onProgress: async () => undefined,
+          agentOptions: JSON.stringify({
+            model: "openai/gpt-4o-mini",
+            toolsConfig: { mcpExposure },
+          }),
+          sessionKey: `router-${mcpExposure}`,
+          channelId: "channel-router",
+          conversationId: `conversation-router-${mcpExposure}`,
+          platform: "internal",
+          platformMetadata: {
+            shifuTrace: {
+              trace_id: `tr_routerrun${mcpExposure}1234`,
+              journey_id: "line_text_agent_turn",
+            },
+          },
+          agentId: undefined,
+          workspaceDir,
+          progressProcessor: new OpenClawProgressProcessor(),
+          onSessionFilePathResolved: () => undefined,
+          onModelResolved: () => undefined,
+          loadImageAttachments: async () => [],
+          maybeRunPreCompactionMemoryFlush: async () => undefined,
+          maybeBuildAuthHintMessage: (message) => message,
+          runAISessionDependencies: {
+            sessionContextLoader: async () => ({
+              agentInstructions: "",
+              gatewayInstructions: "",
+              providerConfig: {
+                defaultProvider: "openai",
+                defaultModel: "gpt-4o-mini",
+              },
+              skillsConfig: [],
+              mcpStatus: [],
+              mcpTools: {
+                lobu: [
+                  {
+                    name: "search_memory",
+                    description: "Search memory",
+                    inputSchema: { type: "object", properties: {} },
+                  },
+                ],
+              },
+              mcpContext: {},
+              toolboxPersonalAgentTools: [],
+              userId: "",
+              agentId: "",
+            }),
+            agentSessionBuilder: async () =>
+              ({
+                session: {
+                  agent: { abort: () => undefined },
+                  messages,
+                  subscribe: (listener: (event: unknown) => void) => {
+                    listeners.add(listener);
+                    return () => listeners.delete(listener);
+                  },
+                  prompt: async () => {
+                    providerIterations += 1;
+                    emit({
+                      type: "tool_execution_start",
+                      toolCallId: "call-router-1",
+                      toolName: "search_memory",
+                      args: { query: "memory" },
+                    });
+                    messages.push({
+                      role: "toolResult",
+                      toolCallId: "call-router-1",
+                      toolName: "search_memory",
+                      content: [{ type: "text", text: "found" }],
+                      isError: false,
+                    });
+                    emit({
+                      type: "tool_execution_end",
+                      toolCallId: "call-router-1",
+                      toolName: "search_memory",
+                      result: { content: [{ type: "text", text: "found" }] },
+                      isError: false,
+                    });
+                    providerIterations += 1;
+                    const finalMessage = routerLoopMessage(
+                      [{ type: "text", text: "done" }],
+                      "stop"
+                    );
+                    messages.push(finalMessage);
+                    emit({ type: "message_end", message: finalMessage });
+                    emit({ type: "agent_end" });
+                  },
+                  dispose: () => undefined,
+                },
+              }) as never,
+            selectTools: (params) => {
+              selectCalls.push(params);
+              return selectMcpToolsByMcpForTurn(params);
+            },
+            emitEvent: (event) => emitted.push(event),
+          },
+        });
+
+        expect(result.success).toBe(true);
+        expect(providerIterations).toBe(2);
+        expect(
+          messages.filter(
+            (message) => (message as { role?: string }).role === "toolResult"
+          )
+        ).toHaveLength(1);
+        expect(selectCalls).toHaveLength(1);
+        expect(emitted).toHaveLength(1);
+        expect(emitted[0]).toMatchObject({
+          event: "lobu.worker.tool_router_decision",
+        });
+      } finally {
+        await rm(workspaceDir, { recursive: true, force: true });
+      }
+    });
+  }
 });
