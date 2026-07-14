@@ -43,7 +43,7 @@ interface DescriptorOverride {
 }
 
 const DESCRIPTOR_OVERRIDES: Readonly<Record<string, DescriptorOverride>> = {
-	"lobu-memory/manage_schedules": {
+	"lobu-memory\u0000manage_schedules": {
 		aliases: ["提醒我", "稍後叫我", "個人提醒", "延遲提醒", "agent schedule"],
 		operations: ["create", "update", "delete", "schedule"],
 		destinations: ["personal_reminder"],
@@ -53,7 +53,7 @@ const DESCRIPTOR_OVERRIDES: Readonly<Record<string, DescriptorOverride>> = {
 		mutatesState: true,
 		requiresConfirmation: true,
 	},
-	"google_workspace/gws_calendar_events_create": {
+	"google_workspace\u0000gws_calendar_events_create": {
 		aliases: ["Google Calendar", "建立行事曆事件", "建立日曆事件"],
 		operations: ["create"],
 		destinations: ["google_calendar"],
@@ -239,7 +239,7 @@ export function buildToolDescriptor(
 	const indexedKey = indexedMcpId
 		? `${indexedMcpId}/${indexedName}`
 		: indexedName;
-	const override = DESCRIPTOR_OVERRIDES[key];
+	const override = DESCRIPTOR_OVERRIDES[`${mcpId}\u0000${name}`];
 	const parameters = parameterMetadata(tool);
 	const descriptor: ToolDescriptor = {
 		key,

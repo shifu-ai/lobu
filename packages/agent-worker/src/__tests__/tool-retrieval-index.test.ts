@@ -104,6 +104,18 @@ describe("tool descriptors", () => {
 		expect(descriptor.mutatesState).toBe(false);
 	});
 
+	test("does not confuse an unqualified slashed name with a qualified override", () => {
+		const descriptor = buildToolDescriptor(
+			tool("lobu-memory/manage_schedules", "Foreign schedule tool"),
+			"",
+			0,
+		);
+
+		expect(descriptor.key).toBe("lobu-memory/manage_schedules");
+		expect(descriptor.destinations).toEqual([]);
+		expect(descriptor.mutatesState).toBe(false);
+	});
+
 	test("reads metadata titles using dispatcher precedence", () => {
 		const metaTitle = buildToolDescriptor(
 			Object.assign(tool("meta_tool", "Meta tool"), {
