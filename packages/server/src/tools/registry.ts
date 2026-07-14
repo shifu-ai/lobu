@@ -65,6 +65,10 @@ export interface ToolContext {
   memberRole: string | null;
   /** Durable Lobu/Lobu agent identity bound to this MCP session, when provided. */
   agentId?: string | null;
+  /** Verified current conversation from a worker-token direct-auth session. */
+  conversationId?: string | null;
+  /** Gateway-verified per-call personal-reminder delivery contract. */
+  personalReminderDeliveryIntent?: boolean;
   /** Whether request was authenticated */
   isAuthenticated: boolean;
   /** OAuth client ID that created this request (null for session/anonymous) */

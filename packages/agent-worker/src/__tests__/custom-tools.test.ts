@@ -283,7 +283,12 @@ describe("createOpenClawCustomTools", () => {
           agent_id: "shifu-u-1",
           thread_id: "line-conversation-1",
           prompt: "喝水",
+          delivery_intent: {
+            contract: "personal_reminder_delivery.v1",
+            destination: "personal_reminder",
+          },
         },
+        { personalReminderDelivery: true },
       ],
     ]);
   });

@@ -715,7 +715,16 @@ describe("direct MCP personal reminder execution contract", () => {
       agent_id: "agent-1",
       thread_id: "conv-1",
       prompt: "記得喝水",
+      delivery_intent: {
+        contract: "personal_reminder_delivery.v1",
+        destination: "personal_reminder",
+      },
     });
+    expect(
+      (init.headers as Record<string, string>)[
+        "x-lobu-personal-reminder-delivery-intent"
+      ]
+    ).toBe("personal_reminder_delivery.v1");
   });
 });
 

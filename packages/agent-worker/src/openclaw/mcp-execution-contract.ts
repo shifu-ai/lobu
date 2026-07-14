@@ -1,6 +1,19 @@
 import type { ToolContentResult } from "../shared/tool-implementations";
-import type { RuntimeToolCaller } from "./tool-catalog-dispatcher";
 import type { TurnExecutionIntent } from "./turn-execution-intent";
+
+export const PERSONAL_REMINDER_DELIVERY_CONTRACT =
+  "personal_reminder_delivery.v1";
+
+export interface McpExecutionTransport {
+  personalReminderDelivery?: true;
+}
+
+export type McpExecutionCaller = (
+  mcpId: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  transport?: McpExecutionTransport
+) => Promise<ToolContentResult>;
 
 export interface McpExecutionTrace {
   requestedActionType?: "send_notification" | "wake_agent" | "other";
@@ -19,7 +32,7 @@ export interface ExecuteMcpToolForTurnParams {
   mcpId: string;
   toolName: string;
   args: Record<string, unknown>;
-  callTool: RuntimeToolCaller;
+  callTool: McpExecutionCaller;
   onTrace?: (trace: McpExecutionTrace) => void;
 }
 
@@ -110,6 +123,23 @@ function canonicalPersonalReminderArgs(
   next.thread_id = gateway.conversationId;
   if (prompt !== undefined) next.prompt = prompt;
   else delete next.prompt;
+  next.delivery_intent = {
+    contract: PERSONAL_REMINDER_DELIVERY_CONTRACT,
+    destination: "personal_reminder",
+  };
+  return next;
+}
+
+function stripDeliveryIntent(
+  args: Record<string, unknown>
+): Record<string, unknown> {
+  const next = { ...args };
+  delete next.delivery_intent;
+  const payload = record(next.payload);
+  if (payload) {
+    next.payload = { ...payload };
+    delete (next.payload as Record<string, unknown>).delivery_intent;
+  }
   return next;
 }
 
@@ -118,9 +148,14 @@ export async function executeMcpToolForTurn(
 ): Promise<ToolContentResult> {
   const requested = requestedActionType(params.args);
   const canonicalized = shouldCanonicalize(params, requested);
-  const effectiveArgs = canonicalized
-    ? canonicalPersonalReminderArgs(params.args, params.gateway)
+  const isManageSchedules =
+    params.mcpId === "lobu-memory" && params.toolName === "manage_schedules";
+  const sanitizedArgs = isManageSchedules
+    ? stripDeliveryIntent(params.args)
     : params.args;
+  const effectiveArgs = canonicalized
+    ? canonicalPersonalReminderArgs(sanitizedArgs, params.gateway)
+    : sanitizedArgs;
   if (isScheduleCreateAttempt(params)) {
     const requestedBucket = requestedActionTypeBucket(requested);
     params.onTrace?.({
@@ -129,5 +164,10 @@ export async function executeMcpToolForTurn(
       canonicalized,
     });
   }
-  return params.callTool(params.mcpId, params.toolName, effectiveArgs);
+  return params.callTool(
+    params.mcpId,
+    params.toolName,
+    effectiveArgs,
+    canonicalized ? { personalReminderDelivery: true } : undefined
+  );
 }

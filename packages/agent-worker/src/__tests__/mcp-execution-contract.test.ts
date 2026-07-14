@@ -108,7 +108,12 @@ describe("executeMcpToolForTurn", () => {
           agent_id: "shifu-u-1",
           thread_id: "line-conversation-1",
           prompt: "喝水時間\n\n記得喝水",
+          delivery_intent: {
+            contract: "personal_reminder_delivery.v1",
+            destination: "personal_reminder",
+          },
         },
+        { personalReminderDelivery: true },
       ],
     ]);
     expect(traces).toEqual([
@@ -120,13 +125,20 @@ describe("executeMcpToolForTurn", () => {
     ]);
   });
 
-  test("does not rewrite ambiguity, other actions, MCPs, or destinations", async () => {
+  test("does not rewrite ambiguity, other actions, MCPs, or destinations and strips forged markers", async () => {
     const cases = [
       {
         intent: deriveTurnExecutionIntent("提醒我喝水"),
         mcpId: "lobu-memory",
         toolName: "manage_schedules",
-        args: { action: "create", action_type: "send_notification" },
+        args: {
+          action: "create",
+          action_type: "send_notification",
+          delivery_intent: {
+            contract: "personal_reminder_delivery.v1",
+            destination: "personal_reminder",
+          },
+        },
       },
       {
         intent: deriveTurnExecutionIntent("五分鐘後提醒我喝水"),
@@ -187,7 +199,13 @@ describe("executeMcpToolForTurn", () => {
           return ok;
         },
       });
-      expect(forwarded).toEqual(candidate.args);
+      expect(forwarded).toEqual(
+        Object.fromEntries(
+          Object.entries(candidate.args).filter(
+            ([key]) => key !== "delivery_intent"
+          )
+        )
+      );
     }
   });
 
@@ -279,6 +297,10 @@ describe("executeMcpToolForTurn", () => {
       prompt: "補水任務\n\n記得休息\n\n喝水時間\n\n記得喝水\n\n帶水瓶",
       agent_id: "shifu-u-1",
       thread_id: "line-conversation-1",
+      delivery_intent: {
+        contract: "personal_reminder_delivery.v1",
+        destination: "personal_reminder",
+      },
     });
   });
 
@@ -307,6 +329,10 @@ describe("executeMcpToolForTurn", () => {
       prompt: "喝水",
       agent_id: "shifu-u-1",
       thread_id: "line-conversation-1",
+      delivery_intent: {
+        contract: "personal_reminder_delivery.v1",
+        destination: "personal_reminder",
+      },
     });
     expect(forwarded).not.toHaveProperty("payload");
   });
@@ -337,6 +363,10 @@ describe("executeMcpToolForTurn", () => {
       action_type: "wake_agent",
       agent_id: "shifu-u-1",
       thread_id: "line-conversation-1",
+      delivery_intent: {
+        contract: "personal_reminder_delivery.v1",
+        destination: "personal_reminder",
+      },
     });
   });
 });

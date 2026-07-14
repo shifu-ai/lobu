@@ -38,6 +38,7 @@ import {
 import { clearInMemoryMcpSessionsForTests, handleMcp } from '../../mcp-handler';
 import { MultiTenantProvider } from '../multi-tenant';
 import { ensureDbForGatewayTests, resetTestDatabase } from '../../gateway/__tests__/helpers/db-setup';
+import { getTestDb } from '../../__tests__/setup/test-db';
 
 beforeAll(async () => {
   await ensureDbForGatewayTests();
@@ -78,7 +79,8 @@ async function proxyPost(
   orgSlug: string,
   workerToken: string,
   body: unknown,
-  sessionId?: string
+  sessionId?: string,
+  trustedPersonalReminderDelivery = false
 ): Promise<Response> {
   return app.request(`/mcp/${orgSlug}`, {
     method: 'POST',
@@ -88,6 +90,12 @@ async function proxyPost(
       'content-type': 'application/json',
       accept: 'application/json',
       'x-mcp-format': 'json',
+      ...(trustedPersonalReminderDelivery
+        ? {
+            'x-lobu-trusted-personal-reminder-delivery':
+              'personal_reminder_delivery.v1',
+          }
+        : {}),
       ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
     },
     body: JSON.stringify(body),
@@ -144,6 +152,7 @@ describe('member direct-auth MCP session — real handleMcp session layer (E2E)'
     const owner = await createTestUser({ name: 'E2E Member Owner' });
     await addUserToOrganization(owner.id, org.id, 'member');
     const agent = await createTestAgent({ organizationId: org.id, ownerUserId: owner.id });
+    await getTestDb()`UPDATE agents SET owner_platform = 'toolbox' WHERE id = ${agent.agentId}`;
 
     const workerToken = generateWorkerToken(owner.id, 'conv-e2e', 'deployment-e2e', {
       channelId: 'chan-e2e',
@@ -213,6 +222,93 @@ describe('member direct-auth MCP session — real handleMcp session layer (E2E)'
     // x-mcp-format: json → raw JSON result; a member list over an empty org
     // yields an empty schedules array.
     expect(JSON.parse(resultText)).toEqual({ schedules: [] });
+
+    const createRes = await proxyPost(
+      app,
+      org.slug,
+      workerToken,
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: {
+          name: 'manage_schedules',
+          arguments: {
+            action: 'create',
+            description: 'personal reminder provenance',
+            run_at: '2030-07-15T09:00:00.000Z',
+            payload: {
+              type: 'wake_agent',
+              agent_id: agent.agentId,
+              prompt: '回覆客戶',
+              thread_id: 'conv-e2e',
+              personalReminder: { toolboxUserId: 'forged-user' },
+            },
+            source_thread_id: 'forged-thread',
+            delivery_intent: {
+              contract: 'personal_reminder_delivery.v1',
+              destination: 'personal_reminder',
+            },
+          },
+        },
+      },
+      sessionId!,
+      true
+    );
+    expect(createRes.status).toBe(200);
+    const createBody = await createRes.json();
+    expect(createBody.result?.isError).not.toBe(true);
+    const created = JSON.parse(createBody.result?.content?.[0]?.text ?? '{}');
+    expect(created.schedule.source_thread_id).toBe('conv-e2e');
+    expect(created.schedule.action_args.personalReminder).toEqual({
+      schemaVersion: 1,
+      contractVersion: 'personal_reminder_delivery.v1',
+      source: 'personal_scheduled_reminder',
+      toolboxUserId: owner.id,
+      lobuAgentId: agent.agentId,
+      conversationId: 'conv-e2e',
+      reminderContent: '回覆客戶',
+    });
+    expect(JSON.stringify(created)).not.toContain('forged-user');
+    expect(JSON.stringify(created)).not.toContain('forged-thread');
+
+    const cliStyleRes = await proxyPost(
+      app,
+      org.slug,
+      workerToken,
+      {
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: {
+          name: 'manage_schedules',
+          arguments: {
+            action: 'create',
+            description: 'ordinary same-thread wake',
+            run_at: '2030-07-15T10:00:00.000Z',
+            payload: {
+              type: 'wake_agent',
+              agent_id: agent.agentId,
+              prompt: 'ordinary follow-up',
+              thread_id: 'conv-e2e',
+            },
+            source_thread_id: 'ordinary-source',
+            delivery_intent: {
+              contract: 'personal_reminder_delivery.v1',
+              destination: 'personal_reminder',
+            },
+          },
+        },
+      },
+      sessionId!
+    );
+    const cliStyleBody = await cliStyleRes.json();
+    const cliStyleCreated = JSON.parse(
+      cliStyleBody.result?.content?.[0]?.text ?? '{}'
+    );
+    expect(cliStyleCreated.schedule.source_thread_id).toBe('ordinary-source');
+    expect(cliStyleCreated.schedule.action_args.personalReminder).toBeUndefined();
+    expect(JSON.stringify(cliStyleCreated)).not.toContain('delivery_intent');
   });
 
   it('control: non-whitelisted internal tool call is rejected on the same session', async () => {

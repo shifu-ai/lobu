@@ -30,6 +30,9 @@ function memberCtx(overrides: Partial<ToolContext> = {}): ToolContext {
     userId: MEMBER_USER,
     memberRole: "member",
     agentId: MEMBER_AGENT,
+    conversationId: `${MEMBER_AGENT}_${MEMBER_USER}_thread-current`,
+    personalReminderDeliveryIntent: true,
+    clientId: "lobu-worker",
     // Member sessions only reach manage_schedules' write actions via the
     // member-owned direct-auth exception (1c52bc33 / tool-access.ts's
     // isDirectAuthMemberScheduleWrite), which requires an explicit
@@ -155,6 +158,103 @@ function notifyCreateArgs(recipients: unknown, overrides: Record<string, unknown
 }
 
 describe("manage_schedules member self-scoping — create wake_agent", () => {
+  test("trusted direct-auth own-thread wake persists only server-built personal reminder provenance", async () => {
+    const deps = makeDeps();
+    const conversationId = `${MEMBER_AGENT}_${MEMBER_USER}_thread-current`;
+    await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, {
+        source_thread_id: "forged-thread",
+        delivery_intent: {
+          contract: "personal_reminder_delivery.v1",
+          destination: "personal_reminder",
+        },
+        payload: {
+          type: "wake_agent",
+          agent_id: MEMBER_AGENT,
+          prompt: "  提醒我回覆客戶  ",
+          thread_id: conversationId,
+          personalReminder: {
+            toolboxUserId: "victim",
+            lobuAgentId: "shifu-u-victim",
+            conversationId: "forged-thread",
+          },
+        },
+      }) as any,
+      {} as any,
+      memberCtx({ conversationId }),
+      deps
+    );
+
+    const call = (deps.createScheduledJob as any).mock.calls[0][0];
+    expect(call.sourceThreadId).toBe(conversationId);
+    expect(call.actionArgs).toEqual({
+      agent_id: MEMBER_AGENT,
+      prompt: "  提醒我回覆客戶  ",
+      thread_id: conversationId,
+      personalReminder: {
+        schemaVersion: 1,
+        contractVersion: "personal_reminder_delivery.v1",
+        source: "personal_scheduled_reminder",
+        toolboxUserId: MEMBER_USER,
+        lobuAgentId: MEMBER_AGENT,
+        conversationId,
+        reminderContent: "提醒我回覆客戶",
+      },
+    });
+    expect(JSON.stringify(call.actionArgs)).not.toContain("victim");
+  });
+
+  test("CLI-style current-thread wake with forged marker is ordinary and preserves source thread", async () => {
+    const deps = makeDeps();
+    const conversationId = `${MEMBER_AGENT}_${MEMBER_USER}_thread-current`;
+    await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, {
+        source_thread_id: "cli-source-thread",
+        delivery_intent: {
+          contract: "personal_reminder_delivery.v1",
+          destination: "personal_reminder",
+        },
+        payload: {
+          type: "wake_agent",
+          agent_id: MEMBER_AGENT,
+          prompt: "ordinary CLI wake",
+          thread_id: conversationId,
+        },
+      }) as any,
+      {} as any,
+      memberCtx({ conversationId, personalReminderDeliveryIntent: false }),
+      deps
+    );
+
+    const call = (deps.createScheduledJob as any).mock.calls[0][0];
+    expect(call.actionArgs.personalReminder).toBeUndefined();
+    expect(call.actionArgs.delivery_intent).toBeUndefined();
+    expect(call.sourceThreadId).toBe("cli-source-thread");
+  });
+
+  test("current-thread wake without marker stays ordinary even with transport signal", async () => {
+    const deps = makeDeps();
+    const conversationId = `${MEMBER_AGENT}_${MEMBER_USER}_thread-current`;
+    await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, {
+        source_thread_id: "ordinary-source-thread",
+        payload: {
+          type: "wake_agent",
+          agent_id: MEMBER_AGENT,
+          prompt: "ordinary direct wake",
+          thread_id: conversationId,
+        },
+      }) as any,
+      {} as any,
+      memberCtx({ conversationId }),
+      deps
+    );
+
+    const call = (deps.createScheduledJob as any).mock.calls[0][0];
+    expect(call.actionArgs.personalReminder).toBeUndefined();
+    expect(call.sourceThreadId).toBe("ordinary-source-thread");
+  });
+
   test("ordinary wake persistence strips trusted provenance but keeps benign extensions", async () => {
     const deps = makeDeps();
     await manageSchedules(

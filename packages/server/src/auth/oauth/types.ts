@@ -222,6 +222,10 @@ export interface AuthInfo {
   // Threaded from `WorkerTokenData.agentId` — see
   // `MultiTenantProvider.resolveAuth`'s worker direct-auth branch.
   agentId?: string;
+  /** Verified worker-token conversation for direct-auth MCP calls. */
+  conversationId?: string;
+  /** Gateway-verified per-call personal-reminder delivery contract. */
+  personalReminderDeliveryIntent?: boolean;
 }
 
 // ============================================

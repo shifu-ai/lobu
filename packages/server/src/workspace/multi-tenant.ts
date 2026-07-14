@@ -331,6 +331,10 @@ export class MultiTenantProvider implements WorkspaceProvider {
             ? ['mcp:read', 'mcp:write', 'mcp:admin']
             : ['mcp:read', 'mcp:write'],
           agentId: tokenData.agentId,
+          conversationId: tokenData.conversationId,
+          personalReminderDeliveryIntent:
+            c.req.header('x-lobu-trusted-personal-reminder-delivery') ===
+            'personal_reminder_delivery.v1',
           expiresAt: Math.floor((tokenData.timestamp + 2 * 60 * 60 * 1000) / 1000),
           tokenType: 'pat',
         },

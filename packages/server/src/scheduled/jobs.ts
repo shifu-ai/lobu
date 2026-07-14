@@ -37,6 +37,10 @@ import {
 	registerScheduledJobsTicker,
 	resolveWakeAgentId,
 } from "./scheduled-jobs-service";
+import {
+	resolveScheduledPersonalReminder,
+	type ScheduledPersonalReminderV1,
+} from "./personal-reminder.js";
 import { TaskScheduler } from "./task-scheduler";
 import { triggerEmbedBackfill } from "./trigger-embed-backfill";
 import {
@@ -279,6 +283,7 @@ export interface WakeAgentTaskPayload {
 	thread_id?: string | null;
 	reason?: string | null;
 	trustedCourseWake?: unknown;
+	personalReminder?: unknown;
 }
 
 export interface WakeAgentTaskDeps {
@@ -346,6 +351,7 @@ export async function handleWakeAgentTask(
 	}
 	p.agent_id = resolvedAgentId;
 	const hasTrustedWake = p.trustedCourseWake !== undefined;
+	const hasPersonalReminderMarker = p.personalReminder !== undefined;
 	const scheduledMessageId =
 		p.__scheduled_job_id && p.__scheduled_task_run_id
 			? `scheduled-${p.__scheduled_job_id}-run-${p.__scheduled_task_run_id}`.replace(
@@ -359,6 +365,28 @@ export async function handleWakeAgentTask(
 	let scheduledCourseContext: ScheduledCourseContext | undefined;
 	let resolvedCourseContext: ResolvedCourseExecutionContext | undefined;
 	let trustedEligibility: TrustedCourseFireEligibility | null = null;
+	let scheduledPersonalReminder: ScheduledPersonalReminderV1 | null = null;
+	if (hasPersonalReminderMarker) {
+		scheduledPersonalReminder = resolveScheduledPersonalReminder({
+			raw: p.personalReminder,
+			createdByUser: p.__created_by_user,
+			createdByAgent: p.__created_by_agent,
+			resolvedAgentId: p.agent_id,
+			jobId: p.__scheduled_job_id,
+			runId: p.__scheduled_task_run_id,
+		});
+		if (!scheduledPersonalReminder) {
+			logger.warn(
+				{
+					category: "personal_reminder_fire_gate",
+					scheduledJobId: p.__scheduled_job_id,
+					scheduledTaskRunId: p.__scheduled_task_run_id,
+				},
+				"[task] personal reminder wake rejected deterministically",
+			);
+			return;
+		}
+	}
 	if (hasTrustedWake) {
 		trustedEligibility = await validateTrustedCourseFireEligibility(
 			{
@@ -395,7 +423,7 @@ export async function handleWakeAgentTask(
 		scheduledCourseContext = trustedEligibility.scheduledCourseContext;
 	}
 	const reuseConversation = process.env.SHIFU_WAKE_REUSE_CONVERSATION !== "0";
-	let threadId = p.thread_id ?? null;
+	let threadId = scheduledPersonalReminder?.conversationId ?? p.thread_id ?? null;
 	if (!threadId && reuseConversation) {
 		threadId = await resolveWakeThreadId(
 			{ sql, sessionManager },
@@ -477,16 +505,19 @@ export async function handleWakeAgentTask(
 				? buildScheduledWakeMessage(
 						renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick),
 						{
-							mechanicalDelivery: hasTrustedWake,
+							mechanicalDelivery: hasTrustedWake || Boolean(scheduledPersonalReminder),
 						},
 					)
 				: renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick),
 			source: "scheduled-job",
 			messageId: scheduledMessageId,
 			queueSingletonKey: scheduledMessageId,
-			durableQueueSingleton: Boolean(hasTrustedWake && scheduledMessageId),
+			durableQueueSingleton: Boolean(
+				(hasTrustedWake || scheduledPersonalReminder) && scheduledMessageId,
+			),
 			scheduledCourseContext,
 			resolvedCourseContext,
+			scheduledPersonalReminder: scheduledPersonalReminder ?? undefined,
 		},
 	);
 }

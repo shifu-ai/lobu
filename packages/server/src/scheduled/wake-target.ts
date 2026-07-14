@@ -71,7 +71,7 @@ export async function resolveWakeThreadId(
   }
 }
 
-/** Prefix the machine marker; only trusted course wakes have mechanical delivery. */
+/** Prefix the machine marker; trusted delivery contracts bypass model-driven push tools. */
 export function buildScheduledWakeMessage(
   prompt: string,
   options: { mechanicalDelivery?: boolean } = {},

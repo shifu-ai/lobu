@@ -402,6 +402,37 @@ describe("buildMcpServerHandler", () => {
     ]);
   });
 
+  test("CLI cannot set the worker-only personal reminder transport signal", async () => {
+    const manageSchedules = {
+      name: "manage_schedules",
+      description: "Manage schedules",
+      inputSchema: { type: "object" },
+    };
+    const ref = makeRef({ mcpTools: { "lobu-memory": [manageSchedules] } });
+    const calls: Array<{ payload: unknown; options: unknown }> = [];
+    const handler = buildMcpServerHandler("lobu-memory", ref, gw, {
+      callTool: async (_gw, _mcpId, _toolName, payload, options) => {
+        calls.push({ payload, options });
+        return { content: [] };
+      },
+    });
+
+    const marker = {
+      contract: "personal_reminder_delivery.v1",
+      destination: "personal_reminder",
+    };
+    const result = await handler(["manage_schedules"], {
+      stdin: JSON.stringify({ action: "create", delivery_intent: marker }),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.payload).toMatchObject({ delivery_intent: marker });
+    expect(calls[0]?.options).not.toMatchObject({
+      personalReminderDelivery: true,
+    });
+  });
+
   test("tool invocation falls back to args[1] when stdin is empty", async () => {
     const ref = makeRef({ mcpTools: { lobu: [lobuTool] } });
     const captured: Record<string, unknown>[] = [];

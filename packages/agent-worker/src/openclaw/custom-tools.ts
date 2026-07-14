@@ -32,6 +32,7 @@ import {
 import { readContextArtifactChunk } from "./context-pressure";
 import {
   executeMcpToolForTurn,
+  type McpExecutionCaller,
   type McpExecutionTrace,
 } from "./mcp-execution-contract";
 import {
@@ -648,12 +649,13 @@ export function createOpenClawCustomTools(params: {
   ];
 
   if (params.runtimeToolCatalog && params.runtimeToolCatalog.length > 0) {
-    const rawRuntimeToolCaller: RuntimeToolCaller =
+    const rawRuntimeToolCaller: McpExecutionCaller =
       params.runtimeToolCaller ??
-      ((mcpId, toolName, args) =>
+      ((mcpId, toolName, args, transport) =>
         callMcpTool(gw, mcpId, toolName, args, {
           shifuTrace: params.shifuTrace,
           expectedMcpIdentity: params.mcpProvenanceById?.[mcpId],
+          personalReminderDelivery: transport?.personalReminderDelivery,
         }));
     const runtimeToolCaller: RuntimeToolCaller = (mcpId, toolName, args) =>
       executeMcpToolForTurn({
@@ -776,10 +778,11 @@ export function createMcpToolDefinitions(
             mcpId,
             toolName: upstreamToolName,
             args: (args || {}) as Record<string, unknown>,
-            callTool: (targetMcpId, targetToolName, targetArgs) =>
+            callTool: (targetMcpId, targetToolName, targetArgs, transport) =>
               callMcpTool(gw, targetMcpId, targetToolName, targetArgs, {
                 shifuTrace: options?.shifuTrace,
                 expectedMcpIdentity: options?.mcpProvenanceById?.[targetMcpId],
+                personalReminderDelivery: transport?.personalReminderDelivery,
               }),
             onTrace: (decision) =>
               emitMcpExecutionContractTrace(
