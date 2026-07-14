@@ -57,6 +57,8 @@ export type TokenType = 'oauth' | 'session' | 'pat' | 'anonymous';
 export interface ToolContext {
   /** User's organization ID - REQUIRED for all operations */
   organizationId: string;
+  /** Organization embedded in the verified PAT/OAuth record, if any. */
+  tokenOrganizationId?: string | null;
   /** User ID from OAuth token, PAT, or session (null for anonymous public reads) */
   userId: string | null;
   /** Caller's role in the organization (null for non-members reading a public workspace). */

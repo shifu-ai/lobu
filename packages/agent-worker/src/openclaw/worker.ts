@@ -278,20 +278,14 @@ export class OpenClawWorker implements WorkerExecutor {
       );
 
       if (result.success) {
-        // Snapshot writer in cleanup() reads this to discriminate the row.
-        // Hydrate skips non-completed snapshots, so getting this right is
-        // what stops a failed turn from poisoning the next attempt.
-        const passedTaskCompletionGuard =
-          await this.applyTaskCompletionGuard(userPrompt);
-        if (!passedTaskCompletionGuard) {
-          logger.warn(
-            "Task completion guard rejected successful OpenClaw session"
-          );
+        const completed = await this.completeSuccessfulSession(
+          result,
+          userPrompt,
+          sawUploadedFileEvent
+        );
+        if (!completed) {
           return;
         }
-        this.terminalStatus = "completed";
-        await this.deliverFinalResult(sawUploadedFileEvent);
-        await this.workerTransport.signalDone();
       } else {
         const errorMsg = result.error || "Unknown error";
         const isTimeout = result.exitCode === 124;
@@ -567,6 +561,37 @@ export class OpenClawWorker implements WorkerExecutor {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  private async completeSuccessfulSession(
+    result: SessionExecutionResult,
+    userPrompt: string,
+    sawUploadedFileEvent: boolean
+  ): Promise<boolean> {
+    // A verified ask-user termination is complete when its structured human
+    // decision request is posted; it is valid for that turn to have no final
+    // assistant text. Ordinary successful turns still require the full guard.
+    if (!result.awaitingHumanDecision) {
+      const passedTaskCompletionGuard =
+        await this.applyTaskCompletionGuard(userPrompt);
+      if (!passedTaskCompletionGuard) {
+        logger.warn(
+          "Task completion guard rejected successful OpenClaw session"
+        );
+        return false;
+      }
+    }
+
+    // Snapshot writer in cleanup() reads this to discriminate the row.
+    // Hydrate skips non-completed snapshots, so getting this right is what
+    // stops a failed turn from poisoning the next attempt.
+    this.terminalStatus = "completed";
+    await this.deliverFinalResult(sawUploadedFileEvent);
+    await this.workerTransport.signalDone(
+      undefined,
+      result.awaitingHumanDecision
+    );
+    return true;
+  }
 
   private async setupIODirectories(): Promise<void> {
     const workspaceDir = this.workspaceManager.getCurrentWorkingDirectory();

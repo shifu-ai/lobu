@@ -1687,6 +1687,44 @@ describe("GatewayClient heartbeat ACKs", () => {
     }
   });
 
+  test("does not batch a message carrying automation modification context", async () => {
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const processSingleMessage = mock(async () => undefined);
+    (client as any).processSingleMessage = processSingleMessage;
+    await (client as any).processBatchedMessages([
+      {
+        timestamp: 1,
+        payload: {
+          ...basePayload(),
+          messageId: "m1",
+          platformMetadata: {
+            responseId: "shared",
+            automationModificationContext: {
+              trustedByServer: true,
+              decisionId: "decision-1",
+              planId: "plan-1",
+            },
+          },
+        },
+      },
+      {
+        timestamp: 2,
+        payload: {
+          ...basePayload(),
+          messageId: "m2",
+          platformMetadata: { responseId: "shared" },
+        },
+      },
+    ]);
+
+    expect(processSingleMessage).toHaveBeenCalledTimes(2);
+  });
+
   test("does not batch messages with distinct trusted execution scopes", async () => {
     const client = new GatewayClient(
       "https://gateway.example.com",
@@ -1723,6 +1761,7 @@ describe("GatewayClient heartbeat ACKs", () => {
         },
       },
     ]);
+
     expect(processSingleMessage).toHaveBeenCalledTimes(2);
   });
 

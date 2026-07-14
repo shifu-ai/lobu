@@ -1248,6 +1248,12 @@ export class GatewayClient {
     first: QueuedMessage,
     next: QueuedMessage
   ): boolean {
+    if (
+      first.payload.platformMetadata.automationModificationContext ||
+      next.payload.platformMetadata.automationModificationContext
+    )
+      return false;
+
     const identity = (message: QueuedMessage) => ({
       responseChannel: String(
         message.payload.platformMetadata.responseChannel ||

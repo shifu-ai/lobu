@@ -342,6 +342,9 @@ export class UnifiedThreadResponseConsumer {
           type: "complete",
           messageId: data.messageId,
           processedMessageIds: data.processedMessageIds,
+          ...(typeof data.awaitingHumanDecision === "boolean" && {
+            awaitingHumanDecision: data.awaitingHumanDecision,
+          }),
           timestamp: data.timestamp,
         });
       }

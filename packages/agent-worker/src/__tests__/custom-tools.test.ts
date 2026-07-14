@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Value } from "@sinclair/typebox/value";
 import {
   createMcpToolDefinitions,
   createOpenClawCustomTools,
@@ -54,6 +55,66 @@ describe("createOpenClawCustomTools", () => {
       "request_human_decision",
       "start_project_context_discovery",
     ]);
+  });
+
+  test("request_human_decision schema strictly validates automation confirmation context", () => {
+    const tool = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "agent-1",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+    }).find((candidate) => candidate.name === "request_human_decision");
+    expect(tool).toBeDefined();
+
+    const base = {
+      title: "Confirm automation",
+      prompt: "Create it?",
+      options: [
+        {
+          value: "confirm",
+          label: "Confirm",
+          tradeoff: "Creates it.",
+          recommended: true,
+          recommendationReason: "Plan is ready.",
+        },
+        { value: "revise", label: "Revise", tradeoff: "Takes longer." },
+        { value: "cancel", label: "Cancel", tradeoff: "Stops here." },
+      ],
+    };
+    const validContext = {
+      kind: "automation_create",
+      planId: "plan-1",
+      planVersion: 1,
+      contentHash: "sha256:abc",
+    };
+
+    expect(Value.Check(tool!.parameters, base)).toBe(true);
+    expect(
+      Value.Check(tool!.parameters, {
+        ...base,
+        confirmationContext: validContext,
+      })
+    ).toBe(true);
+    for (const confirmationContext of [
+      { ...validContext, kind: "unknown" },
+      { ...validContext, planId: " " },
+      { ...validContext, planVersion: "1" },
+      { ...validContext, planVersion: 0 },
+      { ...validContext, planVersion: 1.5 },
+      { ...validContext, contentHash: " " },
+      { ...validContext, kind: undefined },
+      { ...validContext, planId: undefined },
+      { ...validContext, planVersion: undefined },
+      { ...validContext, contentHash: undefined },
+      { ...validContext, extra: "not-allowed" },
+    ]) {
+      expect(
+        Value.Check(tool!.parameters, { ...base, confirmationContext })
+      ).toBe(false);
+    }
   });
 
   test("registers always-on runtime tool catalog tools when catalog is provided", async () => {

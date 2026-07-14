@@ -58,6 +58,22 @@ function adminCtx(overrides: Partial<ToolContext> = {}): ToolContext {
   };
 }
 
+function trustedAdminPatCtx(overrides: Partial<ToolContext> = {}): ToolContext {
+  return {
+    organizationId: ORG,
+    tokenOrganizationId: ORG,
+    userId: "toolbox-adapter",
+    memberRole: "member",
+    agentId: null,
+    scopes: ["mcp:admin"],
+    isAuthenticated: true,
+    tokenType: "pat",
+    scopedToOrg: false,
+    allowCrossOrg: false,
+    ...overrides,
+  };
+}
+
 function fakeJobRow(overrides: Partial<ScheduledJobRow> = {}): ScheduledJobRow {
   return {
     id: "job-1",
@@ -67,6 +83,7 @@ function fakeJobRow(overrides: Partial<ScheduledJobRow> = {}): ScheduledJobRow {
     action_type: "wake_agent",
     action_args: {},
     cron: null,
+    until_at: null,
     next_run_at: "2026-08-01T00:00:00Z",
     last_fired_at: null,
     last_fired_run_id: null,
@@ -93,6 +110,16 @@ function makeDeps(overrides: Partial<ManageSchedulesDeps> = {}): ManageSchedules
         created_by_agent: params.createdByAgent,
       })
     ) as any,
+    upsertScheduledJobByExternalKeyWithQuota: mock(async (params: any) => ({
+      status: "ok",
+      job: fakeJobRow({
+        external_key: params.externalKey,
+        action_type: params.actionType,
+        action_args: params.actionArgs,
+        created_by_user: params.createdByUser,
+        created_by_agent: params.createdByAgent,
+      }),
+    })) as any,
     listScheduledJobs: mock(async () => []) as any,
     getScheduledJob: mock(async () => null) as any,
     pauseScheduledJob: mock(async () => true) as any,
@@ -520,5 +547,224 @@ describe("manage_schedules attribution regression — all roles stamp createdByA
     );
     const call = (deps.createScheduledJob as any).mock.calls[0][0];
     expect(call.createdByAgent).toBeNull();
+  });
+});
+
+describe("manage_schedules creation_key routing", () => {
+  test("keyed create passes until_at to the persisted schedule", async () => {
+    const deps = makeDeps();
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, {
+        creation_key: "toolbox:schedule:bounded",
+        cron: "0 9 * * *",
+        until_at: "2030-06-30T09:00:00.000Z",
+      }) as any,
+      {} as any,
+      trustedAdminPatCtx(),
+      deps
+    );
+
+    expect(result.error).toBeUndefined();
+    expect((deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0]).toMatchObject({
+      externalKey: "toolbox:schedule:bounded",
+      untilAt: new Date("2030-06-30T09:00:00.000Z"),
+    });
+  });
+
+  test("create without creation_key keeps using createScheduledJob", async () => {
+    const deps = makeDeps();
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(deps.createScheduledJob).toHaveBeenCalledTimes(1);
+    expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
+  });
+
+  test("create trims creation_key and uses full-payload external-key upsert", async () => {
+    const deps = makeDeps();
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, { creation_key: "  toolbox:schedule:42  " }) as any,
+      {} as any,
+      trustedAdminPatCtx(),
+      deps
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(deps.createScheduledJob).not.toHaveBeenCalled();
+    expect(deps.upsertScheduledJobByExternalKeyWithQuota).toHaveBeenCalledTimes(1);
+    expect((deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0]).toMatchObject({
+      externalKey: "toolbox:schedule:42",
+      changeDetection: "full",
+      createdByUser: "toolbox-adapter",
+      activeQuota: undefined,
+    });
+    expect(result.schedule?.creation_key).toBe("toolbox:schedule:42");
+  });
+
+  test("external-key create without a user returns an error and never falls back", async () => {
+    const deps = makeDeps();
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, { creation_key: "toolbox:schedule:42" }) as any,
+      {} as any,
+      adminCtx({ userId: null }),
+      deps
+    );
+
+    expect(result.error).toMatch(/creation_key.*user/i);
+    expect(deps.createScheduledJob).not.toHaveBeenCalled();
+    expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
+  });
+
+  test("blank creation_key is rejected by internal create validation", async () => {
+    const deps = makeDeps();
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, { creation_key: "   " }) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+
+    expect(result.error).toMatch(/creation_key/i);
+    expect(deps.createScheduledJob).not.toHaveBeenCalled();
+    expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
+  });
+
+  test.each(["toolbox:schedule:new", "toolbox:schedule:existing"])(
+    "member receives the same rejection for organization creation_key %s",
+    async (creationKey) => {
+      const deps = makeDeps();
+
+      const result = await manageSchedules(
+        wakeCreateArgs(MEMBER_AGENT, { creation_key: creationKey }) as any,
+        {} as any,
+        memberCtx(),
+        deps
+      );
+
+      expect(result).toEqual({ error: "Schedule creation keys require trusted access." });
+      expect(deps.createScheduledJob).not.toHaveBeenCalled();
+      expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
+    }
+  );
+
+  test.each([
+    ["session", memberCtx({ tokenType: "session", scopes: ["mcp:write", "mcp:admin"] })],
+    ["oauth", memberCtx({ tokenType: "oauth", scopes: ["mcp:write", "mcp:admin"] })],
+    [
+      "unauthenticated PAT",
+      memberCtx({
+        tokenType: "pat",
+        scopes: ["mcp:write", "mcp:admin"],
+        isAuthenticated: false,
+      }),
+    ],
+  ])("member cannot gain creation_key access from %s scope strings", async (_kind, ctx) => {
+    const deps = makeDeps({
+      upsertScheduledJobByExternalKeyWithQuota: mock(async () => {
+        throw new Error("must reject before keyed service lookup");
+      }) as any,
+    });
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, { creation_key: "toolbox:schedule:private" }) as any,
+      {} as any,
+      ctx,
+      deps
+    );
+
+    expect(result).toEqual({ error: "Schedule creation keys require trusted access." });
+    expect(deps.createScheduledJob).not.toHaveBeenCalled();
+    expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["admin", adminCtx()],
+    ["owner", adminCtx({ memberRole: "owner", userId: "user-owner" })],
+  ])("%s can reuse another user's organization-scoped creation_key", async (_role, ctx) => {
+    const existing = fakeJobRow({
+      id: "job-shared",
+      external_key: "toolbox:schedule:shared",
+      created_by_user: "user-original",
+      created_by_agent: "shifu-u-original",
+    });
+    const deps = makeDeps({
+      upsertScheduledJobByExternalKeyWithQuota: mock(async () => ({
+        status: "ok",
+        job: existing,
+      })) as any,
+    });
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, {
+        creation_key: "toolbox:schedule:shared",
+      }) as any,
+      {} as any,
+      ctx,
+      deps
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.schedule).toMatchObject({
+      id: "job-shared",
+      creation_key: "toolbox:schedule:shared",
+      created_by_user: "user-original",
+    });
+    expect(
+      (deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0].activeQuota
+    ).toBeUndefined();
+  });
+
+  test("authenticated organization PAT with mcp:admin can reuse another user's creation_key", async () => {
+    const existing = fakeJobRow({
+      id: "job-pat-shared",
+      external_key: "toolbox:schedule:pat-shared",
+      created_by_user: "user-original",
+      created_by_agent: "shifu-u-original",
+    });
+    const deps = makeDeps({
+      upsertScheduledJobByExternalKeyWithQuota: mock(async () => ({
+        status: "ok",
+        job: existing,
+      })) as any,
+    });
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, {
+        creation_key: "toolbox:schedule:pat-shared",
+      }) as any,
+      {} as any,
+      trustedAdminPatCtx(),
+      deps
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.schedule?.id).toBe("job-pat-shared");
+    expect(
+      (deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0].activeQuota
+    ).toBeUndefined();
+  });
+
+  test("admin keyed create is unrestricted by active quota", async () => {
+    const deps = makeDeps();
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, { creation_key: "toolbox:schedule:admin" }) as any,
+      {} as any,
+      adminCtx(),
+      deps
+    );
+
+    expect(result.error).toBeUndefined();
+    expect((deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0].activeQuota).toBeUndefined();
   });
 });

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { createLogger, type MessagePayload } from "@lobu/core";
-import type { IMessageQueue } from "./types.js";
+import type { IMessageQueue, QueueSendDisposition } from "./types.js";
 
 const logger = createLogger("queue-producer");
 
@@ -95,10 +95,36 @@ export class QueueProducer {
 		}
 	}
 
-	/**
-	 * Check if producer is initialized
-	 */
-	isHealthy(): boolean {
-		return this.isInitialized && this.queue.isHealthy();
-	}
+  async enqueueDurableMessage(
+    payload: MessagePayload,
+    options?: {
+      priority?: number;
+      retryLimit?: number;
+      retryDelay?: number;
+      expireInSeconds?: number;
+    },
+  ): Promise<QueueSendDisposition> {
+    if (!this.isInitialized) {
+      throw new Error("Queue producer is not initialized");
+    }
+    if (!payload.messageId) {
+      throw new Error("Durable messages require a stable messageId");
+    }
+
+    const rawSingletonKey = `message-${payload.platform}-${payload.channelId}-${payload.conversationId}-${payload.messageId}`;
+    return this.queue.sendDurable("messages", payload, {
+      priority: options?.priority || 0,
+      retryLimit: options?.retryLimit || 3,
+      retryDelay: options?.retryDelay || 30,
+      expireInSeconds: options?.expireInSeconds || 300,
+      singletonKey: rawSingletonKey.replace(/:/g, "-"),
+    });
+  }
+
+  /**
+   * Check if producer is initialized
+   */
+  isHealthy(): boolean {
+    return this.isInitialized && this.queue.isHealthy();
+  }
 }

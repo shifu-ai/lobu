@@ -291,6 +291,25 @@ export class RunsQueue implements IMessageQueue {
     data: T,
     options?: QueueOptions,
   ): Promise<string> {
+    return (await this.sendWithDisposition(queueName, data, options)).jobId;
+  }
+
+  async sendDurable<T>(
+    queueName: string,
+    data: T,
+    options: QueueOptions & { singletonKey: string },
+  ): Promise<{ jobId: string; deduplicated: boolean }> {
+    return this.sendWithDisposition(queueName, data, {
+      ...options,
+      durableSingleton: true,
+    });
+  }
+
+  private async sendWithDisposition<T>(
+    queueName: string,
+    data: T,
+    options?: QueueOptions,
+  ): Promise<{ jobId: string; deduplicated: boolean }> {
     if (!this.isConnected) throw new Error("RunsQueue not started");
     if (this.shuttingDown) {
       throw new Error("RunsQueue is shutting down; refusing new work");
@@ -346,7 +365,7 @@ export class RunsQueue implements IMessageQueue {
     // runAt/expires_at are interpolated as raw SQL fragments via two helpers
     // because postgres-js can't parameterize an `interval` argument that is
     // itself a JS number-of-ms — we just compose the SQL.
-    const id = await sql.begin(async (tx: DbClient) => {
+    const disposition = await sql.begin(async (tx: DbClient) => {
       let durableReceiptCreated = false;
       if (options?.durableSingleton && idempotencyKey) {
         const receipt = await tx<{ idempotency_key: string }>`
@@ -362,7 +381,10 @@ export class RunsQueue implements IMessageQueue {
             LIMIT 1
           `;
           if (!existing[0] || existing[0].queue_name !== queueName || existing[0].organization_id !== organizationIdFromPayload) throw new Error("Durable dispatch receipt scope collision");
-          return String(existing[0]?.run_id ?? `receipt:${idempotencyKey}`);
+          return {
+            jobId: String(existing[0]?.run_id ?? `receipt:${idempotencyKey}`),
+            deduplicated: true,
+          };
         }
         durableReceiptCreated = true;
       }
@@ -419,13 +441,13 @@ export class RunsQueue implements IMessageQueue {
         `;
         const existingId=String(existing[0]?.id??"");
         if(options?.durableSingleton&&durableReceiptCreated&&existingId)await tx`UPDATE public.queue_dispatch_receipts SET run_id=${Number(existingId)} WHERE idempotency_key=${idempotencyKey} AND queue_name=${queueName} AND organization_id IS NOT DISTINCT FROM ${organizationIdFromPayload}`;
-        return existingId;
+        return { jobId: existingId, deduplicated: true };
       }
       const insertedId = String(result[0]?.id ?? "");
       if (options?.durableSingleton && idempotencyKey && insertedId) {
         await tx`UPDATE public.queue_dispatch_receipts SET run_id = ${Number(insertedId)} WHERE idempotency_key = ${idempotencyKey}`;
       }
-      return insertedId;
+      return { jobId: insertedId, deduplicated: false };
     });
 
     // Wake listeners post-commit. Failure here is non-fatal; pollers catch
@@ -438,15 +460,15 @@ export class RunsQueue implements IMessageQueue {
       );
     }
 
-    queueBreadcrumb("enqueue", `Enqueued run ${id}`, {
-      runId: id,
+    queueBreadcrumb("enqueue", `Enqueued run ${disposition.jobId}`, {
+      runId: disposition.jobId,
       queueName,
       runType,
       priority,
       idempotencyKey,
     });
 
-    return id;
+    return disposition;
   }
 
   // ── Consumer ────────────────────────────────────────────────────────────

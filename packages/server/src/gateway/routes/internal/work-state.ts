@@ -1,6 +1,10 @@
 #!/usr/bin/env bun
 
-import { createLogger } from "@lobu/core";
+import {
+  type AutomationConfirmationContext,
+  createLogger,
+  parseAutomationConfirmationContext,
+} from "@lobu/core";
 import { Hono } from "hono";
 import {
   type IMessageQueue,
@@ -25,6 +29,7 @@ interface WorkStateEvent {
   allowCustomResponse: true;
   options: StructuredDecisionOption[];
   createdAt: string;
+  confirmationContext?: AutomationConfirmationContext;
 }
 
 interface StructuredDecisionOption {
@@ -37,6 +42,21 @@ interface StructuredDecisionOption {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function requireNonEmptyString(
+  input: Record<string, unknown>,
+  field: string
+): string {
+  const value = input[field];
+  if (!isNonEmptyString(value)) {
+    throw new Error(`Work-state event requires ${field}`);
+  }
+  return value;
 }
 
 function assertRecoverableDecisionOptions(
@@ -93,34 +113,48 @@ function assertRecoverableDecisionOptions(
 }
 
 function parseWorkStateEvent(input: unknown): WorkStateEvent {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
+  if (!isRecord(input)) {
     throw new Error("Work-state event must be an object");
   }
-  const event = input as Partial<WorkStateEvent>;
+  const event = input;
   if (event.type !== "human_input.requested") {
     throw new Error("Unsupported work-state event type");
   }
   if (event.version !== 1) {
     throw new Error("Unsupported work-state event version");
   }
-  for (const field of [
-    "eventId",
-    "agentId",
-    "conversationId",
-    "channel",
-    "title",
-    "prompt",
-    "createdAt",
-  ] as const) {
-    if (!isNonEmptyString(event[field])) {
-      throw new Error(`Work-state event requires ${field}`);
-    }
-  }
+  const eventId = requireNonEmptyString(event, "eventId");
+  const agentId = requireNonEmptyString(event, "agentId");
+  const conversationId = requireNonEmptyString(event, "conversationId");
+  const channel = requireNonEmptyString(event, "channel");
+  const title = requireNonEmptyString(event, "title");
+  const prompt = requireNonEmptyString(event, "prompt");
+  const createdAt = requireNonEmptyString(event, "createdAt");
   if (event.allowCustomResponse !== true) {
     throw new Error("Work-state event must allow a custom response");
   }
   assertRecoverableDecisionOptions(event.options);
-  return event as WorkStateEvent;
+  const confirmationContext =
+    event.confirmationContext === undefined
+      ? undefined
+      : parseAutomationConfirmationContext(event.confirmationContext);
+  return {
+    type: event.type,
+    version: event.version,
+    eventId,
+    ...(isNonEmptyString(event.decisionId)
+      ? { decisionId: event.decisionId }
+      : {}),
+    agentId,
+    conversationId,
+    channel,
+    title,
+    prompt,
+    allowCustomResponse: event.allowCustomResponse,
+    options: event.options,
+    createdAt,
+    ...(confirmationContext ? { confirmationContext } : {}),
+  };
 }
 
 export function createWorkStateRoutes(

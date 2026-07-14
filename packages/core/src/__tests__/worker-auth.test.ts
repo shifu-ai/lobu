@@ -88,6 +88,8 @@ describe("worker auth token", () => {
       platform: "slack",
       sessionKey: "sess-abc",
       traceId: "trace-zzz",
+      tokenKind: "session",
+      trustedPlatformContext: true,
     });
     const d = verifyWorkerToken(token) as WorkerTokenData;
     expect(d).not.toBeNull();
@@ -97,6 +99,7 @@ describe("worker auth token", () => {
     expect(d.platform).toBe("slack");
     expect(d.sessionKey).toBe("sess-abc");
     expect(d.traceId).toBe("trace-zzz");
+    expect(d.trustedPlatformContext).toBe(true);
   });
 
   test("round-trips a trusted onboarding execution mode on a run token", () => {

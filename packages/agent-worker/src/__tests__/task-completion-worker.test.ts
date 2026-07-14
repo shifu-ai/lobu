@@ -36,7 +36,10 @@ function buildWorkerWithRecorder() {
   const worker = new OpenClawWorker(mockWorkerConfig);
   const sent: SentDelta[] = [];
   const errors: Error[] = [];
-  let doneCount = 0;
+  const doneCalls: Array<{
+    finalDelta?: string;
+    awaitingHumanDecision?: boolean;
+  }> = [];
   const noop = () => undefined;
   const asyncNoop = async () => undefined;
   worker.workerTransport = {
@@ -44,8 +47,8 @@ function buildWorkerWithRecorder() {
     async sendStreamDelta(delta, isFullReplacement, isFinal) {
       sent.push({ delta, isFullReplacement, isFinal });
     },
-    async signalDone() {
-      doneCount += 1;
+    async signalDone(finalDelta, awaitingHumanDecision) {
+      doneCalls.push({ finalDelta, awaitingHumanDecision });
     },
     signalCompletion: asyncNoop,
     async signalError(error) {
@@ -65,13 +68,66 @@ function buildWorkerWithRecorder() {
     worker,
     sent,
     errors,
-    getDoneCount: () => doneCount,
+    doneCalls,
+    getDoneCount: () => doneCalls.length,
     processor,
     applyTaskCompletionGuard,
   };
 }
 
 describe("OpenClawWorker task completion guard", () => {
+  test("completes a shared ask_user/request_human_decision terminal with empty final text", async () => {
+    const { worker, sent, errors, doneCalls } = buildWorkerWithRecorder();
+
+    // Both source tools call the same onAskUserPosted hook and therefore reach
+    // the worker as the same verified TurnController `ask-user` result.
+    const completed = await (worker as any).completeSuccessfulSession(
+      {
+        success: true,
+        exitCode: 0,
+        output: "",
+        awaitingHumanDecision: true,
+        sessionKey: mockWorkerConfig.sessionKey,
+      },
+      "Please ask me to choose",
+      false
+    );
+
+    expect(completed).toBe(true);
+    expect(sent).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(doneCalls).toEqual([
+      { finalDelta: undefined, awaitingHumanDecision: true },
+    ]);
+    expect((worker as any).terminalStatus).toBe("completed");
+  });
+
+  test("still rejects an ordinary successful turn with empty final text", async () => {
+    const { worker, sent, errors, doneCalls } = buildWorkerWithRecorder();
+
+    const completed = await (worker as any).completeSuccessfulSession(
+      {
+        success: true,
+        exitCode: 0,
+        output: "",
+        awaitingHumanDecision: false,
+        sessionKey: mockWorkerConfig.sessionKey,
+      },
+      "Please complete this task",
+      false
+    );
+
+    expect(completed).toBe(false);
+    expect(doneCalls).toEqual([]);
+    expect(sent).toEqual([
+      expect.objectContaining({ isFullReplacement: true, isFinal: true }),
+    ]);
+    expect(errors.map((error) => error.message)).toEqual([
+      "task_completion_empty_final",
+    ]);
+    expect((worker as any).terminalStatus).toBe("failed");
+  });
+
   test("fails loud when final visible text is empty", async () => {
     const { sent, errors, getDoneCount, applyTaskCompletionGuard } =
       buildWorkerWithRecorder();

@@ -5,6 +5,7 @@ import {
   createLogger,
   createRootSpan,
   generateWorkerToken,
+  type MessagePayload,
   type McpServerConfig,
   type NetworkConfig,
   normalizeDomainPatterns,
@@ -132,6 +133,7 @@ const SendMessageRequestSchema = z
       .optional()
       .describe("Message content (alias for content)"),
     messageId: z.string().optional(),
+    durableMessage: z.boolean().optional(),
     platform: z
       .string()
       .optional()
@@ -149,6 +151,7 @@ const SendMessageResponseSchema = z.object({
   jobId: z.string().optional(),
   eventsUrl: z.string().optional(),
   queued: z.boolean(),
+  deduplicated: z.boolean().optional(),
   traceparent: z.string().optional(),
 });
 
@@ -747,6 +750,10 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       ? (await ownershipMetadataStore.getMetadata(agentId))?.organizationId
       : undefined;
     const tokenOrganizationId = metadataOrgId ?? callerOrgId;
+    const trustedPlatformContext =
+      c.get("authSource") === "pat" &&
+      ((c.get("mcpAuthInfo") as { scopes?: string[] } | undefined)?.scopes ??
+        []).includes("mcp:admin");
 
     const watcherIntent = intent?.kind === "watcher_run" ? intent : null;
     // userId backs `conversationId = ${agentId}_${userId}[_${thread}]`, which
@@ -828,6 +835,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
             platform: "api",
             sessionKey: userId,
             tokenKind: "session",
+            trustedPlatformContext,
           }
         );
 
@@ -859,6 +867,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       platform: "api",
       sessionKey: userId,
       tokenKind: "session",
+      trustedPlatformContext,
     });
 
     const expiresAt = Date.now() + TOKEN_EXPIRATION_MS;
@@ -1330,6 +1339,57 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       !Array.isArray(body.platformMetadata)
         ? body.platformMetadata
         : {};
+    const {
+      automationModificationContext: requestedAutomationModificationContext,
+      ...safeRequestPlatformMetadata
+    } = requestPlatformMetadata;
+    const messageWorkerToken = tokenFromHeader(c);
+    const messageWorkerData = messageWorkerToken
+      ? verifyWorkerToken(messageWorkerToken)
+      : null;
+    const mayProvideTrustedPlatformContext =
+      messageWorkerData?.tokenKind === "session" &&
+      messageWorkerData.trustedPlatformContext === true &&
+      messageWorkerData.conversationId === agentId;
+    const trustedDurableMessage =
+      mayProvideTrustedPlatformContext && body.durableMessage === true;
+    if (
+      trustedDurableMessage &&
+      (typeof body.messageId !== "string" ||
+        !/^[A-Za-z0-9._-]{1,200}$/.test(body.messageId))
+    ) {
+      return c.json(
+        { success: false, error: "Invalid durable message delivery" },
+        400,
+      );
+    }
+    if (
+      mayProvideTrustedPlatformContext &&
+      requestedAutomationModificationContext !== undefined &&
+      (!requestedAutomationModificationContext ||
+        typeof requestedAutomationModificationContext !== "object" ||
+        Array.isArray(requestedAutomationModificationContext) ||
+        typeof requestedAutomationModificationContext.deliveryId !== "string" ||
+        !/^[A-Za-z0-9._-]{1,200}$/.test(
+          requestedAutomationModificationContext.deliveryId,
+        ) ||
+        requestedAutomationModificationContext.deliveryId !== messageId)
+    ) {
+      return c.json(
+        { success: false, error: "Invalid automation modification delivery" },
+        400,
+      );
+    }
+    const trustedAutomationModificationContext =
+      mayProvideTrustedPlatformContext &&
+      requestedAutomationModificationContext &&
+      typeof requestedAutomationModificationContext === "object" &&
+      !Array.isArray(requestedAutomationModificationContext)
+        ? {
+            ...requestedAutomationModificationContext,
+            trustedByServer: true,
+          }
+        : undefined;
 
     const { span: rootSpan, traceparent } = createRootSpan("message_received", {
       "lobu.agent_id": realAgentId,
@@ -1385,7 +1445,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         ...remainingOptions
       } = agentOptions;
 
-      const jobId = await queueProducer.enqueueMessage({
+      const directPayload: MessagePayload = {
         userId: session.userId,
         conversationId: session.conversationId || agentId,
         messageId,
@@ -1399,11 +1459,17 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         platform: "api",
         messageText: directMessageText,
         platformMetadata: {
-          ...requestPlatformMetadata,
+          ...safeRequestPlatformMetadata,
+          ...(trustedAutomationModificationContext
+            ? {
+                automationModificationContext:
+                  trustedAutomationModificationContext,
+              }
+            : {}),
           agentId: realAgentId,
           source:
-            typeof requestPlatformMetadata.source === "string"
-              ? requestPlatformMetadata.source
+            typeof safeRequestPlatformMetadata.source === "string"
+              ? safeRequestPlatformMetadata.source
               : session.intent?.kind === "watcher_run"
                 ? "watcher-run"
                 : "direct-api",
@@ -1426,15 +1492,27 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         mcpConfig: settingsMcpServers
           ? { mcpServers: settingsMcpServers }
           : session.mcpConfig,
-      });
+      };
+      const durableDispatch = Boolean(
+        trustedAutomationModificationContext || trustedDurableMessage,
+      );
+      const disposition = durableDispatch
+        ? await queueProducer.enqueueDurableMessage(directPayload)
+        : {
+            jobId: await queueProducer.enqueueMessage(directPayload),
+            deduplicated: false,
+          };
 
       rootSpan?.end();
 
       return c.json({
         success: true,
         messageId,
-        jobId,
+        jobId: disposition.jobId,
         queued: true,
+        ...(durableDispatch
+          ? { deduplicated: disposition.deduplicated }
+          : {}),
         traceparent: traceparent || undefined,
       });
     } catch (error) {

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   askUserQuestion,
   getChannelHistory,
+  requestHumanDecision,
   uploadUserFile,
 } from "../shared/tool-implementations";
 
@@ -17,7 +18,28 @@ const gw = {
   channelId: "channel-1",
   conversationId: "conversation-1",
   platform: "telegram",
+  agentId: "agent-1",
 };
+
+const decisionOptions = [
+  {
+    value: "confirm",
+    label: "Confirm",
+    tradeoff: "Creates the automation.",
+    recommended: true,
+    recommendationReason: "Matches the reviewed plan.",
+  },
+  {
+    value: "revise",
+    label: "Revise",
+    tradeoff: "Requires another review round.",
+  },
+  {
+    value: "cancel",
+    label: "Cancel",
+    tradeoff: "No automation will be created.",
+  },
+];
 
 function extractText(result: {
   content: Array<{ type: "text"; text: string }>;
@@ -197,6 +219,76 @@ describe("tool implementations", () => {
     // A failed post must not end the turn — the model should be free to react.
     expect(posted).toBe(0);
     expect(extractText(result as any)).toContain("Error");
+  });
+
+  test("requestHumanDecision includes automation confirmation context in the event", async () => {
+    let capturedBody: Record<string, unknown> | null = null;
+    globalThis.fetch = mock(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = JSON.parse(String(init?.body));
+        return Response.json({ id: "decision-1" });
+      }
+    ) as unknown as typeof fetch;
+
+    await requestHumanDecision(gw, {
+      title: "Confirm automation",
+      prompt: "Create this automation?",
+      options: decisionOptions,
+      confirmationContext: {
+        kind: "automation_create",
+        planId: "plan-1",
+        planVersion: 2,
+        contentHash: "sha256:abc",
+      },
+    });
+
+    expect(capturedBody).toMatchObject({
+      type: "human_input.requested",
+      confirmationContext: {
+        kind: "automation_create",
+        planId: "plan-1",
+        planVersion: 2,
+        contentHash: "sha256:abc",
+      },
+    });
+  });
+
+  test("requestHumanDecision omits confirmationContext for ordinary decisions", async () => {
+    let capturedBody: Record<string, unknown> | null = null;
+    globalThis.fetch = mock(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = JSON.parse(String(init?.body));
+        return Response.json({ id: "decision-1" });
+      }
+    ) as unknown as typeof fetch;
+
+    await requestHumanDecision(gw, {
+      title: "Choose recovery",
+      prompt: "How should this continue?",
+      options: decisionOptions,
+    });
+
+    expect(Object.hasOwn(capturedBody!, "confirmationContext")).toBe(false);
+  });
+
+  test("requestHumanDecision rejects invalid confirmation context before posting", async () => {
+    const fetchMock = mock(async () => Response.json({ id: "decision-1" }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await requestHumanDecision(gw, {
+      title: "Confirm automation",
+      prompt: "Create this automation?",
+      options: decisionOptions,
+      confirmationContext: {
+        kind: "automation_create",
+        planId: "plan-1",
+        planVersion: "1",
+        contentHash: "sha256:abc",
+      } as never,
+    });
+
+    expect(extractText(result as any)).toContain("Error");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test("getChannelHistory returns note responses and formatted history", async () => {

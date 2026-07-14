@@ -110,6 +110,123 @@ describe("work-state routes", () => {
     );
   });
 
+  test("enqueues validated automation confirmation context unchanged", async () => {
+    const confirmationContext = {
+      kind: "automation_create",
+      planId: "plan-1",
+      planVersion: 3,
+      contentHash: "sha256:abc",
+    };
+    const res = await router.request("/internal/work-state/events", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${workerToken}`,
+      },
+      body: JSON.stringify({ ...eventBody, confirmationContext }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(queueProducer.send.mock.calls[0][1]).toMatchObject({
+      customEvent: {
+        name: "shifu.work_state",
+        data: { ...eventBody, confirmationContext },
+      },
+    });
+  });
+
+  test.each([
+    [
+      "unknown kind",
+      {
+        kind: "unknown",
+        planId: "plan-1",
+        planVersion: 1,
+        contentHash: "hash",
+      },
+    ],
+    [
+      "blank plan id",
+      {
+        kind: "automation_create",
+        planId: " ",
+        planVersion: 1,
+        contentHash: "hash",
+      },
+    ],
+    [
+      "zero version",
+      {
+        kind: "automation_create",
+        planId: "plan-1",
+        planVersion: 0,
+        contentHash: "hash",
+      },
+    ],
+    [
+      "string version",
+      {
+        kind: "automation_create",
+        planId: "plan-1",
+        planVersion: "1",
+        contentHash: "hash",
+      },
+    ],
+    [
+      "fractional version",
+      {
+        kind: "automation_create",
+        planId: "plan-1",
+        planVersion: 1.5,
+        contentHash: "hash",
+      },
+    ],
+    [
+      "blank content hash",
+      {
+        kind: "automation_create",
+        planId: "plan-1",
+        planVersion: 1,
+        contentHash: " ",
+      },
+    ],
+    [
+      "unknown field",
+      {
+        kind: "automation_create",
+        planId: "plan-1",
+        planVersion: 1,
+        contentHash: "hash",
+        extra: true,
+      },
+    ],
+    ["missing kind", { planId: "plan-1", planVersion: 1, contentHash: "hash" }],
+    [
+      "missing plan id",
+      { kind: "automation_create", planVersion: 1, contentHash: "hash" },
+    ],
+    [
+      "missing version",
+      { kind: "automation_create", planId: "plan-1", contentHash: "hash" },
+    ],
+    [
+      "missing content hash",
+      { kind: "automation_create", planId: "plan-1", planVersion: 1 },
+    ],
+  ])("rejects confirmation context with %s", async (_label, confirmationContext) => {
+    const res = await router.request("/internal/work-state/events", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${workerToken}`,
+      },
+      body: JSON.stringify({ ...eventBody, confirmationContext }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(queueProducer.send).not.toHaveBeenCalled();
+  });
+
   test("rejects malformed work-state events", async () => {
     const res = await router.request("/internal/work-state/events", {
       method: "POST",

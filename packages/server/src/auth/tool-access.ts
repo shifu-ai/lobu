@@ -12,6 +12,34 @@
 
 export type ToolAccessLevel = 'read' | 'write' | 'admin';
 
+export interface VerifiedOrganizationAdminPatContext {
+  organizationId?: string | null;
+  tokenOrganizationId?: string | null;
+  isAuthenticated: boolean;
+  tokenType: string;
+  scopes?: string[] | null;
+  allowCrossOrg: boolean;
+}
+
+/**
+ * True only for a server-verified, organization-bound PAT carrying mcp:admin.
+ * Scope strings alone are insufficient: session/OAuth contexts, failed auth,
+ * and PATs bound to another organization all fail closed.
+ */
+export function isVerifiedOrganizationAdminPat(
+  ctx: VerifiedOrganizationAdminPatContext
+): boolean {
+  return (
+    ctx.isAuthenticated === true &&
+    ctx.tokenType === 'pat' &&
+    ctx.allowCrossOrg === false &&
+    typeof ctx.organizationId === 'string' &&
+    ctx.organizationId.length > 0 &&
+    ctx.tokenOrganizationId === ctx.organizationId &&
+    ctx.scopes?.includes('mcp:admin') === true
+  );
+}
+
 const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
   save_memory: null,
   // `run_sdk` reaches admin handlers inside the script; per-call gates fire

@@ -48,8 +48,31 @@ function createConsumer(overrides?: {
   if (overrides?.chatResponseBridge) {
     consumer.setChatResponseBridge(overrides.chatResponseBridge as any);
   }
-  return { consumer, platformRegistry, renderer };
+  return { consumer, platformRegistry, renderer, sseManager };
 }
+
+describe("UnifiedThreadResponseConsumer completion contract", () => {
+  test("preserves awaitingHumanDecision in complete SSE data", async () => {
+    const { consumer, renderer, sseManager } = createConsumer();
+    sseManager.hasActiveConnection.mockReturnValue(true);
+
+    await consumer.handleThreadResponse({
+      id: "terminal-decision",
+      data: {
+        ...basePayload,
+        platform: "api",
+        teamId: "api",
+        awaitingHumanDecision: true,
+        platformMetadata: { sessionId: "cli-session-1" },
+      },
+    });
+
+    expect(renderer.handleCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({ awaitingHumanDecision: true }),
+      expect.any(String)
+    );
+  });
+});
 
 describe("UnifiedThreadResponseConsumer scheduled course delivery", () => {
   const scheduledPayload = {
@@ -247,6 +270,12 @@ describe("UnifiedThreadResponseConsumer customEvent broadcast", () => {
             type: "human_input.requested",
             eventId: "decision-1",
             title: "Blocked",
+            confirmationContext: {
+              kind: "automation_create",
+              planId: "plan-1",
+              planVersion: 2,
+              contentHash: "sha256:abc",
+            },
           },
         },
       },
@@ -261,11 +290,64 @@ describe("UnifiedThreadResponseConsumer customEvent broadcast", () => {
       expect.objectContaining({
         type: "human_input.requested",
         eventId: "decision-1",
+        confirmationContext: {
+          kind: "automation_create",
+          planId: "plan-1",
+          planVersion: 2,
+          contentHash: "sha256:abc",
+        },
         messageId: "decision-1",
         timestamp: 1000,
       })
     );
     expect(renderer.handleCompletion).not.toHaveBeenCalled();
+  });
+
+  test("ordinary shifu.work_state SSE omits confirmationContext", async () => {
+    const queue = {
+      start: mock(async () => undefined),
+      stop: mock(async () => undefined),
+      createQueue: mock(async () => undefined),
+      work: mock(async () => undefined),
+    };
+    const broadcast = mock(() => undefined);
+    const consumer = new UnifiedThreadResponseConsumer(
+      queue as any,
+      {
+        get: mock(() => ({
+          getResponseRenderer: () => ({
+            handleCompletion: mock(async () => undefined),
+            handleError: mock(async () => undefined),
+          }),
+        })),
+      } as any,
+      { broadcast, hasActiveConnection: mock(() => true) } as any
+    ) as any;
+
+    await consumer.handleThreadResponse({
+      id: "job-ordinary-work-state",
+      data: {
+        messageId: "decision-ordinary",
+        channelId: "line:U1",
+        conversationId: "conv-1",
+        userId: "user-1",
+        teamId: "team-1",
+        platform: "api",
+        timestamp: 1000,
+        customEvent: {
+          name: "shifu.work_state",
+          requireSseOwner: true,
+          data: {
+            type: "human_input.requested",
+            eventId: "decision-ordinary",
+            title: "Blocked",
+          },
+        },
+      },
+    });
+
+    const emittedEvent = broadcast.mock.calls[0]?.[2];
+    expect(Object.hasOwn(emittedEvent, "confirmationContext")).toBe(false);
   });
 
   test("re-queues shifu.work_state when this pod does not own the SSE", async () => {

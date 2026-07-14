@@ -76,6 +76,7 @@ import {
 } from "./plugin-loader";
 import type { OpenClawProgressProcessor } from "./processor";
 import { buildAgentSession } from "./session-builder";
+import { buildTrustedAutomationModificationTurnContext } from "./automation-modification-context";
 import { toUserVisibleSessionError } from "./context-overflow-recovery";
 import {
   buildResolvedCourseContextInstructions,
@@ -608,7 +609,7 @@ export interface RunAISessionParams {
    * gateway calls made by first-class tools must use this token instead of
    * the deployment-lifetime WORKER_TOKEN so worker-auth can resolve the
    * current agent/user/run context.
-   */
+  */
   runJobToken?: string;
   resolvedCourseContext?: ResolvedCourseExecutionContext;
   trustedExecutionScope?: TrustedExecutionScope;
@@ -971,7 +972,7 @@ export async function runAISession(
   params: RunAISessionParams
 ): Promise<SessionExecutionResult> {
   const {
-    userPrompt,
+    userPrompt: rawUserPrompt,
     customInstructions,
     onProgress,
     agentOptions,
@@ -994,6 +995,11 @@ export async function runAISession(
     maybeRunPreCompactionMemoryFlush,
     maybeBuildAuthHintMessage,
   } = params;
+  const automationModificationTurn = buildTrustedAutomationModificationTurnContext({
+    userPrompt: rawUserPrompt,
+    platformMetadata,
+  });
+  const userPrompt = automationModificationTurn.userPrompt;
 
   let rawOptions: Record<string, unknown>;
   try {
@@ -1497,6 +1503,7 @@ export async function runAISession(
   const instructionParts = [
     gatewayInstructions,
     resolvedCourseInstructions,
+    automationModificationTurn.systemInstructions,
     trustedExecutionScopeInstructions,
     customInstructions,
   ];
@@ -2276,6 +2283,7 @@ Use it when the user references past discussions or you need context.`);
         success: true,
         exitCode: 0,
         output: "",
+        awaitingHumanDecision: false,
         sessionKey,
       };
     }
@@ -2405,6 +2413,7 @@ Use it when the user references past discussions or you need context.`);
         success: false,
         exitCode: 1,
         output: "",
+        awaitingHumanDecision: false,
         error: errorWithHint,
         sessionKey,
       };
@@ -2502,6 +2511,7 @@ Use it when the user references past discussions or you need context.`);
       success: true,
       exitCode: 0,
       output: "",
+      awaitingHumanDecision: turnController.awaitingHumanDecision,
       sessionKey,
     };
   } catch (error) {
@@ -2538,6 +2548,7 @@ Use it when the user references past discussions or you need context.`);
       success: false,
       exitCode: 1,
       output: "",
+      awaitingHumanDecision: false,
       error: errorWithHint,
       sessionKey,
     };
