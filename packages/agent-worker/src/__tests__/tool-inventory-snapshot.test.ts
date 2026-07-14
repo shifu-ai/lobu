@@ -7,7 +7,10 @@ import {
 	toolInventorySnapshotCacheStats,
 } from "../openclaw/tool-inventory-snapshot";
 import { clearToolRetrievalIndexCacheForTests } from "../openclaw/tool-retrieval-index";
-import { toolRouterRetainedMemoryStats } from "../openclaw/tool-router-memory-budget";
+import {
+	clearToolRouterRetainedMemoryForTests,
+	toolRouterRetainedMemoryStats,
+} from "../openclaw/tool-router-memory-budget";
 
 function tool(name: string, description: string): McpToolDef {
 	return {
@@ -158,6 +161,7 @@ describe("external-turn immutable tool inventory snapshots", () => {
 	});
 
 	test("bounds immutable inventory snapshots to the worker cache budget", () => {
+		clearToolRouterRetainedMemoryForTests();
 		clearToolInventorySnapshotCacheForTests();
 		clearToolRetrievalIndexCacheForTests();
 		for (let version = 0; version < 12; version++) {
@@ -192,5 +196,49 @@ describe("external-turn immutable tool inventory snapshots", () => {
 		expect(combined.maxEntryBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
 		expect(stats.evictions).toBeGreaterThan(0);
 		expect(combined.evictions).toBeGreaterThan(0);
+	});
+
+	test("reports mixed-cache evictions on the route that caused them", () => {
+		clearToolRouterRetainedMemoryForTests();
+		clearToolInventorySnapshotCacheForTests();
+		clearToolRetrievalIndexCacheForTests();
+		for (let version = 0; version < 2; version++) {
+			snapshotToolsByMcp({
+				bulk: Array.from({ length: 350 }, (_, index) =>
+					tool(
+						`snapshot_${version}_${index}`,
+						`${"s".repeat(10_000)}-${version}-${index}`,
+					),
+				),
+			});
+		}
+		const before = toolRouterRetainedMemoryStats();
+		const route = initializeExternalTurnToolRouting(
+			{
+				toolsByMcp: {
+					search: Array.from({ length: 400 }, (_, index) =>
+						tool(
+							`search_${index}`,
+							`shared query ${"q".repeat(4_000)} ${index}`,
+						),
+					),
+				},
+				message: "shared query",
+				budget: 5,
+				routerMode: "semantic",
+				trace: {
+					traceId: "mixed-eviction",
+					journeyId: "test",
+					actor: "worker",
+					traceSource: "incoming",
+				},
+			},
+			{ emitEvent: () => undefined },
+		);
+		const after = toolRouterRetainedMemoryStats();
+		expect(after.evictions - before.evictions).toBeGreaterThan(0);
+		expect(route.selection.trace.cacheEvictionCount).toBe(
+			after.evictions - before.evictions,
+		);
 	});
 });

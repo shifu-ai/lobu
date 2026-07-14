@@ -132,6 +132,9 @@ function freezeDescriptor(descriptor: ToolDescriptor): ToolDescriptor {
 		positiveExamples: Object.freeze([...descriptor.positiveExamples]),
 		negativeExamples: Object.freeze([...descriptor.negativeExamples]),
 		sideEffectClasses: Object.freeze([...descriptor.sideEffectClasses]),
+		primarySideEffect: descriptor.primarySideEffect
+			? Object.freeze({ ...descriptor.primarySideEffect })
+			: null,
 	}) as ToolDescriptor;
 }
 
@@ -365,7 +368,8 @@ export function getOrBuildToolRetrievalIndex(
 				toolRetrievalIndexCacheEvictions++;
 			},
 		});
-		if (retained) {
+		cacheEvictionCount = retained.evictionCount;
+		if (retained.retained) {
 			toolRetrievalIndexCache.set(cacheKey, {
 				index,
 				estimatedBytes: index.estimatedBytes,

@@ -19,14 +19,16 @@ export function retainToolRouterCacheEntry(params: {
 	key: string;
 	estimatedBytes: number;
 	onEvict: () => void;
-}): boolean {
+}): { retained: boolean; evictionCount: number; evictedNamespaces: string[] } {
 	if (
 		params.estimatedBytes < 0 ||
 		params.estimatedBytes > MAX_ENTRY_BYTES ||
 		!Number.isFinite(params.estimatedBytes)
 	) {
-		return false;
+		return { retained: false, evictionCount: 0, evictedNamespaces: [] };
 	}
+	let currentEvictionCount = 0;
+	const evictedNamespaces: string[] = [];
 	const key = retainedKey(params.namespace, params.key);
 	const existing = retainedEntries.get(key);
 	if (existing) {
@@ -43,6 +45,8 @@ export function retainToolRouterCacheEntry(params: {
 		retainedEntries.delete(oldestKey);
 		retainedBytes -= oldest?.bytes ?? 0;
 		evictionCount++;
+		currentEvictionCount++;
+		evictedNamespaces.push(oldestKey.slice(0, oldestKey.indexOf("\u0000")));
 		oldest?.onEvict();
 	}
 	retainedEntries.set(key, {
@@ -50,7 +54,11 @@ export function retainToolRouterCacheEntry(params: {
 		onEvict: params.onEvict,
 	});
 	retainedBytes += params.estimatedBytes;
-	return true;
+	return {
+		retained: true,
+		evictionCount: currentEvictionCount,
+		evictedNamespaces,
+	};
 }
 
 export function touchToolRouterCacheEntry(

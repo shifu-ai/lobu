@@ -96,6 +96,7 @@ import {
   cloneAndFreezeJsonLike,
   snapshotToolsByMcp,
 } from "./tool-inventory-snapshot";
+import { toolRouterRetainedMemoryStats } from "./tool-router-memory-budget";
 import { createOpenClawTools } from "./tools";
 import { clearSnapshots, hydrateFromSnapshot } from "./transcript-snapshot";
 import {
@@ -368,6 +369,7 @@ export function initializeExternalTurnToolRouting(
   const emitEvent = dependencies.emitEvent ?? emitJourneyEvent;
   const now = dependencies.now ?? performance.now.bind(performance);
   const { trace, ...rawSelectionParams } = params;
+  const evictionCountBefore = toolRouterRetainedMemoryStats().evictions;
   const toolsByMcp = snapshotToolsByMcp(params.toolsByMcp);
   const allowedToolNames = params.allowedToolNames
     ? freezeStringArray([...params.allowedToolNames])
@@ -378,7 +380,15 @@ export function initializeExternalTurnToolRouting(
     allowedToolNames,
   };
   const routeStartedAt = now();
-  const selection = freezeToolRoutingSelection(selectTools(selectionParams));
+  const rawSelection = selectTools(selectionParams);
+  const cacheEvictionCount = Math.max(
+    0,
+    toolRouterRetainedMemoryStats().evictions - evictionCountBefore
+  );
+  const selection = freezeToolRoutingSelection({
+    ...rawSelection,
+    trace: { ...rawSelection.trace, cacheEvictionCount },
+  });
   const routeTotalMs = Math.max(0, now() - routeStartedAt);
   emitEvent(
     buildToolRouterJourneyEventInput({

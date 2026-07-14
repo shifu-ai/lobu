@@ -144,7 +144,7 @@ export function snapshotToolsByMcp(
 			snapshotCacheEvictions++;
 		},
 	});
-	if (!retained) {
+	if (!retained.retained) {
 		return snapshot;
 	}
 	snapshotCache.set(cacheKey, { serialized, snapshot, estimatedBytes });

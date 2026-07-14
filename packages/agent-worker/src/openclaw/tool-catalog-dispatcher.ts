@@ -58,7 +58,8 @@ export interface RuntimeToolSearchMatch {
 }
 
 interface RuntimeToolSearchContext {
-  index: ToolRetrievalIndex;
+  fingerprint: string;
+  indexRef: WeakRef<ToolRetrievalIndex>;
   entriesByIdentityKey: ReadonlyMap<string, RuntimeToolCatalogEntry>;
 }
 
@@ -73,14 +74,37 @@ function buildRuntimeToolSearchContext(
   const descriptors = catalog.map((entry) =>
     getOrBuildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex),
   );
+  const index = getOrBuildToolRetrievalIndex(descriptors).index;
   return {
-    index: getOrBuildToolRetrievalIndex(descriptors).index,
+    fingerprint: index.fingerprint,
+    indexRef: new WeakRef(index),
     entriesByIdentityKey: new Map(
       catalog.map(
         (entry) => [toolIdentityKey(entry.mcpId, entry.name), entry] as const,
       ),
     ),
   };
+}
+
+function resolveRuntimeToolSearchIndex(
+  catalog: RuntimeToolCatalogEntry[],
+  context: RuntimeToolSearchContext,
+): ToolRetrievalIndex {
+  const previousIndex = context.indexRef.deref();
+  const descriptors =
+    previousIndex?.fingerprint === context.fingerprint
+      ? [...previousIndex.descriptors]
+      : catalog.map((entry) =>
+          getOrBuildToolDescriptor(
+            entry.tool,
+            entry.mcpId,
+            entry.originalIndex,
+          ),
+        );
+  const index = getOrBuildToolRetrievalIndex(descriptors).index;
+  context.fingerprint = index.fingerprint;
+  context.indexRef = new WeakRef(index);
+  return index;
 }
 
 export type RuntimeToolCaller = (
@@ -270,12 +294,8 @@ export function searchRuntimeToolCatalog(
       )
       .map((entry) => toolIdentityKey(entry.mcpId, entry.name)),
   );
-  return searchToolRetrievalIndex(
-    context.index,
-    params.query,
-    limit,
-    eligibleKeys,
-  )
+  const index = resolveRuntimeToolSearchIndex(catalog, context);
+  return searchToolRetrievalIndex(index, params.query, limit, eligibleKeys)
     .map((match) => {
       const entry = context.entriesByIdentityKey.get(
         match.descriptor.identityKey,

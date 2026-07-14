@@ -19,6 +19,10 @@ const descriptorSnapshotCache = new WeakMap<
 const descriptorSourceIds = new WeakMap<McpToolDef, number>();
 let nextDescriptorSourceId = 1;
 const deeplyImmutableDescriptorSources = new WeakSet<object>();
+const descriptorSourceFinalizer = new FinalizationRegistry<string>(
+	(retainedKey) =>
+		releaseToolRouterCacheEntry(DESCRIPTOR_CACHE_NAMESPACE, retainedKey),
+);
 
 export function toolIdentityKey(mcpId: string, name: string): string {
 	return JSON.stringify([mcpId, name]);
@@ -45,6 +49,11 @@ export interface ToolDescriptor {
 	mutatesState: boolean;
 	requiresConfirmation: boolean;
 	sideEffectClasses: string[];
+	primarySideEffect: {
+		action: string;
+		resource: string;
+		destination: string;
+	} | null;
 	priority: ToolPriority;
 	originalIndex: number;
 	indexedTextBytes: number;
@@ -83,6 +92,9 @@ function freezeDescriptorSnapshot(descriptor: ToolDescriptor): ToolDescriptor {
 		positiveExamples: Object.freeze([...descriptor.positiveExamples]),
 		negativeExamples: Object.freeze([...descriptor.negativeExamples]),
 		sideEffectClasses: Object.freeze([...descriptor.sideEffectClasses]),
+		primarySideEffect: descriptor.primarySideEffect
+			? Object.freeze({ ...descriptor.primarySideEffect })
+			: null,
 	}) as ToolDescriptor;
 }
 
@@ -227,15 +239,105 @@ function inferOperations(name: string): ToolOperation[] {
 	for (const [operation, pattern] of [
 		["read", /(?:^|[_-])(read|get|list)(?:[_-]|$)/],
 		["search", /(?:^|[_-])(search|find|lookup)(?:[_-]|$)/],
-		["create", /(?:^|[_-])(create|add|insert)(?:[_-]|$)/],
-		["update", /(?:^|[_-])(update|edit|modify)(?:[_-]|$)/],
+		["create", /(?:^|[_-])(create|add|insert|upload|invite)(?:[_-]|$)/],
+		[
+			"update",
+			/(?:^|[_-])(update|edit|modify|save|submit|set|upsert|write)(?:[_-]|$)/,
+		],
 		["delete", /(?:^|[_-])(delete|remove|archive)(?:[_-]|$)/],
-		["send", /(?:^|[_-])(send|post|publish)(?:[_-]|$)/],
+		["send", /(?:^|[_-])(send|post|publish|execute|run|trigger)(?:[_-]|$)/],
 		["schedule", /(?:^|[_-])(schedule|remind)(?:[_-]|$)/],
 	] as const) {
 		if (pattern.test(normalized)) operations.push(operation);
 	}
 	return operations.length > 0 ? operations : ["unknown"];
+}
+
+const MUTATING_ACTIONS = new Set([
+	"create",
+	"add",
+	"insert",
+	"save",
+	"submit",
+	"upload",
+	"invite",
+	"execute",
+	"run",
+	"trigger",
+	"set",
+	"upsert",
+	"update",
+	"edit",
+	"modify",
+	"delete",
+	"remove",
+	"archive",
+	"send",
+	"post",
+	"publish",
+	"write",
+	"schedule",
+	"remind",
+]);
+const READ_ACTIONS = new Set([
+	"get",
+	"list",
+	"read",
+	"status",
+	"search",
+	"find",
+	"lookup",
+	"describe",
+]);
+
+function identifierTokens(name: string): string[] {
+	return name
+		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter(Boolean);
+}
+
+function standardToolAnnotations(tool: McpToolDef): {
+	readOnlyHint?: boolean;
+	destructiveHint?: boolean;
+} {
+	const annotations = (
+		tool as McpToolDef & {
+			annotations?: { readOnlyHint?: unknown; destructiveHint?: unknown };
+		}
+	).annotations;
+	return {
+		readOnlyHint:
+			typeof annotations?.readOnlyHint === "boolean"
+				? annotations.readOnlyHint
+				: undefined,
+		destructiveHint:
+			typeof annotations?.destructiveHint === "boolean"
+				? annotations.destructiveHint
+				: undefined,
+	};
+}
+
+function primarySideEffect(
+	name: string,
+	mcpId: string,
+	destinations: readonly ToolDestination[],
+): ToolDescriptor["primarySideEffect"] {
+	const tokens = identifierTokens(name);
+	const action =
+		tokens.find((token) => MUTATING_ACTIONS.has(token)) ?? "potential_write";
+	const resourceTokens = tokens.filter(
+		(token) =>
+			!MUTATING_ACTIONS.has(token) &&
+			!READ_ACTIONS.has(token) &&
+			!["gws", "tool", "tools", "api"].includes(token),
+	);
+	return {
+		action,
+		resource: resourceTokens.join("_") || "unknown_resource",
+		destination: destinations[0] ?? (sanitize(mcpId) || "unknown_destination"),
+	};
 }
 
 function inferSideEffectClasses(
@@ -337,9 +439,15 @@ export function buildToolDescriptor(
 	const override = DESCRIPTOR_OVERRIDES[identityKey];
 	const parameters = parameterMetadata(tool);
 	const inferredOperations = inferOperations(name);
-	const inferredMutating = inferredOperations.some((operation) =>
-		["create", "update", "delete", "send", "schedule"].includes(operation),
-	);
+	const tokens = identifierTokens(name);
+	const annotations = standardToolAnnotations(tool);
+	const hasMutatingAction = tokens.some((token) => MUTATING_ACTIONS.has(token));
+	const hasReadAction = tokens.some((token) => READ_ACTIONS.has(token));
+	const inferredMutating =
+		hasMutatingAction ||
+		annotations.destructiveHint === true ||
+		annotations.readOnlyHint === false ||
+		(!hasReadAction && annotations.readOnlyHint !== true);
 	const mutatesState =
 		override?.mutatesState ?? (entry.mutatesState || inferredMutating);
 	const descriptor: ToolDescriptor = {
@@ -371,6 +479,9 @@ export function buildToolDescriptor(
 			tool.description || "",
 			override?.operations ?? inferredOperations,
 		),
+		primarySideEffect: mutatesState
+			? primarySideEffect(name, mcpId, override?.destinations ?? [])
+			: null,
 	};
 
 	boundSearchableText(descriptor);
@@ -411,7 +522,8 @@ export function getOrBuildToolDescriptor(
 			if (source) descriptorSnapshotCache.get(source)?.delete(localKey);
 		},
 	});
-	if (!retained) return descriptor;
+	if (!retained.retained) return descriptor;
+	descriptorSourceFinalizer.register(tool, retainedKey);
 	snapshots.set(localKey, descriptor);
 	while (snapshots.size > MAX_DESCRIPTOR_SNAPSHOTS_PER_TOOL) {
 		const oldestKey = snapshots.keys().next().value;

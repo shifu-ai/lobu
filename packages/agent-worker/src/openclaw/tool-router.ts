@@ -199,7 +199,12 @@ function ambiguousWriteMatches(
 	if (!first || !second || second.totalScore <= 0) return [];
 	if (!hasConflictingSideEffects(first, second)) return [];
 	if (first.totalScore / second.totalScore > AMBIGUITY_SCORE_RATIO) return [];
-	return [first, second];
+	return relevant.filter(
+		(match) =>
+			match.totalScore > 0 &&
+			first.totalScore / match.totalScore <= AMBIGUITY_SCORE_RATIO &&
+			(match === first || hasConflictingSideEffects(first, match)),
+	);
 }
 
 function hasConflictingSideEffects(
@@ -217,6 +222,15 @@ function hasConflictingSideEffects(
 	}
 	const firstClasses = first.descriptor.sideEffectClasses;
 	const secondClasses = second.descriptor.sideEffectClasses;
+	const firstEffect = first.descriptor.primarySideEffect;
+	const secondEffect = second.descriptor.primarySideEffect;
+	if (firstEffect && secondEffect) {
+		return (
+			firstEffect.action !== secondEffect.action ||
+			firstEffect.resource !== secondEffect.resource ||
+			firstEffect.destination !== secondEffect.destination
+		);
+	}
 	return (
 		firstClasses.length > 0 &&
 		secondClasses.length > 0 &&
@@ -240,9 +254,22 @@ function clarificationQuestion(matches: ToolCandidateMatch[]): string {
 	if (clarificationReason(matches) === "conflicting_destination") {
 		return DESTINATION_CLARIFICATION_QUESTION;
 	}
-	const labels = matches.map(
-		(match) => match.descriptor.title || match.descriptor.name,
-	);
+	const labels = matches.map((match) => {
+		const stableIdentity = [
+			...`${match.descriptor.mcpId}/${match.descriptor.name}`.normalize("NFKC"),
+		]
+			.map((character) => {
+				const codepoint = character.codePointAt(0) ?? 0;
+				return codepoint <= 0x1f || (codepoint >= 0x7f && codepoint <= 0x9f)
+					? " "
+					: character;
+			})
+			.join("")
+			.replace(/\s+/g, " ")
+			.trim()
+			.slice(0, 120);
+		return `「${stableIdentity || "unknown tool"}」`;
+	});
 	return `你要我使用 ${labels.join("，還是 ")}？這些工具會產生不同的寫入結果。`;
 }
 
@@ -252,15 +279,11 @@ function safeReservedEntries(params: {
 	allowedToolNames?: Iterable<string>;
 	budget: number;
 }): ToolCatalogEntry[] {
-	const eligibleKeys = eligibleIdentityKeys(
-		params.entries,
-		params.allowedToolNames,
-	);
-	return params.reservedEntries
-		.filter(
-			(entry) => !eligibleKeys || eligibleKeys.has(canonicalToolKey(entry)),
-		)
-		.slice(0, Math.max(0, params.budget));
+	// Built-in control/meta tools are registered outside the MCP router. When
+	// semantic routing is unavailable, exposing no MCP tool is the only fallback
+	// that cannot accidentally surface a pinned write misclassified by metadata.
+	void params;
+	return [];
 }
 
 function fallbackDecision(
@@ -387,6 +410,7 @@ export function routeToolEntries({
 				return (
 					(!eligibleKeys || eligibleKeys.has(identityKey)) &&
 					!blockedKeys.has(identityKey) &&
+					!dominatedConflictingKeys.has(identityKey) &&
 					descriptor !== undefined &&
 					!conflictsWithExplicitDestination(
 						descriptor,

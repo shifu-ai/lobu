@@ -11,6 +11,10 @@ import {
   clearToolRetrievalIndexCacheForTests,
   toolRetrievalIndexCacheStats,
 } from "../openclaw/tool-retrieval-index";
+import {
+  clearToolRouterRetainedMemoryForTests,
+  toolRouterRetainedMemoryStats,
+} from "../openclaw/tool-router-memory-budget";
 
 function tool(name: string, description?: string): McpToolDef {
   return {
@@ -44,12 +48,62 @@ describe("tool catalog dispatcher", () => {
     expect(
       searchRuntimeToolCatalog(catalog, { query: "search records" }),
     ).toHaveLength(1);
-    expect(toolRetrievalIndexCacheStats()).toEqual(afterBuild);
+    expect(toolRetrievalIndexCacheStats().misses).toBe(afterBuild.misses);
+    expect(toolRetrievalIndexCacheStats().hits).toBe(afterBuild.hits + 2);
     expect(
       searchRuntimeToolCatalog(catalog, { query: "payroll" }).map(
         ({ entry }) => entry.name,
       ),
     ).not.toContain("search_payroll");
+  });
+
+  test("live runtime catalogs do not retain evicted indexes outside the unified budget", () => {
+    clearToolRouterRetainedMemoryForTests();
+    clearToolRetrievalIndexCacheForTests();
+    const catalogs = Array.from({ length: 32 }, (_, version) =>
+      buildRuntimeToolCatalog({
+        allTools: {
+          allowed: [
+            tool(
+              `search_allowed_${version}`,
+              `shared lookup ${version} ${"a".repeat(3_000)}`,
+            ),
+          ],
+          forbidden: [
+            tool(
+              `search_forbidden_${version}`,
+              `shared lookup ${version} ${"b".repeat(3_000)}`,
+            ),
+          ],
+          bulk: Array.from({ length: 180 }, (_, index) =>
+            tool(
+              `bulk_${version}_${index}`,
+              `bulk ${version} ${index} ${"x".repeat(3_000)}`,
+            ),
+          ),
+        },
+        selectedTools: {},
+        allowedToolNames: [`allowed/search_allowed_${version}`],
+      }),
+    );
+    const beforeSearch = toolRetrievalIndexCacheStats();
+    expect(toolRouterRetainedMemoryStats().estimatedBytes).toBeLessThanOrEqual(
+      32 * 1024 * 1024,
+    );
+    expect(toolRouterRetainedMemoryStats().evictions).toBeGreaterThan(0);
+
+    const matches = searchRuntimeToolCatalog(catalogs[0]!, {
+      query: "shared lookup",
+    });
+    expect(matches.map(({ entry }) => entry.name)).toEqual([
+      "search_allowed_0",
+    ]);
+    expect(toolRetrievalIndexCacheStats().misses).toBeGreaterThan(
+      beforeSearch.misses,
+    );
+    expect(toolRouterRetainedMemoryStats().estimatedBytes).toBeLessThanOrEqual(
+      32 * 1024 * 1024,
+    );
   });
 
   test("catalog-only allowed tools remain callable and searchable", () => {

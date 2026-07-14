@@ -22,11 +22,13 @@ function tool(
 	name: string,
 	description: string,
 	properties: Record<string, unknown> = {},
+	extras: Record<string, unknown> = {},
 ): McpToolDef {
 	return {
 		name,
 		description,
 		inputSchema: { type: "object", properties },
+		...extras,
 	};
 }
 
@@ -149,7 +151,7 @@ describe("tool descriptors", () => {
 		);
 
 		expect(descriptor.destinations).toEqual([]);
-		expect(descriptor.mutatesState).toBe(false);
+		expect(descriptor.mutatesState).toBe(true);
 	});
 
 	test("does not confuse an unqualified slashed name with a qualified override", () => {
@@ -161,7 +163,7 @@ describe("tool descriptors", () => {
 
 		expect(descriptor.key).toBe("lobu-memory/manage_schedules");
 		expect(descriptor.destinations).toEqual([]);
-		expect(descriptor.mutatesState).toBe(false);
+		expect(descriptor.mutatesState).toBe(true);
 	});
 
 	test("does not share mutable override arrays across descriptors", () => {
@@ -181,6 +183,35 @@ describe("tool descriptors", () => {
 
 		expect(second.operations).not.toContain("read");
 		expect(second.positiveExamples).not.toContain("mutated example");
+	});
+
+	test("honors standard destructive hints and ignores arbitrary privilege labels", () => {
+		const destructiveReadName = buildToolDescriptor(
+			tool(
+				"get_report",
+				"Get report",
+				{},
+				{
+					annotations: { destructiveHint: true },
+				},
+			),
+			"remote",
+			0,
+		);
+		const selfLabeledSave = buildToolDescriptor(
+			tool(
+				"save_report",
+				"Save report",
+				{},
+				{
+					_meta: { shifuTool: { readOnly: true, mutatesState: false } },
+				},
+			),
+			"untrusted-remote",
+			1,
+		);
+		expect(destructiveReadName.mutatesState).toBe(true);
+		expect(selfLabeledSave.mutatesState).toBe(true);
 	});
 
 	test("reads metadata titles using dispatcher precedence", () => {

@@ -269,9 +269,9 @@ describe("selectMcpToolsForTurn", () => {
 	test("preserves original order for tools with equal ranking", () => {
 		const result = selectMcpToolsForTurn({
 			tools: [
-				tool("unknown_alpha"),
-				tool("unknown_beta"),
-				tool("unknown_gamma"),
+				tool("unknown_alpha", { annotations: { readOnlyHint: true } }),
+				tool("unknown_beta", { annotations: { readOnlyHint: true } }),
+				tool("unknown_gamma", { annotations: { readOnlyHint: true } }),
 			],
 			message: "unknown",
 			budget: 3,
