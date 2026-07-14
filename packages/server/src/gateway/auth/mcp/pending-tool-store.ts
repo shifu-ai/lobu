@@ -88,6 +88,12 @@ export function stableReleaseAuthorizationDigest(
 		.digest("hex");
 }
 
+export function pendingToolContinuationDigest(
+	invocation: PendingToolInvocation,
+): string {
+	return createHash("sha256").update(canonicalize(invocation)).digest("hex");
+}
+
 export interface PendingToolExecutionOptions {
   courseToolScope?: TrustedCourseToolScope;
   expectedMcpIdentity?: NonNullable<
@@ -192,4 +198,27 @@ export async function takePendingTool(
   `;
   if (rows.length === 0) return null;
 	return (rows[0] as { payload: PendingToolInvocation }).payload ?? null;
+}
+
+/** Atomically claims only the exact payload that was previously validated. */
+export async function takePendingToolIfUnchanged(
+	requestId: string,
+	expected: PendingToolInvocation,
+	expectedDigest: string,
+): Promise<PendingToolInvocation | null> {
+	if (pendingToolContinuationDigest(expected) !== expectedDigest) return null;
+	const sql = getDb();
+	const rows = await sql`
+		DELETE FROM oauth_states
+		WHERE id = ${requestId}
+		  AND scope = ${SCOPE}
+		  AND expires_at > now()
+		  AND payload = ${sql.json(expected as object)}::jsonb
+		RETURNING payload
+	`;
+	if (rows.length === 0) return null;
+	const claimed = (rows[0] as { payload: PendingToolInvocation }).payload;
+	return pendingToolContinuationDigest(claimed) === expectedDigest
+		? claimed
+		: null;
 }

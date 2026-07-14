@@ -59,10 +59,14 @@ export function isToolNameAllowedByToolsConfig(
   } = {},
 ): boolean {
   const matches = (rawPattern: string) => {
-    const pattern = rawPattern.trim();
+    const pattern = rawPattern.trim().toLowerCase();
     if (!pattern) return false;
-    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`^${escaped.replaceAll("*", ".*")}$`, "i").test(toolName);
+    const normalizedToolName = toolName.trim().toLowerCase();
+    if (pattern === "*") return true;
+    if (pattern.endsWith("*")) {
+      return normalizedToolName.startsWith(pattern.slice(0, -1));
+    }
+    return normalizedToolName === pattern;
   };
   const denied = [
     ...(toolsConfig?.deniedTools ?? []),
@@ -803,6 +807,7 @@ export class McpProxy {
     pending: import("./pending-tool-store.js").PendingToolInvocation,
   ): Promise<boolean> {
     if (
+      !pending.organizationId ||
       !this.agentSettingsStore ||
       !this.guardrailRegistry ||
       !this.globalToolPolicyResolver
@@ -825,6 +830,15 @@ export class McpProxy {
       settings.toolsConfig,
       globalToolPolicy,
     )) return false;
+    const pattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;
+    if (
+      !this.grantStore ||
+      await this.grantStore.isDenied(
+        pending.agentId,
+        pattern,
+        pending.organizationId,
+      )
+    ) return false;
     if (await this.runPreToolGuardrails(
       pending.agentId,
       {
@@ -864,6 +878,7 @@ export class McpProxy {
       pending.agentId,
       pending.userId,
       pending.mcpId,
+      { bypassCache: true },
     );
     return discovery.tools.some((tool) => tool.name === pending.toolName);
   }
@@ -1490,13 +1505,14 @@ export class McpProxy {
     agentId: string,
     userId: string,
     mcpId: string,
+    options: { bypassCache?: boolean } = {},
   ): Promise<{ tools: McpTool[]; instructions?: string }> {
     return this.fetchToolsForMcp(
       mcpId,
       agentId,
       { userId, channelId: "" },
       undefined,
-      { surfaceErrors: true },
+      { surfaceErrors: true, bypassCache: options.bypassCache },
     );
   }
 
@@ -1510,7 +1526,11 @@ export class McpProxy {
     agentId: string,
     tokenData: any,
     workerToken?: string,
-    options?: { surfaceErrors?: boolean; trace?: ShifuTraceContext },
+    options?: {
+      surfaceErrors?: boolean;
+      trace?: ShifuTraceContext;
+      bypassCache?: boolean;
+    },
   ): Promise<McpDiscoveryResult> {
     const trace = options?.trace ?? generatedMcpTrace();
     const listStartedAt = Date.now();
@@ -1636,7 +1656,7 @@ export class McpProxy {
     const healthKey = this.buildServerHealthKey(agentId, mcpId);
 
     let cached: CachedMcpServer | null = null;
-    if (this.toolCache) {
+    if (this.toolCache && !options?.bypassCache) {
       cached = this.toolCache.getServerInfo(cacheMcpId, agentId);
       if (
         cached &&

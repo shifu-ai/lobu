@@ -3,15 +3,18 @@ import { generateWorkerToken, verifyWorkerToken } from "@lobu/core";
 import { orgContext, tryGetOrgId } from "../../lobu/stores/org-context.js";
 import {
   getPendingTool,
+  pendingToolContinuationDigest,
   stableReleaseAuthorizationDigest,
   stableToolEligibilityDigest,
   type PendingToolInvocation,
   storePendingTool,
+  takePendingToolIfUnchanged,
 } from "../auth/mcp/pending-tool-store.js";
 import {
   isToolNameAllowedByToolsConfig,
   McpProxy,
 } from "../auth/mcp/proxy.js";
+import { McpToolCache } from "../auth/mcp/tool-cache.js";
 import {
   createToolApprovalService,
   GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
@@ -160,6 +163,137 @@ describe("createToolApprovalService", () => {
       undefined,
       currentGlobalPolicy,
     )).toBe(false);
+    expect(isToolNameAllowedByToolsConfig(
+      "manage_schedules",
+      { strictMode: true, allowedTools: ["man*chedules"] },
+    )).toBe(false);
+  });
+
+  test("semantic production revalidation rejects current deny and forces fresh discovery", async () => {
+    const originalFetch = globalThis.fetch;
+    let discoveredTools = [{ name: "manage_schedules" }];
+    let toolListCalls = 0;
+    let toolsConfig: { deniedTools?: string[] } = {};
+    let globalPolicy: { disallowedTools?: string[] } = {};
+    const grantStore = {
+      grant: mock(async () => undefined),
+      hasGrant: mock(async () => false),
+      isDenied: mock(async () => false),
+      revoke: mock(async () => undefined),
+    };
+    const proxy = new McpProxy(
+      {
+        getHttpServer: async () => ({
+          id: "lobu-memory",
+          upstreamUrl: "https://memory.test/mcp",
+          configSource: "agent" as const,
+        }),
+        getAllHttpServers: async () => new Map(),
+      },
+      {
+        secretStore: {
+          get: async () => null,
+          put: async () => "secret://test" as const,
+          delete: async () => undefined,
+          list: async () => [],
+        },
+        toolCache: new McpToolCache(),
+        grantStore: grantStore as never,
+        agentSettingsStore: {
+          getSettings: mock(async () => ({ toolsConfig })),
+        } as never,
+        guardrailRegistry: {} as never,
+        globalToolPolicyResolver: () => globalPolicy,
+      },
+    );
+    (proxy as any).runPreToolGuardrails = mock(async () => false);
+    globalThis.fetch = mock(async (_input, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (body.method === "notifications/initialized") {
+        return new Response("", { status: 202 });
+      }
+      if (body.method === "tools/list") toolListCalls++;
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: body.method === "tools/list"
+          ? { tools: discoveredTools }
+          : { protocolVersion: "2025-03-26" },
+      }), { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const pending = {
+      ...LINE_PENDING,
+      organizationId: "org-1",
+      mcpId: "lobu-memory",
+      toolName: "manage_schedules",
+    };
+    try {
+      expect(await proxy.revalidatePendingToolEligibility({
+        ...pending,
+        organizationId: undefined,
+      })).toBe(false);
+      expect(await orgContext.run({ organizationId: "org-1" }, () =>
+        proxy.revalidatePendingToolEligibility(pending)
+      )).toBe(true);
+      expect(toolListCalls).toBe(1);
+
+      globalPolicy = { disallowedTools: ["manage_*"] };
+      expect(await orgContext.run({ organizationId: "org-1" }, () =>
+        proxy.revalidatePendingToolEligibility(pending)
+      )).toBe(false);
+      globalPolicy = {};
+
+      toolsConfig = { deniedTools: ["manage_schedules"] };
+      expect(await orgContext.run({ organizationId: "org-1" }, () =>
+        proxy.revalidatePendingToolEligibility(pending)
+      )).toBe(false);
+      toolsConfig = {};
+
+      grantStore.isDenied.mockImplementation(async () => true);
+      expect(await orgContext.run({ organizationId: "org-1" }, () =>
+        proxy.revalidatePendingToolEligibility(pending)
+      )).toBe(false);
+      expect(grantStore.isDenied).toHaveBeenCalledWith(
+        "shifu-u-1",
+        "/mcp/lobu-memory/tools/manage_schedules",
+        "org-1",
+      );
+      grantStore.isDenied.mockImplementation(async () => false);
+
+      expect(await orgContext.run({ organizationId: "org-1" }, () =>
+        proxy.revalidatePendingToolEligibility({
+          ...pending,
+          expectedMcpIdentity: {
+            upstreamOrigin: "https://changed.example",
+            configSource: "agent",
+            configDigest: "changed",
+          },
+        })
+      )).toBe(false);
+
+      discoveredTools = [];
+      expect(await orgContext.run({ organizationId: "org-1" }, () =>
+        proxy.revalidatePendingToolEligibility(pending)
+      )).toBe(false);
+      expect(toolListCalls).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("conditional claim cannot consume an upserted replacement", async () => {
+    await seedLinePending("ta-race");
+    const candidate = await getPendingTool("ta-race");
+    expect(candidate).not.toBeNull();
+    await seedLinePending("ta-race", { args: { summary: "replacement" } });
+    expect(await takePendingToolIfUnchanged(
+      "ta-race",
+      candidate!,
+      pendingToolContinuationDigest(candidate!),
+    )).toBeNull();
+    expect((await getPendingTool("ta-race"))?.args).toEqual({
+      summary: "replacement",
+    });
   });
 
   test.each([
@@ -223,6 +357,30 @@ describe("createToolApprovalService", () => {
         snapshotDigest: `sha256:${"a".repeat(64)}`,
         expiresAt: "2099-01-01T00:00:00.000Z",
         capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
+      },
+    }, new Date("2026-07-15T00:00:00.000Z"))).toBe(true);
+  });
+
+  test("expired original carrier remains valid after a fresh stable renewal", () => {
+    const pending: PendingToolInvocation = {
+      ...LINE_PENDING,
+      releaseBinding: {
+        routerMode: "semantic",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: "release-1",
+        releaseSequence: 1,
+        snapshotDigest: `sha256:${"a".repeat(64)}`,
+        authorizationExpiresAt: "2026-07-14T23:59:00.000Z",
+        stableAuthorizationDigest: STABLE_SEMANTIC_DIGEST,
+        eligibilityBindingDigest: STABLE_ELIGIBILITY_DIGEST,
+      },
+    };
+    expect(isPendingReleaseBindingCurrent(pending, {
+      status: "active",
+      claim: {
+        ...SEMANTIC_CLAIM,
+        snapshotDigest: `sha256:${"f".repeat(64)}`,
+        expiresAt: "2099-01-01T00:01:00.000Z",
       },
     }, new Date("2026-07-15T00:00:00.000Z"))).toBe(true);
   });
@@ -294,7 +452,53 @@ describe("createToolApprovalService", () => {
     expect(await getPendingTool("ta-line-1")).toBeNull();
   });
 
-  test("executes semantic approve_all after fresh snapshot and receipt match exactly", async () => {
+  test("fresh snapshot resolver failure fails closed before grant or execute", async () => {
+    await seedLinePending("ta-fresh-unavailable", {
+      releaseState: { status: "active", claim: SEMANTIC_CLAIM },
+      releaseBinding: {
+        routerMode: "semantic",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: SEMANTIC_CLAIM.releaseId,
+        releaseSequence: SEMANTIC_CLAIM.releaseSequence,
+        snapshotDigest: SEMANTIC_CLAIM.snapshotDigest,
+        authorizationExpiresAt: SEMANTIC_CLAIM.expiresAt,
+        stableAuthorizationDigest: STABLE_SEMANTIC_DIGEST,
+        eligibilityBindingDigest: STABLE_ELIGIBILITY_DIGEST,
+      },
+    });
+    const grant = mock(async () => undefined);
+    const executeToolDirect = mock(async () => ({ content: [], isError: false }));
+    const service = createToolApprovalService({
+      grantStore: {
+        grant,
+        hasGrant: mock(async () => false),
+        revoke: mock(async () => undefined),
+      },
+      mcpProxy: {
+        executeToolDirect,
+        revalidatePendingToolEligibility: mock(async () => true),
+      },
+      userAgentsStore: { ownsAgent: mock(async () => true) },
+      organizationId: "org-1",
+      resolveReleaseSnapshot: mock(async () => {
+        throw new Error("snapshot unavailable");
+      }),
+    });
+    expect(await service.submit({
+      action: "approve_all",
+      approvalId: "ta-fresh-unavailable",
+      toolboxUserId: "toolbox-user-1",
+      lineUserId: "line-user-1",
+      agentId: "shifu-u-1",
+    })).toEqual({
+      status: "stale",
+      diagnosticCode: "approval_inventory_stale",
+    });
+    expect(grant).not.toHaveBeenCalled();
+    expect(executeToolDirect).not.toHaveBeenCalled();
+  });
+
+  test("executes semantic approve_all after an expired original carrier is freshly renewed", async () => {
     const releaseState = {
       status: "active" as const,
       claim: {
@@ -304,7 +508,7 @@ describe("createToolApprovalService", () => {
         releaseId: "release-1",
         releaseSequence: 1,
         snapshotDigest: `sha256:${"a".repeat(64)}`,
-        expiresAt: "2099-01-01T00:00:00.000Z",
+        expiresAt: "2000-01-01T00:00:00.000Z",
         capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
       },
     };
@@ -353,8 +557,8 @@ describe("createToolApprovalService", () => {
         capabilities: [...releaseState.claim.capabilityIds],
         appliedReleaseId: "release-1",
         appliedReleaseSequence: 1,
-        snapshotDigest: releaseState.claim.snapshotDigest,
-        expiresAt: releaseState.claim.expiresAt,
+        snapshotDigest: `sha256:${"c".repeat(64)}`,
+        expiresAt: "2099-01-01T00:01:00.000Z",
       })),
       readReleaseState: mock(async () => ({
         status: "active" as const,

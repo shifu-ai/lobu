@@ -2,7 +2,8 @@ import { createLogger } from "@lobu/core";
 import {
   buildPendingToolExecutionOptions,
   getPendingTool,
-  takePendingTool,
+  pendingToolContinuationDigest,
+  takePendingToolIfUnchanged,
   type PendingToolExecutionOptions,
   type PendingToolInvocation,
 } from "../auth/mcp/pending-tool-store.js";
@@ -86,9 +87,11 @@ function resolveGrantExpiresAt(duration: string): number | null {
  * the payload and subsequent webhook retries see null and no-op.
  */
 async function takePendingToolInvocation(
-  requestId: string
+  requestId: string,
+  expected: PendingToolInvocation,
+  expectedDigest: string,
 ): Promise<PendingToolInvocation | null> {
-  return takePendingTool(requestId);
+  return takePendingToolIfUnchanged(requestId, expected, expectedDigest);
 }
 
 function describeDecision(decision: string): string {
@@ -757,15 +760,25 @@ export function registerActionHandlers(
                 { revalidateEligibility: revalidatePendingToolEligibility }
               );
         if (!validation.valid) {
-          await takePendingToolInvocation(requestId).catch(() => null);
+          const digest = pendingToolContinuationDigest(candidate);
+          await takePendingToolInvocation(requestId, candidate, digest).catch(
+            () => null
+          );
           const sent = claimApprovalCard?.(requestId);
           await sent?.edit("*Tool Approval*\n\n_approval_inventory_stale_").catch(() => undefined);
           await thread.post("approval_inventory_stale").catch(() => undefined);
           return;
         }
       }
+      const candidateDigest = candidate
+        ? pendingToolContinuationDigest(candidate)
+        : "";
       const pending = candidate
-        ? await takePendingToolInvocation(requestId).catch(() => null)
+        ? await takePendingToolInvocation(
+            requestId,
+            candidate,
+            candidateDigest
+          ).catch(() => null)
         : null;
       if (!pending) {
         const sent = claimApprovalCard?.(requestId);

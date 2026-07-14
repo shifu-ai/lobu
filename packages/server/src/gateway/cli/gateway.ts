@@ -9,7 +9,8 @@ import type { AgentMetadata } from "../auth/agent-metadata-store.js";
 import {
   buildPendingToolExecutionOptions,
   getPendingTool,
-  takePendingTool,
+  pendingToolContinuationDigest,
+  takePendingToolIfUnchanged,
 } from "../auth/mcp/pending-tool-store.js";
 import { setEnvResolver } from "../auth/mcp/string-substitution.js";
 import {
@@ -324,7 +325,11 @@ export function createGatewayApp(
         agentMetadataStore: coreServices.getAgentMetadataStore(),
         platformRegistry,
         transcriptionService: coreServices.getTranscriptionService(),
-        approveToolCall: async (requestId: string, decision: string) => {
+        approveToolCall: async (
+          requestId: string,
+          decision: string,
+          caller: { userId?: string; organizationId?: string; agentId?: string },
+        ) => {
           // DELETE ... RETURNING atomically claims the pending invocation
           // so a retry of POST /api/v1/agents/approve (CLI re-tries,
           // double-clicks, Slack webhook retries) cannot double-execute the
@@ -333,6 +338,16 @@ export function createGatewayApp(
           const candidate = await getPendingTool(requestId);
           if (!candidate)
             return { success: false, error: "Request not found or expired" };
+          if (
+            !caller.userId ||
+            candidate.userId !== caller.userId ||
+            (caller.organizationId !== undefined &&
+              candidate.organizationId !== caller.organizationId) ||
+            (caller.agentId !== undefined && candidate.agentId !== caller.agentId)
+          ) {
+            return { success: false, error: "Approval identity mismatch" };
+          }
+          const candidateDigest = pendingToolContinuationDigest(candidate);
           const organizationId = candidate.organizationId;
           if (candidate.releaseBinding) {
             if (!organizationId || !approveMcpProxy) {
@@ -344,11 +359,19 @@ export function createGatewayApp(
               { mcpProxy: approveMcpProxy },
             );
             if (!validation.valid) {
-              await takePendingTool(requestId);
+              await takePendingToolIfUnchanged(
+                requestId,
+                candidate,
+                candidateDigest,
+              );
               return { success: false, error: validation.diagnosticCode };
             }
           }
-          const pending = await takePendingTool(requestId);
+          const pending = await takePendingToolIfUnchanged(
+            requestId,
+            candidate,
+            candidateDigest,
+          );
           if (!pending)
             return { success: false, error: "Request not found or expired" };
           const pattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;

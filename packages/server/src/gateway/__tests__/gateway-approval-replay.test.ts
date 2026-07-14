@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
   buildPendingToolExecutionOptions,
+  getPendingTool,
   stableReleaseAuthorizationDigest,
   stableToolEligibilityDigest,
   storePendingTool,
@@ -17,6 +18,7 @@ const AUTH_TOKEN = "gateway-approval-test-token";
 function makeApp(
   executeToolDirect: ReturnType<typeof mock>,
   grant = mock(async () => undefined),
+  caller = { userId: "user-1", organizationId: "org-1" },
 ) {
   const empty = () => undefined;
   const coreServices = {
@@ -59,8 +61,8 @@ function makeApp(
     authProvider: (c) =>
       c.req.header("authorization") === `Bearer ${AUTH_TOKEN}`
         ? {
-            userId: "user-1",
-            organizationId: "org-1",
+            userId: caller.userId,
+            organizationId: caller.organizationId,
             platform: "api",
             exp: Date.now() + 60_000,
           }
@@ -82,6 +84,27 @@ async function approve(app: ReturnType<typeof makeApp>, requestId: string) {
 describe("CLI gateway pending-tool approval replay", () => {
   beforeAll(async () => ensureDbForGatewayTests());
   beforeEach(async () => resetTestDatabase());
+
+  test("wrong authenticated caller cannot consume another user's approval", async () => {
+    await storePendingTool("cli-wrong-caller", {
+      mcpId: "github",
+      toolName: "create_issue",
+      args: {},
+      agentId: "agent-1",
+      userId: "user-1",
+      organizationId: "org-1",
+    }, 60);
+    const execute = mock(async () => ({ content: [], isError: false }));
+    const grant = mock(async () => undefined);
+    const response = await approve(
+      makeApp(execute, grant, { userId: "user-2", organizationId: "org-1" }),
+      "cli-wrong-caller",
+    );
+    expect(response.status).toBe(400);
+    expect(await getPendingTool("cli-wrong-caller")).not.toBeNull();
+    expect(grant).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
 
   test("stale semantic approval cannot grant or execute", async () => {
     const claim = {

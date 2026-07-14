@@ -11,7 +11,8 @@ import type { ReleaseCapabilityState } from "@lobu/core";
 import {
 	buildPendingToolExecutionOptions,
 	getPendingTool,
-	takePendingTool,
+	pendingToolContinuationDigest,
+	takePendingToolIfUnchanged,
 	stableReleaseAuthorizationDigest,
 	stableToolEligibilityDigest,
 } from "./pending-tool-store.js";
@@ -107,8 +108,7 @@ export function isPendingReleaseBindingCurrent(
 ): boolean {
   const binding = pending.releaseBinding;
   if (!binding || current.status !== "active") return false;
-  return Date.parse(binding.authorizationExpiresAt) > now.getTime() &&
-    Date.parse(current.claim.expiresAt) > now.getTime() &&
+  return Date.parse(current.claim.expiresAt) > now.getTime() &&
     current.claim.agentId === pending.agentId &&
     current.claim.toolboxUserId === pending.userId &&
     current.claim.releaseId === binding.releaseId &&
@@ -134,7 +134,6 @@ async function revalidateReleaseBinding(
   if (state?.status !== "active") return false;
   const claim = state.claim;
   if (
-    Date.parse(binding.authorizationExpiresAt) <= Date.now() ||
     claim.agentId !== pending.agentId ||
     claim.toolboxUserId !== pending.userId ||
     claim.releaseId !== binding.releaseId ||
@@ -235,6 +234,7 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       if (!candidate) {
         return { status: "expired" };
       }
+      const candidateDigest = pendingToolContinuationDigest(candidate);
 
       if (
         candidate.agentId !== input.agentId ||
@@ -253,7 +253,11 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
           deps,
         );
         if (!validation.valid) {
-          await takePendingTool(input.approvalId);
+          await takePendingToolIfUnchanged(
+            input.approvalId,
+            candidate,
+            candidateDigest,
+          );
           return {
             status: "stale",
             diagnosticCode: "approval_inventory_stale",
@@ -261,7 +265,11 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
         }
       }
 
-      const pending = await takePendingTool(input.approvalId);
+      const pending = await takePendingToolIfUnchanged(
+        input.approvalId,
+        candidate,
+        candidateDigest,
+      );
       if (
         !pending ||
         pending.agentId !== candidate.agentId ||
