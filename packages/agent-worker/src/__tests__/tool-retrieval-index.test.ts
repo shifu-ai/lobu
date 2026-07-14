@@ -4,6 +4,7 @@ import { catalogEntryForTool } from "../openclaw/tool-catalog";
 import {
 	buildToolDescriptor,
 	inventoryFingerprint,
+	type ToolDescriptor,
 } from "../openclaw/tool-descriptor";
 import {
 	buildToolRetrievalIndex,
@@ -32,6 +33,14 @@ describe("tool tokenizer", () => {
 		expect(tokens).toContain("schedules");
 		expect(tokens).toContain("提醒");
 		expect(tokens).toContain("醒我");
+	});
+
+	test("normalizes NFKC, strips controls, splits separators, and deduplicates", () => {
+		expect(tokenizeToolText("Ｆｏｏ_bar-baz42\u0000 foo BAR baz42")).toEqual([
+			"foo",
+			"bar",
+			"baz42",
+		]);
 	});
 });
 
@@ -63,6 +72,57 @@ describe("tool descriptors", () => {
 		const descriptor = buildToolDescriptor(titledTool, "school", 0);
 
 		expect(descriptor.indexedTextBytes).toBeLessThanOrEqual(16 * 1024);
+	});
+
+	test("preserves a huge raw identity while bounding indexed identity text", () => {
+		const hugeName = `search_${"x".repeat(20_000)}`;
+		const descriptor = buildToolDescriptor(
+			tool(hugeName, "Find records"),
+			"large-mcp",
+			0,
+		);
+		const searchable = descriptor as ToolDescriptor & {
+			indexedKey?: string;
+			indexedName?: string;
+		};
+
+		expect(descriptor.name).toBe(hugeName);
+		expect(descriptor.key).toBe(`large-mcp/${hugeName}`);
+		expect(searchable.indexedName).toBeDefined();
+		expect(searchable.indexedKey).toBeDefined();
+		expect(descriptor.indexedTextBytes).toBeLessThanOrEqual(16 * 1024);
+	});
+
+	test("does not apply exact overrides after sanitizing raw identity", () => {
+		const descriptor = buildToolDescriptor(
+			tool("manage_schedules", "Manage schedules"),
+			" lobu-memory ",
+			0,
+		);
+
+		expect(descriptor.destinations).toEqual([]);
+		expect(descriptor.mutatesState).toBe(false);
+	});
+
+	test("reads metadata titles using dispatcher precedence", () => {
+		const metaTitle = buildToolDescriptor(
+			Object.assign(tool("meta_tool", "Meta tool"), {
+				_meta: { title: "Metadata title" },
+				annotations: { title: "Annotation title" },
+			}),
+			"mcp",
+			0,
+		);
+		const annotationsTitle = buildToolDescriptor(
+			Object.assign(tool("annotation_tool", "Annotation tool"), {
+				annotations: { title: "Annotation fallback" },
+			}),
+			"mcp",
+			1,
+		);
+
+		expect(metaTitle.title).toBe("Metadata title");
+		expect(annotationsTitle.title).toBe("Annotation fallback");
 	});
 
 	test("fingerprints clones deterministically and searchable changes distinctly", () => {
@@ -98,6 +158,15 @@ describe("tool descriptors", () => {
 
 		expect(inventoryFingerprint([first, second])).not.toBe(
 			inventoryFingerprint([reorderedFirst, reorderedSecond]),
+		);
+	});
+
+	test("fingerprints descriptor array order with unchanged descriptor objects", () => {
+		const first = buildToolDescriptor(tool("alpha", "same"), "mcp", 0);
+		const second = buildToolDescriptor(tool("beta", "same"), "mcp", 1);
+
+		expect(inventoryFingerprint([first, second])).not.toBe(
+			inventoryFingerprint([second, first]),
 		);
 	});
 });
@@ -143,6 +212,47 @@ describe("tool retrieval index", () => {
 		expect(
 			searchToolRetrievalIndex(index, "用 email 查學員", 2)[0]?.descriptor.key,
 		).toBe("school/search_students");
+	});
+
+	test("conservatively estimates serialized map and posting storage", () => {
+		const descriptor = buildToolDescriptor(
+			tool(
+				"search_many",
+				Array.from({ length: 200 }, (_, index) => `term${index}`).join(" "),
+			),
+			"mcp",
+			0,
+		);
+		const index = buildToolRetrievalIndex([descriptor]);
+		const serializedLowerBound = Buffer.byteLength(
+			JSON.stringify({
+				descriptors: index.descriptors.map(
+					({ tool: _tool, ...searchable }) => searchable,
+				),
+				documentFrequency: [...index.documentFrequency],
+				postings: [...index.postings],
+			}),
+			"utf8",
+		);
+		// Serialization covers payload bytes but not the two Map node structures.
+		const minimumMapNodeBytes =
+			(index.documentFrequency.size + index.postings.size) * 24;
+
+		expect(index.estimatedBytes).toBeGreaterThanOrEqual(
+			serializedLowerBound + minimumMapNodeBytes,
+		);
+	});
+
+	test("uses linear mode without dropping descriptors under a tiny budget", () => {
+		const descriptors = [
+			buildToolDescriptor(tool("alpha", "first tool"), "mcp", 0),
+			buildToolDescriptor(tool("beta", "second tool"), "mcp", 1),
+		];
+		const index = buildToolRetrievalIndex(descriptors, { maxIndexBytes: 1 });
+
+		expect(index.mode).toBe("linear");
+		expect(index.descriptors).toHaveLength(2);
+		expect(searchToolRetrievalIndex(index, "tool", 2)).toHaveLength(2);
 	});
 });
 

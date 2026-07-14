@@ -4,7 +4,13 @@ import { normalizeToolText, tokenizeToolText } from "./tool-tokenizer";
 
 const DEFAULT_MAX_INDEX_BYTES = 16 * 1024 * 1024;
 const SCORE_TIE_EPSILON = 1e-9;
-const POSTING_OVERHEAD_BYTES = 24;
+// These are intentionally conservative accounting allowances, not claims about
+// exact V8 heap layout. Serialized UTF-8 payload is doubled for string storage,
+// then explicit collection/object overhead is added for retained structures.
+const SERIALIZED_PAYLOAD_MULTIPLIER = 2;
+const MAP_ENTRY_OVERHEAD_BYTES = 48;
+const DESCRIPTOR_OBJECT_OVERHEAD_BYTES = 256;
+const ARRAY_OBJECT_OVERHEAD_BYTES = 32;
 
 export interface ToolCandidateMatch {
 	descriptor: ToolDescriptor;
@@ -102,7 +108,7 @@ function tokenizedFields(
 	descriptor: ToolDescriptor,
 ): TokenizedDescriptorFields {
 	const nameTitle = tokenizeToolText(
-		[descriptor.name, descriptor.title].filter(Boolean).join(" "),
+		[descriptor.indexedName, descriptor.title].filter(Boolean).join(" "),
 	);
 	const aliasesExamples = tokenizeToolText(
 		[...descriptor.aliases, ...descriptor.positiveExamples].join(" "),
@@ -142,15 +148,28 @@ function estimateIndexBytes(
 	descriptors: readonly ToolDescriptor[],
 	postings: ReadonlyMap<string, readonly number[]>,
 ): number {
-	let bytes = descriptors.reduce(
-		(total, descriptor) => total + descriptor.indexedTextBytes * 2 + 256,
-		0,
+	const serializedPayloadBytes = Buffer.byteLength(
+		JSON.stringify({
+			descriptors: descriptors.map(
+				({ tool: _tool, ...retainedDescriptor }) => retainedDescriptor,
+			),
+			documentFrequency: [...postings].map(([token, ids]) => [
+				token,
+				ids.length,
+			]),
+			postings: [...postings],
+		}),
+		"utf8",
 	);
-	for (const [token, documentIds] of postings) {
-		bytes += Buffer.byteLength(token, "utf8") * 2;
-		bytes += POSTING_OVERHEAD_BYTES + documentIds.length * 8;
-	}
-	return bytes;
+	const mapEntryCount = postings.size * 2;
+	const retainedArrayCount = descriptors.length * 7 + postings.size;
+
+	return (
+		serializedPayloadBytes * SERIALIZED_PAYLOAD_MULTIPLIER +
+		mapEntryCount * MAP_ENTRY_OVERHEAD_BYTES +
+		descriptors.length * DESCRIPTOR_OBJECT_OVERHEAD_BYTES +
+		retainedArrayCount * ARRAY_OBJECT_OVERHEAD_BYTES
+	);
 }
 
 export function buildToolRetrievalIndex(
@@ -229,8 +248,8 @@ function scoreDescriptor(
 	queryTokens: readonly string[],
 ): ToolCandidateMatch {
 	const fields = tokenizedFields(descriptor);
-	const normalizedName = normalizeToolText(descriptor.name);
-	const normalizedKey = normalizeToolText(descriptor.key);
+	const normalizedName = normalizeToolText(descriptor.indexedName);
+	const normalizedKey = normalizeToolText(descriptor.indexedKey);
 	const exactName =
 		normalizedQuery === normalizedName || normalizedQuery === normalizedKey
 			? 6

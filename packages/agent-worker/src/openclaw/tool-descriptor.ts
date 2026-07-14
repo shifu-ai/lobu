@@ -10,6 +10,8 @@ export interface ToolDescriptor {
 	key: string;
 	mcpId: string;
 	name: string;
+	indexedKey: string;
+	indexedName: string;
 	title?: string;
 	description: string;
 	aliases: string[];
@@ -84,8 +86,8 @@ function uniqueStrings(values: string[]): string[] {
 
 function searchableText(descriptor: ToolDescriptor): string {
 	return [
-		descriptor.key,
-		descriptor.name,
+		descriptor.indexedKey,
+		descriptor.indexedName,
 		descriptor.title,
 		descriptor.aliases.join(" "),
 		descriptor.description,
@@ -131,7 +133,7 @@ function trimArrayToFit(descriptor: ToolDescriptor, values: string[]): void {
 
 function trimStringToFit(
 	descriptor: ToolDescriptor,
-	field: "title" | "description" | "domain",
+	field: "indexedKey" | "indexedName" | "title" | "description" | "domain",
 ): void {
 	const value = descriptor[field];
 	if (!value || indexedBytes(descriptor) <= MAX_INDEXED_TEXT_BYTES) return;
@@ -155,6 +157,8 @@ function boundSearchableText(descriptor: ToolDescriptor): void {
 	trimStringToFit(descriptor, "domain");
 	trimArrayToFit(descriptor, descriptor.operations);
 	trimArrayToFit(descriptor, descriptor.destinations);
+	trimStringToFit(descriptor, "indexedKey");
+	trimStringToFit(descriptor, "indexedName");
 
 	descriptor.indexedTextBytes = indexedBytes(descriptor);
 }
@@ -207,23 +211,43 @@ function parameterMetadata(tool: McpToolDef): {
 	};
 }
 
+function readDescriptorTitle(tool: McpToolDef): string | undefined {
+	const looseTool = tool as unknown as {
+		title?: unknown;
+		_meta?: { title?: unknown; shifuTool?: { title?: unknown } };
+		annotations?: { title?: unknown; shifuTool?: { title?: unknown } };
+	};
+	const title =
+		looseTool.title ??
+		looseTool._meta?.title ??
+		looseTool.annotations?.title ??
+		looseTool._meta?.shifuTool?.title ??
+		looseTool.annotations?.shifuTool?.title;
+	return sanitize(title) || undefined;
+}
+
 export function buildToolDescriptor(
 	tool: McpToolDef,
 	mcpId: string,
 	originalIndex: number,
 ): ToolDescriptor {
 	const entry = catalogEntryForTool(tool, originalIndex, mcpId);
-	const name = sanitize(entry.name);
-	const sanitizedMcpId = sanitize(mcpId);
-	const key = sanitizedMcpId ? `${sanitizedMcpId}/${name}` : name;
+	const name = entry.name;
+	const key = mcpId ? `${mcpId}/${name}` : name;
+	const indexedName = sanitize(name);
+	const indexedMcpId = sanitize(mcpId);
+	const indexedKey = indexedMcpId
+		? `${indexedMcpId}/${indexedName}`
+		: indexedName;
 	const override = DESCRIPTOR_OVERRIDES[key];
-	const looseTool = tool as McpToolDef & { title?: unknown };
 	const parameters = parameterMetadata(tool);
 	const descriptor: ToolDescriptor = {
 		key,
-		mcpId: sanitizedMcpId,
+		mcpId,
 		name,
-		title: sanitize(looseTool.title) || undefined,
+		indexedKey,
+		indexedName,
+		title: readDescriptorTitle(tool),
 		description: sanitize(tool.description),
 		aliases: uniqueStrings([...entry.aliases, ...(override?.aliases ?? [])]),
 		parameterNames: parameters.names,
@@ -248,16 +272,15 @@ export function buildToolDescriptor(
 }
 
 export function inventoryFingerprint(descriptors: ToolDescriptor[]): string {
-	const inventory = [...descriptors]
-		.sort(
-			(left, right) =>
-				left.key.localeCompare(right.key) ||
-				left.originalIndex - right.originalIndex,
-		)
-		.map(
-			({ tool: _tool, indexedTextBytes: _indexedTextBytes, ...descriptor }) =>
-				descriptor,
-		);
+	const inventory = descriptors.map(
+		(
+			{ tool: _tool, indexedTextBytes: _indexedTextBytes, ...descriptor },
+			position,
+		) => ({
+			position,
+			...descriptor,
+		}),
+	);
 	return createHash("sha256")
 		.update(JSON.stringify({ version: DESCRIPTOR_VERSION, inventory }))
 		.digest("hex");
