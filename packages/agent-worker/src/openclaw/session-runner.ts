@@ -92,6 +92,10 @@ import {
 } from "./tool-policy";
 import { buildToolUseEventPayload } from "./tool-use-events";
 import { toolIdentityKey } from "./tool-descriptor";
+import {
+  cloneAndFreezeJsonLike,
+  snapshotToolsByMcp,
+} from "./tool-inventory-snapshot";
 import { createOpenClawTools } from "./tools";
 import { clearSnapshots, hydrateFromSnapshot } from "./transcript-snapshot";
 import {
@@ -303,38 +307,6 @@ function freezeStringArray(values: readonly string[]): string[] {
   return Object.freeze([...values]) as unknown as string[];
 }
 
-function cloneAndFreezeJsonLike<T>(value: T, seen = new WeakMap()): T {
-  if (value === null || typeof value !== "object") return value;
-  const source = value as object;
-  const existing = seen.get(source);
-  if (existing) return existing as T;
-
-  const clone: unknown[] | Record<string, unknown> = Array.isArray(value)
-    ? []
-    : {};
-  seen.set(source, clone);
-  for (const [key, nestedValue] of Object.entries(source)) {
-    (clone as Record<string, unknown>)[key] = cloneAndFreezeJsonLike(
-      nestedValue,
-      seen
-    );
-  }
-  return Object.freeze(clone) as T;
-}
-
-function freezeToolsByMcp(
-  toolsByMcp: Record<string, McpToolDef[]>
-): Record<string, McpToolDef[]> {
-  return Object.freeze(
-    Object.fromEntries(
-      Object.entries(toolsByMcp).map(([mcpId, tools]) => [
-        mcpId,
-        Object.freeze(tools.map((tool) => cloneAndFreezeJsonLike(tool))),
-      ])
-    )
-  ) as Record<string, McpToolDef[]>;
-}
-
 function freezeToolRoutingSelection(
   selection: SelectMcpToolsByMcpForTurnResult
 ): SelectMcpToolsByMcpForTurnResult {
@@ -396,7 +368,7 @@ export function initializeExternalTurnToolRouting(
   const emitEvent = dependencies.emitEvent ?? emitJourneyEvent;
   const now = dependencies.now ?? performance.now.bind(performance);
   const { trace, ...rawSelectionParams } = params;
-  const toolsByMcp = freezeToolsByMcp(params.toolsByMcp);
+  const toolsByMcp = snapshotToolsByMcp(params.toolsByMcp);
   const allowedToolNames = params.allowedToolNames
     ? freezeStringArray([...params.allowedToolNames])
     : undefined;

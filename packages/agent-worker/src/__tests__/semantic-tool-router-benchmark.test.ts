@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { McpToolDef } from "@lobu/core";
 import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
+import { initializeExternalTurnToolRouting } from "../openclaw/session-runner";
 import { catalogEntryForTool } from "../openclaw/tool-catalog";
 import { buildToolDescriptor } from "../openclaw/tool-descriptor";
+import {
+	clearToolInventorySnapshotCacheForTests,
+	toolInventorySnapshotCacheStats,
+} from "../openclaw/tool-inventory-snapshot";
 import {
 	clearToolRetrievalIndexCacheForTests,
 	getOrBuildToolRetrievalIndex,
@@ -46,7 +51,60 @@ function percentile(values: number[], ratio: number): number {
 
 describe("semantic tool router repeatable performance guard", () => {
 	for (const size of [100, 500, 1_000, 2_000]) {
-		test(`production route guard at ${size} tools; CI ceiling is not the product SLO`, () => {
+		test(`external-turn lifecycle guard at ${size} tools; CI ceiling is not the product SLO`, () => {
+			clearToolRetrievalIndexCacheForTests();
+			clearToolInventorySnapshotCacheForTests();
+			const toolsByMcp = {
+				synthetic: Array.from({ length: size - 1 }, (_, index) =>
+					syntheticTool(index),
+				),
+				"lobu-memory": [immutableReminderTool()],
+			};
+			const allowedToolNames = [
+				...toolsByMcp.synthetic.map((tool) => `synthetic/${tool.name}`),
+				"lobu-memory/manage_schedules",
+			];
+			const initialize = () =>
+				initializeExternalTurnToolRouting(
+					{
+						toolsByMcp,
+						message: "五分鐘後提醒我喝水",
+						budget: 48,
+						allowedToolNames,
+						routerMode: "semantic",
+						trace: {
+							traceId: "tr_benchmark",
+							journeyId: "line_text_agent_turn",
+							actor: "worker",
+							traceSource: "incoming",
+						},
+					},
+					{ emitEvent: () => undefined },
+				);
+			initialize();
+			const lifecycleLatencies: number[] = [];
+			const selectionLatencies: number[] = [];
+			let result = initialize();
+			for (let iteration = 0; iteration < 50; iteration++) {
+				const startedAt = performance.now();
+				result = initialize();
+				lifecycleLatencies.push(performance.now() - startedAt);
+				selectionLatencies.push(result.routeTotalMs);
+			}
+			const lifecycleP95Ms = percentile(lifecycleLatencies, 0.95);
+			const selectionP95Ms = percentile(selectionLatencies, 0.95);
+			const productSloMs = size <= 500 ? 10 : 25;
+			console.info(
+				`semantic-router external-turn-lifecycle size=${size} lifecycleP50=${percentile(lifecycleLatencies, 0.5).toFixed(3)}ms lifecycleP95=${lifecycleP95Ms.toFixed(3)}ms selectionP95=${selectionP95Ms.toFixed(3)}ms productSlo=${productSloMs}ms productSloPass=${lifecycleP95Ms < productSloMs} ciCeiling=${size <= 500 ? 30 : 75}ms snapshotCacheHits=${toolInventorySnapshotCacheStats().hits}`,
+			);
+			expect(result.selection.trace.selectedToolNames).toContain(
+				"lobu-memory/manage_schedules",
+			);
+			expect(toolInventorySnapshotCacheStats().hits).toBeGreaterThan(0);
+			expect(lifecycleP95Ms).toBeLessThan(size <= 500 ? 30 : 75);
+		});
+
+		test(`lower-level production route guard at ${size} tools`, () => {
 			clearToolRetrievalIndexCacheForTests();
 			const entries = Array.from({ length: size }, (_, index) =>
 				catalogEntryForTool(syntheticTool(index), index, "synthetic"),
