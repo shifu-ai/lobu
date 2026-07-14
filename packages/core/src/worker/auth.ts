@@ -65,6 +65,19 @@ export interface WorkerTokenData {
     /** Required (including explicit null) for course run tokens. */
     activeSpecializedSkill?: "opp-coach" | null;
   };
+  releaseCapability?: ReleaseCapabilityClaim;
+}
+
+/** Server-resolved, short-lived release capability provenance. */
+export interface ReleaseCapabilityClaim {
+  environment: "staging" | "production";
+  toolboxUserId: string;
+  agentId: string;
+  releaseId: string;
+  releaseSequence: number;
+  snapshotDigest: string;
+  expiresAt: string;
+  capabilityIds: string[];
 }
 
 export function generateWorkerToken(
@@ -94,6 +107,7 @@ export function generateWorkerToken(
     trustedPlatformContext?: boolean;
     executionMode?: WorkerTokenData["executionMode"];
     courseToolScope?: WorkerTokenData["courseToolScope"];
+    releaseCapability?: ReleaseCapabilityClaim;
   }
 ): string {
   if (!options.channelId) {
@@ -121,6 +135,7 @@ export function generateWorkerToken(
     trustedPlatformContext: options.trustedPlatformContext,
     executionMode: options.executionMode,
     courseToolScope: options.courseToolScope,
+    releaseCapability: options.releaseCapability,
   };
 
   return encrypt(JSON.stringify(payload));
@@ -200,6 +215,44 @@ export function verifyWorkerToken(token: string): WorkerTokenData | null {
         !scope.courseEntityId
       )
         return null;
+    }
+    if (data.releaseCapability !== undefined) {
+      const claim = data.releaseCapability;
+      const expiresAt = Date.parse(claim?.expiresAt);
+      if (
+        data.tokenKind !== "run" ||
+        !Number.isInteger(data.runId) ||
+        (data.runId ?? 0) <= 0 ||
+        !claim ||
+        (claim.environment !== "staging" &&
+          claim.environment !== "production") ||
+        typeof claim.toolboxUserId !== "string" ||
+        !claim.toolboxUserId ||
+        claim.toolboxUserId !== data.userId ||
+        typeof claim.agentId !== "string" ||
+        !claim.agentId ||
+        claim.agentId !== data.agentId ||
+        typeof claim.releaseId !== "string" ||
+        !claim.releaseId ||
+        !Number.isInteger(claim.releaseSequence) ||
+        claim.releaseSequence <= 0 ||
+        typeof claim.snapshotDigest !== "string" ||
+        !/^sha256:[0-9a-f]{64}$/.test(claim.snapshotDigest) ||
+        typeof claim.expiresAt !== "string" ||
+        !Number.isFinite(expiresAt) ||
+        expiresAt <= Date.now() ||
+        !Array.isArray(claim.capabilityIds) ||
+        claim.capabilityIds.length < 1 ||
+        claim.capabilityIds.length > 64 ||
+        claim.capabilityIds.some(
+          (id) => typeof id !== "string" || !id || id.length > 200
+        )
+      ) {
+        logger.error(
+          "Worker token rejected: invalid release capability binding"
+        );
+        return null;
+      }
     }
     if (data.executionMode !== undefined) {
       if (
