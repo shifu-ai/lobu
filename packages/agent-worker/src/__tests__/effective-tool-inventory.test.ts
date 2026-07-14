@@ -25,6 +25,8 @@ function tool(name: string): McpToolDef {
   };
 }
 
+const MALFORMED_MCP_ID = "mcp\ud800";
+
 function active(capabilityIds: string[]): ReleaseCapabilityState {
   return {
     status: "active",
@@ -182,6 +184,18 @@ describe("effective tool inventory", () => {
         releaseState: { status: "legacy_unenrolled" },
       })
     ).toThrow("effective tool inventory exceeds 4096 discovered tools");
+  });
+
+  test.each([
+    ["MCP id", { [MALFORMED_MCP_ID]: [tool("safe")] }],
+    ["tool name", { mcp: [tool("name\udfff")] }],
+  ])("fails a malformed production inventory %s closed", (_label, scopedTools) => {
+    expect(() =>
+      buildEffectiveToolInventory({
+        scopedTools,
+        releaseState: { status: "legacy_unenrolled" },
+      })
+    ).toThrow("invalid UTF-16 string: unpaired surrogate");
   });
 
   test("renders a delivery promise only for the active signed capability", () => {

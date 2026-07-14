@@ -25,6 +25,9 @@ function tool(name: string, description: string): McpToolDef {
   };
 }
 
+const UNPAIRED_HIGH = "bad\ud800";
+const UNPAIRED_LOW = "bad\udfff";
+
 describe("external-turn immutable tool inventory snapshots", () => {
   test.each([
     ["undefined", undefined],
@@ -117,6 +120,56 @@ describe("external-turn immutable tool inventory snapshots", () => {
       })
     ).toThrow("cyclic tool inventory value");
     expect(toolInventorySnapshotCacheStats().entries).toBe(0);
+  });
+
+  test.each([
+    ["MCP id key", () => ({ [UNPAIRED_HIGH]: [tool("safe", "safe")] })],
+    ["tool name value", () => ({ source: [tool(UNPAIRED_LOW, "safe")] })],
+    [
+      "nested string value",
+      () => ({
+        source: [
+          {
+            name: "safe",
+            inputSchema: { nested: { description: UNPAIRED_HIGH } },
+          },
+        ],
+      }),
+    ],
+    [
+      "nested property key",
+      () => ({
+        source: [
+          {
+            name: "safe",
+            inputSchema: { nested: { [UNPAIRED_LOW]: true } },
+          },
+        ],
+      }),
+    ],
+  ])("rejects an unpaired surrogate in a production inventory %s", (_label, inventory) => {
+    expect(() => snapshotToolsByMcp(inventory())).toThrow(
+      "invalid UTF-16 string: unpaired surrogate"
+    );
+  });
+
+  test("preserves valid astral pairs in inventory keys and nested values", () => {
+    const snapshot = snapshotToolsByMcp({
+      "mcp-🧭": [
+        {
+          name: "提醒-💧",
+          inputSchema: {
+            type: "object",
+            properties: { "欄位-🌟": { description: "內容-🚀" } },
+          },
+        },
+      ],
+    });
+
+    expect(snapshot["mcp-🧭"]?.[0]?.name).toBe("提醒-💧");
+    expect(
+      snapshot["mcp-🧭"]?.[0]?.inputSchema?.properties?.["欄位-🌟"]
+    ).toEqual({ description: "內容-🚀" });
   });
 
   test("validates an already frozen inventory before the immutable fast path", () => {

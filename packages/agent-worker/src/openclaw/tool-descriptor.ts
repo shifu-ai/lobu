@@ -11,6 +11,7 @@ import {
   retainToolRouterCacheEntry,
   touchToolRouterCacheEntry,
 } from "./tool-router-memory-budget";
+import { assertWellFormedUnicode } from "./well-formed-unicode";
 
 const MAX_INDEXED_TEXT_BYTES = 16 * 1024;
 const DESCRIPTOR_VERSION = 1;
@@ -29,11 +30,15 @@ const descriptorSourceFinalizer = new FinalizationRegistry<string>(
 );
 
 export function toolIdentityKey(mcpId: string, name: string): string {
+  assertWellFormedUnicode(mcpId);
+  assertWellFormedUnicode(name);
   return JSON.stringify([mcpId, name]);
 }
 
 /** Reversible external key. Ordinary `mcp/tool` keys remain byte-compatible. */
 export function qualifiedToolKey(mcpId: string, name: string): string {
+  assertWellFormedUnicode(mcpId);
+  assertWellFormedUnicode(name);
   return `${encodeURIComponent(mcpId)}/${encodeURIComponent(name)}`;
 }
 

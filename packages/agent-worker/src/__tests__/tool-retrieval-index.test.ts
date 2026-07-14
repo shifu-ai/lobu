@@ -5,6 +5,7 @@ import {
   buildToolDescriptor,
   getOrBuildToolDescriptor,
   inventoryFingerprint,
+  qualifiedToolKey,
   type ToolDescriptor,
   toolIdentityKey,
 } from "../openclaw/tool-descriptor";
@@ -530,7 +531,7 @@ describe("tool retrieval index", () => {
     const left = buildToolDescriptor(tool("b/c", "shared"), "a", 0);
     const right = buildToolDescriptor(tool("c", "shared"), "a/b", 1);
 
-    expect(left.key).toBe(right.key);
+    expect(left.key).not.toBe(right.key);
     expect(left.identityKey).toBe(toolIdentityKey("a", "b/c"));
     expect(right.identityKey).toBe(toolIdentityKey("a/b", "c"));
     const index = buildToolRetrievalIndex([left, right]);
@@ -542,6 +543,28 @@ describe("tool retrieval index", () => {
     );
 
     expect(matches.map(({ descriptor }) => descriptor.mcpId)).toEqual(["a"]);
+  });
+
+  test.each([
+    ["qualified mcp id", () => qualifiedToolKey("bad\ud800", "tool")],
+    ["qualified tool name", () => qualifiedToolKey("mcp", "bad\udfff")],
+    ["identity mcp id", () => toolIdentityKey("bad\ud800", "tool")],
+    ["identity tool name", () => toolIdentityKey("mcp", "bad\udfff")],
+  ])("fails malformed UTF-16 closed for %s", (_label, buildKey) => {
+    expect(buildKey).toThrow("invalid UTF-16 string: unpaired surrogate");
+  });
+
+  test("keeps a valid astral surrogate pair reversible", () => {
+    const mcpId = "mcp-🧭";
+    const name = "提醒-💧";
+    const qualified = qualifiedToolKey(mcpId, name);
+    const [encodedMcpId, encodedName] = qualified.split("/");
+
+    expect([
+      decodeURIComponent(encodedMcpId!),
+      decodeURIComponent(encodedName!),
+    ]).toEqual([mcpId, name]);
+    expect(JSON.parse(toolIdentityKey(mcpId, name))).toEqual([mcpId, name]);
   });
 
   test("keeps raw NUL-containing identity components injective", () => {

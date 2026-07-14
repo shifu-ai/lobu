@@ -6,6 +6,7 @@ import {
   retainToolRouterCacheEntry,
   touchToolRouterCacheEntry,
 } from "./tool-router-memory-budget";
+import { assertWellFormedUnicode } from "./well-formed-unicode";
 
 const SNAPSHOT_SCHEMA_VERSION = 1;
 const MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024;
@@ -40,7 +41,11 @@ function assertJsonLike(
   if (value === undefined) {
     throw new TypeError("non-JSON tool inventory value: undefined");
   }
-  if (typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "string") {
+    assertWellFormedUnicode(value);
+    return;
+  }
+  if (typeof value === "boolean") return;
   if (typeof value === "number") {
     if (Number.isFinite(value)) return;
     throw new TypeError("non-JSON tool inventory value: non-finite number");
@@ -65,6 +70,7 @@ function assertJsonLike(
   }
   active.add(value);
   const descriptors = Object.getOwnPropertyDescriptors(value);
+  for (const key of Object.keys(descriptors)) assertWellFormedUnicode(key);
   if (Array.isArray(value)) {
     if (value.length > 100_000) {
       throw new TypeError(
