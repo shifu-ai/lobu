@@ -20,7 +20,14 @@
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { createMcpToolDefinitions } from "../openclaw/custom-tools";
-import { emitWorkerToolsRegisteredObsEvent } from "../openclaw/session-runner";
+import {
+  buildRuntimeToolCatalog,
+  selectMcpToolsByMcpForTurn,
+} from "../openclaw/dynamic-tool-loader";
+import {
+  buildToolRouterClarificationInstruction,
+  emitWorkerToolsRegisteredObsEvent,
+} from "../openclaw/session-runner";
 import {
   askUserQuestion,
   callMcpTool,
@@ -712,5 +719,89 @@ describe("worker MCP tool registration observability", () => {
       },
     });
     expect(payload.metadata.mcp_ids).toEqual(["lobu"]);
+  });
+});
+
+describe("external-turn tool router lifecycle", () => {
+  test("freezes one ambiguity decision for both runtime catalogs", () => {
+    const userPrompt = "幫我排明天下午三點跟老師開會";
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "lobu-memory": [
+          {
+            name: "manage_schedules",
+            description: "Create a personal reminder schedule.",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+        google_workspace: [
+          {
+            name: "gws_calendar_events_create",
+            description: "Create a Google Calendar event.",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      message: userPrompt,
+      budget: 8,
+      allowedToolNames: [
+        "lobu-memory/manage_schedules",
+        "google_workspace/gws_calendar_events_create",
+      ],
+    });
+
+    expect(selection.trace.clarificationRequired).toBe(true);
+    expect(selection.trace.blockedToolNames).toHaveLength(2);
+    expect(buildToolRouterClarificationInstruction(selection.trace)).toContain(
+      selection.trace.clarificationQuestion ?? ""
+    );
+    for (const providerVisibleTools of [{}, selection.selectedTools]) {
+      const catalog = buildRuntimeToolCatalog({
+        allTools: {
+          "lobu-memory": [
+            {
+              name: "manage_schedules",
+              description: "Create a personal reminder schedule.",
+              inputSchema: { type: "object", properties: {} },
+            },
+          ],
+          google_workspace: [
+            {
+              name: "gws_calendar_events_create",
+              description: "Create a Google Calendar event.",
+              inputSchema: { type: "object", properties: {} },
+            },
+          ],
+        },
+        selectedTools: selection.selectedTools,
+        providerVisibleTools,
+        allowedToolNames: [
+          "lobu-memory/manage_schedules",
+          "google_workspace/gws_calendar_events_create",
+        ],
+        clarificationBlockedToolKeys: selection.trace.blockedToolNames,
+      });
+      expect(catalog.map((entry) => entry.callBlockedReason)).toEqual([
+        "clarification_required",
+        "clarification_required",
+      ]);
+    }
+
+    const unambiguous = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "lobu-memory": [
+          {
+            name: "manage_schedules",
+            description: "Create a personal reminder schedule.",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      message: "五分鐘後提醒我喝水",
+      budget: 8,
+    });
+    expect(
+      buildToolRouterClarificationInstruction(unambiguous.trace)
+    ).toBeNull();
   });
 });

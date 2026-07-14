@@ -37,6 +37,7 @@ import {
   emitJourneyEvent,
   parseWorkerShifuTrace,
   type JourneyTraceStatus,
+  type WorkerJourneyEventInput,
   type WorkerShifuTraceContext,
 } from "../shared/journey-trace";
 import {
@@ -94,6 +95,7 @@ import { createOpenClawTools } from "./tools";
 import { clearSnapshots, hydrateFromSnapshot } from "./transcript-snapshot";
 import {
   buildRuntimeToolCatalog,
+  type DynamicToolSelectionTrace,
   resolveDynamicToolBudget,
   selectMcpToolsByMcpForTurn,
 } from "./dynamic-tool-loader";
@@ -163,6 +165,66 @@ const RUNTIME_CATALOG_CUSTOM_TOOL_NAMES = [
   "tool_call",
   "tool_status",
 ];
+const TOOL_ROUTER_CLARIFICATION_INSTRUCTION =
+  "The requested write destination is ambiguous. Ask the user the supplied clarification question before calling either blocked tool.";
+
+function boundedRouterString(value: string, maxLength = 160): string {
+  return value.slice(0, maxLength);
+}
+
+export function buildToolRouterClarificationInstruction(
+  trace: DynamicToolSelectionTrace
+): string | null {
+  if (!trace.clarificationRequired || !trace.clarificationQuestion) return null;
+  return `${TOOL_ROUTER_CLARIFICATION_INSTRUCTION}\nClarification question: ${boundedRouterString(trace.clarificationQuestion, 320)}`;
+}
+
+export function buildToolRouterJourneyEventInput(params: {
+  trace: WorkerShifuTraceContext;
+  selectionTrace: DynamicToolSelectionTrace;
+  totalMs: number;
+}): WorkerJourneyEventInput {
+  const selectionTrace = params.selectionTrace;
+  return {
+    event: "lobu.worker.tool_router_decision",
+    trace: params.trace,
+    module: "agent-worker",
+    status: selectionTrace.fallback === "router_error" ? "degraded" : "ok",
+    fields: {
+      router_version: selectionTrace.routerVersion,
+      inventory_fingerprint: selectionTrace.inventoryFingerprint.slice(0, 16),
+      cache_hit: selectionTrace.cacheHit,
+      tool_count: selectionTrace.totalTools,
+      eligible_tool_count: selectionTrace.eligibleToolCount,
+      explicit_destinations: selectionTrace.explicitDestinations
+        .slice(0, 8)
+        .map((value) => boundedRouterString(value, 80)),
+      selected_tools: selectionTrace.selectedToolNames
+        .slice(0, 48)
+        .map((value) => boundedRouterString(value)),
+      blocked_tools: selectionTrace.blockedToolNames
+        .slice(0, 20)
+        .map((value) => boundedRouterString(value)),
+      clarification_required: selectionTrace.clarificationRequired,
+      clarification_reason: selectionTrace.clarificationReason,
+      candidates: selectionTrace.candidates.slice(0, 5).map((candidate) => ({
+        key: boundedRouterString(candidate.key),
+        total_score: candidate.totalScore,
+        reasons: candidate.reasons
+          .slice(0, 8)
+          .map((reason) => boundedRouterString(reason, 48)),
+      })),
+      candidate_count: selectionTrace.candidateCount,
+      timing_ms: {
+        ...selectionTrace.timingMs,
+        total: params.totalMs,
+      },
+      estimated_index_bytes: selectionTrace.estimatedIndexBytes,
+      cache_eviction_count: selectionTrace.cacheEvictionCount,
+      fallback: selectionTrace.fallback,
+    },
+  };
+}
 
 function readStringOrFallback(value: unknown, fallback: string): string {
   if (typeof value !== "string") {
@@ -1555,20 +1617,6 @@ Use it when the user references past discussions or you need context.`);
   const dynamicToolBudget = resolveDynamicToolBudget(
     process.env.LOBU_DYNAMIC_TOOL_BUDGET
   );
-  let selectedMcpToolsForTurn: Record<string, McpToolDef[]> = context.mcpTools;
-
-  if (mcpExposure !== "cli") {
-    const selection = selectMcpToolsByMcpForTurn({
-      toolsByMcp: context.mcpTools,
-      message: userPrompt,
-      budget: dynamicToolBudget,
-    });
-    selectedMcpToolsForTurn = selection.selectedTools;
-    logger.info(
-      `Dynamic MCP tool selection: primaryIntent=${selection.trace.primaryIntent}, selected=${selection.trace.selectedToolNames.length}/${selection.trace.totalTools}, omitted=${selection.trace.omittedToolNames.length}, omittedPreview=${selection.trace.omittedToolNames.slice(0, 12).join(", ")}`
-    );
-  }
-
   const catalogAllowedToolNames: string[] = [];
   for (const [mcpId, toolsForMcp] of Object.entries(context.mcpTools)) {
     for (const tool of toolsForMcp) {
@@ -1577,6 +1625,30 @@ Use it when the user references past discussions or you need context.`);
       catalogAllowedToolNames.push(toolName, `${mcpId}/${toolName}`);
     }
   }
+
+  const routeStartedAt = performance.now();
+  const selection = selectMcpToolsByMcpForTurn({
+    toolsByMcp: context.mcpTools,
+    message: userPrompt,
+    budget: dynamicToolBudget,
+    allowedToolNames: catalogAllowedToolNames,
+  });
+  const routeTotalMs = performance.now() - routeStartedAt;
+  const selectedMcpToolsForTurn = selection.selectedTools;
+  const clarificationInstruction = buildToolRouterClarificationInstruction(
+    selection.trace
+  );
+  if (clarificationInstruction) instructionParts.push(clarificationInstruction);
+  emitJourneyEvent(
+    buildToolRouterJourneyEventInput({
+      trace: shifuTrace,
+      selectionTrace: selection.trace,
+      totalMs: routeTotalMs,
+    })
+  );
+  logger.info(
+    `Dynamic MCP tool selection: router=${selection.trace.routerVersion}, selected=${selection.trace.selectedToolNames.length}, eligible=${selection.trace.eligibleToolCount}, total=${selection.trace.totalTools}, clarification=${selection.trace.clarificationRequired}, cacheHit=${selection.trace.cacheHit}, totalMs=${routeTotalMs.toFixed(2)}, fallback=${selection.trace.fallback ?? "none"}`
+  );
 
   let customTools = createOpenClawCustomTools({
     ...gwParams,
@@ -1611,6 +1683,7 @@ Use it when the user references past discussions or you need context.`);
       selectedTools: selectedMcpToolsForTurn,
       providerVisibleTools: {},
       allowedToolNames: catalogAllowedToolNames,
+      clarificationBlockedToolKeys: selection.trace.blockedToolNames,
     });
     customTools.push(
       ...createOpenClawCustomTools({
@@ -1651,6 +1724,7 @@ Use it when the user references past discussions or you need context.`);
       selectedTools: selectedMcpToolsForTurn,
       providerVisibleTools: projectedMcp.tools,
       allowedToolNames: catalogAllowedToolNames,
+      clarificationBlockedToolKeys: selection.trace.blockedToolNames,
     });
     customTools.push(
       ...createOpenClawCustomTools({

@@ -1,4 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
+import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
+import { buildToolRouterJourneyEventInput } from "../openclaw/session-runner";
 import {
   emitJourneyEvent,
   journeyEvent,
@@ -120,6 +122,64 @@ describe("worker journey trace", () => {
       event: "worker.mcp_tool_invoked",
       trace_id: "tr_worker_emit",
       status: "started",
+    });
+  });
+
+  test("builds a bounded tool-router decision event without raw prompt data", () => {
+    const userPrompt = `幫我排明天下午三點跟老師開會-${"private".repeat(200)}`;
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "lobu-memory": [
+          {
+            name: "manage_schedules",
+            description: "Create a personal reminder schedule.",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+        google_workspace: [
+          {
+            name: "gws_calendar_events_create",
+            description: "Create a Google Calendar event.",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      message: userPrompt,
+      budget: 8,
+    });
+    const input = buildToolRouterJourneyEventInput({
+      trace: parseWorkerShifuTrace({
+        shifuTrace: {
+          trace_id: "tr_toolrouter1234",
+          journey_id: "line_text_agent_turn",
+        },
+      }),
+      selectionTrace: selection.trace,
+      totalMs: 12.5,
+    });
+    const event = journeyEvent(input);
+    const serializedEvent = JSON.stringify(event);
+    const emitted = JSON.parse(serializedEvent) as Record<string, unknown>;
+
+    expect(emitted.inventory_fingerprint).toHaveLength(16);
+    expect(emitted.candidates).toHaveLength(
+      Math.min(5, selection.trace.candidateCount)
+    );
+    expect(serializedEvent).not.toContain(userPrompt);
+    expect((emitted.candidates as unknown[]).length <= 5).toBe(true);
+    expect(emitted.selected_tools).toHaveLength(0);
+    expect(emitted.blocked_tools).toHaveLength(2);
+    expect(emitted).toMatchObject({
+      event: "lobu.worker.tool_router_decision",
+      module: "agent-worker",
+      status: "ok",
+      router_version: "semantic-v1",
+      cache_hit: expect.any(Boolean),
+      tool_count: expect.any(Number),
+      eligible_tool_count: expect.any(Number),
+      selected_tools: expect.any(Array),
+      blocked_tools: expect.any(Array),
+      timing_ms: expect.objectContaining({ total: expect.any(Number) }),
     });
   });
 });

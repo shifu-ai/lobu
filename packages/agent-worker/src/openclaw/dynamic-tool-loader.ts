@@ -24,6 +24,7 @@ export interface DynamicToolSelectionTrace {
 	primaryIntent: ToolIntent;
 	budget: number;
 	totalTools: number;
+	eligibleToolCount: number;
 	selectedToolNames: string[];
 	omittedToolNames: string[];
 	pinnedBudgetOverflow: string[];
@@ -38,6 +39,12 @@ export interface DynamicToolSelectionTrace {
 	clarificationChoices?: string[];
 	candidates: ToolCandidateScore[];
 	fallback: ToolRouteDecision["fallback"];
+	inventoryFingerprint: string;
+	cacheHit: boolean;
+	estimatedIndexBytes: number;
+	cacheEvictionCount: number;
+	candidateCount: number;
+	timingMs: ToolRouteDecision["timingMs"];
 }
 
 export interface SelectMcpToolsForTurnParams {
@@ -229,6 +236,12 @@ function routeTraceFields(
 	| "blockedToolNames"
 	| "candidates"
 	| "fallback"
+	| "inventoryFingerprint"
+	| "cacheHit"
+	| "estimatedIndexBytes"
+	| "cacheEvictionCount"
+	| "candidateCount"
+	| "timingMs"
 	| "clarificationQuestion"
 	| "clarificationReason"
 	| "clarificationChoices"
@@ -243,6 +256,12 @@ function routeTraceFields(
 		clarificationChoices: route.clarification?.blockedToolNames,
 		candidates: route.candidates,
 		fallback: route.fallback,
+		inventoryFingerprint: route.inventoryFingerprint,
+		cacheHit: route.cacheHit,
+		estimatedIndexBytes: route.estimatedIndexBytes,
+		cacheEvictionCount: route.cacheEvictionCount,
+		candidateCount: route.candidates.length,
+		timingMs: route.timingMs,
 	};
 }
 
@@ -300,7 +319,8 @@ export function selectMcpToolsForTurn(
 		trace: {
 			primaryIntent,
 			budget,
-			totalTools: eligibleEntries.length,
+			totalTools: entries.length,
+			eligibleToolCount: eligibleEntries.length,
 			selectedToolNames: selectedTraceNames,
 			omittedToolNames,
 			pinnedBudgetOverflow: pinnedBudgetOverflow.map(displayToolName),
@@ -368,7 +388,8 @@ export function selectMcpToolsByMcpForTurn(
 		trace: {
 			primaryIntent,
 			budget,
-			totalTools: eligibleEntries.length,
+			totalTools: entries.length,
+			eligibleToolCount: eligibleEntries.length,
 			selectedToolNames: selectedTraceNames,
 			omittedToolNames: omittedTraceNames,
 			pinnedBudgetOverflow: pinnedBudgetOverflow.map(displayToolName),

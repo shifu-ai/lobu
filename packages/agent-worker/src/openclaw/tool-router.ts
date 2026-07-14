@@ -24,6 +24,15 @@ export interface ToolCandidateScore {
 
 export interface ToolRouteDecision {
 	routerVersion: "semantic-v1";
+	inventoryFingerprint: string;
+	cacheHit: boolean;
+	estimatedIndexBytes: number;
+	cacheEvictionCount: number;
+	timingMs: {
+		build: number;
+		retrieve: number;
+		rank: number;
+	};
 	selectedEntries: ToolCatalogEntry[];
 	candidates: ToolCandidateScore[];
 	explicitDestinations: ToolDestination[];
@@ -199,12 +208,15 @@ export function routeToolEntries({
 	reservedEntries,
 	allowedToolNames,
 }: RouteToolEntriesParams): ToolRouteDecision {
+	const buildStartedAt = performance.now();
 	const query = buildToolRouteQuery(message);
 	const descriptors = entries.map((entry) =>
 		buildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex),
 	);
 	const index = buildToolRetrievalIndex(descriptors);
 	const eligibleKeys = eligibleIdentityKeys(entries, allowedToolNames);
+	const buildMs = performance.now() - buildStartedAt;
+	const retrieveStartedAt = performance.now();
 	const matches = searchToolRetrievalIndex(
 		index,
 		retrievalQuery(message, query.operations, query.explicitDestinations),
@@ -222,6 +234,8 @@ export function routeToolEntries({
 			(descriptor) => [descriptor.identityKey, descriptor] as const,
 		),
 	);
+	const retrieveMs = performance.now() - retrieveStartedAt;
+	const rankStartedAt = performance.now();
 	const entriesByIdentityKey = new Map(
 		descriptors.flatMap((descriptor, index) => {
 			const entry = entries[index];
@@ -287,6 +301,15 @@ export function routeToolEntries({
 
 	return {
 		routerVersion: "semantic-v1",
+		inventoryFingerprint: index.fingerprint,
+		cacheHit: false,
+		estimatedIndexBytes: index.estimatedBytes,
+		cacheEvictionCount: 0,
+		timingMs: {
+			build: buildMs,
+			retrieve: retrieveMs,
+			rank: performance.now() - rankStartedAt,
+		},
 		selectedEntries,
 		candidates: scoredEntries.map(({ score }) => score),
 		explicitDestinations: query.explicitDestinations,
