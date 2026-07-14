@@ -26,6 +26,114 @@ function tool(name: string, description: string): McpToolDef {
 }
 
 describe("external-turn immutable tool inventory snapshots", () => {
+  test.each([
+    ["undefined", undefined],
+    ["Map", new Map([["type", "string"]])],
+    ["Set", new Set(["string"])],
+    ["Date", new Date("2026-07-14T00:00:00.000Z")],
+    [
+      "custom prototype",
+      Object.assign(Object.create({ inherited: true }), { type: "object" }),
+    ],
+  ])("rejects non-JSON %s schema values without caching an empty-object collision", (_label, unsupported) => {
+    clearToolInventorySnapshotCacheForTests();
+    const valid = snapshotToolsByMcp({
+      source: [{ name: "tool", inputSchema: {} }],
+    });
+    const before = toolInventorySnapshotCacheStats();
+
+    expect(() =>
+      snapshotToolsByMcp({
+        source: [{ name: "tool", inputSchema: { unsupported } }],
+      })
+    ).toThrow("non-JSON tool inventory value");
+    expect(toolInventorySnapshotCacheStats()).toEqual(before);
+    expect(valid.source[0]?.inputSchema).toEqual({});
+  });
+
+  test.each([
+    [
+      "sparse array",
+      (() => {
+        const value = new Array(2);
+        value[1] = "x";
+        return value;
+      })(),
+    ],
+    ["named array property", Object.assign(["x"], { extra: "y" })],
+    [
+      "non-index numeric array property",
+      Object.assign(["x"], { "4294967295": "ghost" }),
+    ],
+    [
+      "non-enumerable property",
+      (() => {
+        const value = { type: "object" };
+        Object.defineProperty(value, "hidden", { value: "x" });
+        return value;
+      })(),
+    ],
+  ])("rejects JSON/clone mismatch from a %s", (_label, unsupported) => {
+    expect(() =>
+      snapshotToolsByMcp({
+        source: [{ name: "bad", inputSchema: { unsupported } }],
+      })
+    ).toThrow("non-JSON tool inventory value");
+  });
+
+  test("rejects an overlarge array before traversing it", () => {
+    const overlarge = new Array(100_001).fill("x");
+    expect(() =>
+      snapshotToolsByMcp({
+        source: [{ name: "bad", inputSchema: { overlarge } }],
+      })
+    ).toThrow("array exceeds 100000 entries");
+  });
+
+  test("preserves a JSON own __proto__ key without mutating the clone prototype", () => {
+    const inputSchema = JSON.parse(
+      '{"type":"object","__proto__":{"polluted":true}}'
+    ) as Record<string, unknown>;
+    const snapshot = snapshotToolsByMcp({
+      source: [{ name: "safe", inputSchema }],
+    });
+    const cloned = snapshot.source[0]!.inputSchema!;
+
+    expect(Object.hasOwn(cloned, "__proto__")).toBe(true);
+    expect((cloned.__proto__ as { polluted?: boolean }).polluted).toBe(true);
+    expect(
+      (Object.getPrototypeOf(cloned) as { polluted?: boolean }).polluted
+    ).toBeUndefined();
+  });
+
+  test("rejects cyclic schemas instead of cloning a cyclic cache entry", () => {
+    clearToolInventorySnapshotCacheForTests();
+    const cyclic: Record<string, unknown> = { type: "object" };
+    cyclic.self = cyclic;
+
+    expect(() =>
+      snapshotToolsByMcp({
+        source: [{ name: "cyclic", inputSchema: cyclic }],
+      })
+    ).toThrow("cyclic tool inventory value");
+    expect(toolInventorySnapshotCacheStats().entries).toBe(0);
+  });
+
+  test("validates an already frozen inventory before the immutable fast path", () => {
+    clearToolInventorySnapshotCacheForTests();
+    const frozenMap = Object.freeze(new Map([["type", "object"]]));
+    const source = Object.freeze({
+      source: Object.freeze([
+        Object.freeze({ name: "bad", inputSchema: frozenMap }),
+      ]),
+    }) as unknown as Record<string, McpToolDef[]>;
+
+    expect(() => snapshotToolsByMcp(source)).toThrow(
+      "non-JSON tool inventory value"
+    );
+    expect(toolInventorySnapshotCacheStats().immutableReuses).toBe(0);
+  });
+
   test("preserves caller identity for an already deeply immutable inventory", () => {
     clearToolInventorySnapshotCacheForTests();
     const immutableTool = Object.freeze({

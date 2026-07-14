@@ -223,7 +223,16 @@ export function buildToolRouterJourneyEventInput(params: {
     fields: {
       router_version: selectionTrace.routerVersion,
       router_mode: selectionTrace.routerMode,
+      descriptor_inventory_fingerprint:
+        selectionTrace.inventoryFingerprint.slice(0, 16),
+      // Kept for existing dashboards; this is the descriptor index fingerprint.
       inventory_fingerprint: selectionTrace.inventoryFingerprint.slice(0, 16),
+      effective_tools_fingerprint:
+        selectionTrace.effectiveToolInventoryFingerprint?.slice(0, 16),
+      effective_release_status: selectionTrace.effectiveReleaseStatus,
+      effective_release_reason: selectionTrace.effectiveReleaseReason
+        ? boundedRouterString(selectionTrace.effectiveReleaseReason, 80)
+        : undefined,
       cache_hit: selectionTrace.cacheHit,
       tool_count: boundedRouterCount(selectionTrace.totalTools),
       eligible_tool_count: boundedRouterCount(selectionTrace.eligibleToolCount),
@@ -374,13 +383,22 @@ function freezeToolRoutingSelection(
 export function initializeExternalTurnToolRouting(
   params: SelectMcpToolsByMcpForTurnParams & {
     trace: WorkerShifuTraceContext;
+    effectiveToolInventoryFingerprint?: string;
+    effectiveReleaseStatus?: DynamicToolSelectionTrace["effectiveReleaseStatus"];
+    effectiveReleaseReason?: string;
   },
   dependencies: Partial<ExternalTurnToolRoutingDependencies> = {}
 ): ExternalTurnToolRouting {
   const selectTools = dependencies.selectTools ?? selectMcpToolsByMcpForTurn;
   const emitEvent = dependencies.emitEvent ?? emitJourneyEvent;
   const now = dependencies.now ?? performance.now.bind(performance);
-  const { trace, ...rawSelectionParams } = params;
+  const {
+    trace,
+    effectiveToolInventoryFingerprint,
+    effectiveReleaseStatus,
+    effectiveReleaseReason,
+    ...rawSelectionParams
+  } = params;
   const evictionCountBefore = toolRouterRetainedMemoryStats().evictions;
   const toolsByMcp = snapshotToolsByMcp(params.toolsByMcp);
   const allowedToolNames = params.allowedToolNames
@@ -399,7 +417,13 @@ export function initializeExternalTurnToolRouting(
   );
   const selection = freezeToolRoutingSelection({
     ...rawSelection,
-    trace: { ...rawSelection.trace, cacheEvictionCount },
+    trace: {
+      ...rawSelection.trace,
+      cacheEvictionCount,
+      effectiveToolInventoryFingerprint,
+      effectiveReleaseStatus,
+      effectiveReleaseReason,
+    },
   });
   const routeTotalMs = Math.max(0, now() - routeStartedAt);
   emitEvent(
@@ -1706,6 +1730,13 @@ export async function runAISession(
     isPolicyAllowed: (_toolKey, toolName) =>
       isToolAllowedByPolicy(toolName, toolsPolicy),
   });
+  const personalReminderDeliveryBlockedReason = effectiveTools.behaviors
+    .personalReminderDelivery.executable
+    ? undefined
+    : (effectiveTools.behaviors.personalReminderDelivery.state as
+        | "capability_inactive"
+        | "snapshot_missing"
+        | "snapshot_expired");
   const effectiveAllowedMcpTools = collectAllowedMcpTools(
     effectiveTools.toolsByMcp
   );
@@ -1729,6 +1760,12 @@ export async function runAISession(
       isToolAllowed: (toolName) => isToolAllowedByPolicy(toolName, toolsPolicy),
       mcpProvenanceById,
       trustedShifuToolboxOrigins,
+      personalReminderDeliveryBlockedReason,
+      effectiveToolInventoryFingerprint: effectiveTools.fingerprint,
+      effectiveReleaseStatus: effectiveTools.releaseProvenance.status,
+      effectiveReleaseReason:
+        effectiveTools.releaseProvenance.inactiveReason ??
+        personalReminderDeliveryBlockedReason,
       trace: shifuTrace,
     },
     runAISessionDependencies
@@ -1752,6 +1789,13 @@ export async function runAISession(
       providerVisibleTools,
       allowedToolNames: effectiveTools.allowedToolKeys,
       blockedToolReasons: effectiveBlockedToolReasons,
+      behaviorBlockedToolReasons: personalReminderDeliveryBlockedReason
+        ? {
+            "lobu-memory/manage_schedules": {
+              personal_reminder: personalReminderDeliveryBlockedReason,
+            },
+          }
+        : undefined,
       clarificationBlockedToolKeys: selection.trace.blockedToolIdentityKeys,
       mcpProvenanceById,
       trustedShifuToolboxOrigins,
@@ -2031,6 +2075,7 @@ Use it when the user references past discussions or you need context.`);
     turnExecutionIntent,
     personalReminderDeliveryExecutable:
       effectiveTools.behaviors.personalReminderDelivery.executable,
+    personalReminderDeliveryBlockedReason,
     mcpProvenanceById,
     shifuTrace,
   });
@@ -2054,6 +2099,7 @@ Use it when the user references past discussions or you need context.`);
         turnExecutionIntent,
         personalReminderDeliveryExecutable:
           effectiveTools.behaviors.personalReminderDelivery.executable,
+        personalReminderDeliveryBlockedReason,
         mcpProvenanceById,
         shifuTrace,
       }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
@@ -2094,6 +2140,7 @@ Use it when the user references past discussions or you need context.`);
         turnExecutionIntent,
         personalReminderDeliveryExecutable:
           effectiveTools.behaviors.personalReminderDelivery.executable,
+        personalReminderDeliveryBlockedReason,
         mcpProvenanceById,
         shifuTrace,
       }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
@@ -2141,6 +2188,7 @@ Use it when the user references past discussions or you need context.`);
         turnExecutionIntent,
         personalReminderDeliveryExecutable:
           effectiveTools.behaviors.personalReminderDelivery.executable,
+        personalReminderDeliveryBlockedReason,
         effectiveAllowedToolKeys: effectiveTools.allowedToolKeys,
       }
     );

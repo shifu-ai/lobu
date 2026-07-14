@@ -199,6 +199,7 @@ function createToolSearchDefinition(
         directVisibleThisTurn: entry.directVisibleThisTurn,
         callableViaCatalog: entry.callableViaCatalog,
         callBlockedReason: entry.callBlockedReason,
+        behaviorBlockedReasons: entry.behaviorBlockedReasons,
         totalScore,
         reasons,
       }));
@@ -216,7 +217,8 @@ function createToolSearchDefinition(
 }
 
 function createToolStatusDefinition(
-  runtimeToolCatalog: RuntimeToolCatalogEntry[]
+  runtimeToolCatalog: RuntimeToolCatalogEntry[],
+  executionDestination?: string
 ): ToolDefinition {
   return defineTool({
     name: "tool_status",
@@ -244,6 +246,7 @@ function createToolStatusDefinition(
             statusRuntimeToolCatalog(runtimeToolCatalog, {
               toolName: args.tool_name,
               mcpId: args.mcp_id,
+              executionDestination,
             }),
             null,
             2
@@ -258,6 +261,7 @@ function createToolCallDefinition(params: {
   runtimeToolCatalog: RuntimeToolCatalogEntry[];
   runtimeToolCaller: RuntimeToolCaller;
   effectiveAllowedToolKeys?: Iterable<string>;
+  executionDestination?: string;
 }): ToolDefinition {
   return defineTool({
     name: "tool_call",
@@ -283,6 +287,7 @@ function createToolCallDefinition(params: {
       const result = await dispatchRuntimeToolCall({
         catalog: params.runtimeToolCatalog,
         allowedToolKeys: params.effectiveAllowedToolKeys,
+        executionDestination: params.executionDestination,
         toolName: args.tool_name,
         mcpId: args.mcp_id,
         args: (args.args || {}) as Record<string, unknown>,
@@ -379,6 +384,10 @@ export function createOpenClawCustomTools(params: {
   effectiveAllowedToolKeys?: Iterable<string>;
   turnExecutionIntent?: TurnExecutionIntent;
   personalReminderDeliveryExecutable?: boolean;
+  personalReminderDeliveryBlockedReason?:
+    | "capability_inactive"
+    | "snapshot_missing"
+    | "snapshot_expired";
   mcpProvenanceById?: McpCatalogProvenanceById;
   shifuTrace?: WorkerShifuTraceContext;
 }): ToolDefinition[] {
@@ -671,6 +680,8 @@ export function createOpenClawCustomTools(params: {
         callTool: rawRuntimeToolCaller,
         personalReminderDeliveryExecutable:
           params.personalReminderDeliveryExecutable,
+        personalReminderDeliveryBlockedReason:
+          params.personalReminderDeliveryBlockedReason,
         onTrace: (decision) =>
           emitMcpExecutionContractTrace(
             params.shifuTrace,
@@ -685,8 +696,12 @@ export function createOpenClawCustomTools(params: {
         runtimeToolCatalog: params.runtimeToolCatalog,
         runtimeToolCaller,
         effectiveAllowedToolKeys: params.effectiveAllowedToolKeys,
+        executionDestination: params.turnExecutionIntent?.destination,
       }),
-      createToolStatusDefinition(params.runtimeToolCatalog)
+      createToolStatusDefinition(
+        params.runtimeToolCatalog,
+        params.turnExecutionIntent?.destination
+      )
     );
   }
 
@@ -732,6 +747,10 @@ export function createMcpToolDefinitions(
     mcpProvenanceById?: McpCatalogProvenanceById;
     turnExecutionIntent?: TurnExecutionIntent;
     personalReminderDeliveryExecutable?: boolean;
+    personalReminderDeliveryBlockedReason?:
+      | "capability_inactive"
+      | "snapshot_missing"
+      | "snapshot_expired";
     effectiveAllowedToolKeys?: Iterable<string>;
   }
 ): ToolDefinition[] {
@@ -814,6 +833,8 @@ export function createMcpToolDefinitions(
               }),
             personalReminderDeliveryExecutable:
               options?.personalReminderDeliveryExecutable,
+            personalReminderDeliveryBlockedReason:
+              options?.personalReminderDeliveryBlockedReason,
             onTrace: (decision) =>
               emitMcpExecutionContractTrace(
                 options?.shifuTrace,

@@ -27,6 +27,12 @@ import {
   type ToolCandidateScore,
   type ToolRouteDecision,
 } from "./tool-router";
+import { deriveTurnExecutionIntent } from "./turn-execution-intent";
+
+export type PersonalReminderDeliveryBlockedReason =
+  | "capability_inactive"
+  | "snapshot_missing"
+  | "snapshot_expired";
 
 export interface DynamicToolSelectionTrace {
   routerMode: ToolRouterMode;
@@ -54,7 +60,12 @@ export interface DynamicToolSelectionTrace {
   clarificationChoices?: string[];
   candidates: ToolCandidateScore[];
   fallback: ToolRouteDecision["fallback"];
+  /** Descriptor/retrieval-index fingerprint, not the final eligibility set. */
   inventoryFingerprint: string;
+  /** Final turn-local eligibility/release fingerprint, when projected by the worker. */
+  effectiveToolInventoryFingerprint?: string;
+  effectiveReleaseStatus?: "legacy_unenrolled" | "enrolled_inactive" | "active";
+  effectiveReleaseReason?: string;
   cacheHit: boolean;
   estimatedIndexBytes: number;
   cacheEvictionCount: number;
@@ -72,6 +83,7 @@ export interface SelectMcpToolsForTurnParams {
   isToolAllowed?: (toolName: string, mcpId: string) => boolean;
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
+  personalReminderDeliveryBlockedReason?: PersonalReminderDeliveryBlockedReason;
 }
 
 export interface SelectMcpToolsForTurnResult {
@@ -88,6 +100,7 @@ export interface SelectGroupedMcpToolsForTurnParams {
   isToolAllowed?: (toolName: string, mcpId: string) => boolean;
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
+  personalReminderDeliveryBlockedReason?: PersonalReminderDeliveryBlockedReason;
 }
 
 export interface SelectGroupedMcpToolsForTurnResult {
@@ -104,6 +117,24 @@ export interface SelectMcpToolsByMcpForTurnParams {
   isToolAllowed?: (toolName: string, mcpId: string) => boolean;
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
+  personalReminderDeliveryBlockedReason?: PersonalReminderDeliveryBlockedReason;
+}
+
+function blocksPersonalReminderTool(
+  params: {
+    message: string;
+    personalReminderDeliveryBlockedReason?: PersonalReminderDeliveryBlockedReason;
+  },
+  mcpId: string,
+  toolName: string
+): boolean {
+  return (
+    params.personalReminderDeliveryBlockedReason !== undefined &&
+    deriveTurnExecutionIntent(params.message).destination ===
+      "personal_reminder" &&
+    mcpId === "lobu-memory" &&
+    toolName === "manage_schedules"
+  );
 }
 
 export interface SelectMcpToolsByMcpForTurnResult {
@@ -545,6 +576,8 @@ export function selectMcpToolsForTurn(
       isToolAllowed: params.isToolAllowed,
       mcpProvenanceById: params.mcpProvenanceById,
       trustedShifuToolboxOrigins: params.trustedShifuToolboxOrigins,
+      personalReminderDeliveryBlockedReason:
+        params.personalReminderDeliveryBlockedReason,
     });
     return {
       selected: result.selectedTools,
@@ -573,6 +606,18 @@ export function selectMcpToolsForTurn(
         mcpProvenanceById: params.mcpProvenanceById,
         trustedShifuToolboxOrigins: params.trustedShifuToolboxOrigins,
       })
+    )
+    .filter(
+      (entry) =>
+        !blocksPersonalReminderTool(
+          {
+            message: params.message,
+            personalReminderDeliveryBlockedReason:
+              params.personalReminderDeliveryBlockedReason,
+          },
+          entry.mcpId,
+          entry.name
+        )
     )
     .filter(
       (entry) =>
@@ -663,6 +708,7 @@ export function selectMcpToolsByMcpForTurn(
         })
       )
         continue;
+      if (blocksPersonalReminderTool(params, mcpId, entry.name)) continue;
       if (
         intentForEligibility !== "automation" &&
         entry.domain === "automation"

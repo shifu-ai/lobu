@@ -35,6 +35,10 @@ export interface ExecuteMcpToolForTurnParams {
   callTool: McpExecutionCaller;
   /** Release-aware behavior projection. Legacy callers default to Phase-1 compatibility. */
   personalReminderDeliveryExecutable?: boolean;
+  personalReminderDeliveryBlockedReason?:
+    | "capability_inactive"
+    | "snapshot_missing"
+    | "snapshot_expired";
   onTrace?: (trace: McpExecutionTrace) => void;
 }
 
@@ -173,7 +177,8 @@ export async function executeMcpToolForTurn(
     });
     return {
       isError: true,
-      errorCode: "capability_inactive",
+      errorCode:
+        params.personalReminderDeliveryBlockedReason ?? "capability_inactive",
       content: [
         {
           type: "text",

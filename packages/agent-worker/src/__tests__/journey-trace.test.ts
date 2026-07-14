@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
+import { buildEffectiveToolInventory } from "../openclaw/effective-tool-inventory";
 import { buildToolRouterJourneyEventInput } from "../openclaw/session-runner";
 import {
   emitJourneyEvent,
@@ -273,5 +274,74 @@ describe("worker journey trace", () => {
     ]) {
       expect(serialized).not.toContain(`"${field}":null`);
     }
+  });
+
+  test("emits effective eligibility separately from the descriptor index fingerprint", () => {
+    const toolsByMcp = {
+      "lobu-memory": [
+        {
+          name: "manage_schedules",
+          description: "Manage personal schedules",
+          inputSchema: { type: "object" },
+        },
+      ],
+    };
+    const activeInventory = buildEffectiveToolInventory({
+      scopedTools: toolsByMcp,
+      releaseState: {
+        status: "active",
+        claim: {
+          environment: "production",
+          toolboxUserId: "user-1",
+          agentId: "agent-1",
+          releaseId: "release-1",
+          releaseSequence: 1,
+          snapshotDigest: "sha256:snapshot-1",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          capabilityIds: ["personal_reminder_delivery.v1"],
+        },
+      },
+    });
+    const inactiveInventory = buildEffectiveToolInventory({
+      scopedTools: toolsByMcp,
+      releaseState: {
+        status: "enrolled_inactive",
+        environment: "production",
+        reason: "snapshot_unavailable",
+      },
+    });
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp,
+      message: "list schedules",
+      budget: 1,
+    });
+    const trace = parseWorkerShifuTrace({});
+    const eventFor = (inventory: typeof activeInventory, reason?: string) =>
+      journeyEvent(
+        buildToolRouterJourneyEventInput({
+          trace,
+          selectionTrace: {
+            ...selection.trace,
+            effectiveToolInventoryFingerprint: inventory.fingerprint,
+            effectiveReleaseStatus: inventory.releaseProvenance.status,
+            effectiveReleaseReason: reason,
+          },
+          totalMs: 1,
+        })
+      );
+
+    const activeEvent = eventFor(activeInventory);
+    const inactiveEvent = eventFor(inactiveInventory, "snapshot_missing");
+    expect(activeEvent.descriptor_inventory_fingerprint).toBe(
+      inactiveEvent.descriptor_inventory_fingerprint
+    );
+    expect(activeEvent.effective_tools_fingerprint).not.toBe(
+      inactiveEvent.effective_tools_fingerprint
+    );
+    expect(inactiveEvent).toMatchObject({
+      effective_release_status: "enrolled_inactive",
+      effective_release_reason: "snapshot_missing",
+    });
+    expect(String(inactiveEvent.effective_tools_fingerprint)).toHaveLength(16);
   });
 });

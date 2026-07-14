@@ -275,4 +275,189 @@ describe("effective tool inventory", () => {
     expect(result).toMatchObject({ ok: false, code: "policy_denied" });
     expect(callTool).not.toHaveBeenCalled();
   });
+
+  test("fails a duplicate identity closed once across every consumer and fingerprints both schemas", async () => {
+    const duplicate = (schemaLabel: string): McpToolDef => ({
+      name: "duplicate",
+      description: `duplicate ${schemaLabel}`,
+      inputSchema: {
+        type: "object",
+        properties: { value: { type: schemaLabel } },
+      },
+    });
+    const build = (first: string, second: string) =>
+      buildEffectiveToolInventory({
+        scopedTools: { source: [duplicate(first), duplicate(second)] },
+        releaseState: { status: "legacy_unenrolled" },
+      });
+    const inventory = build("string", "number");
+    const reversed = build("number", "string");
+    const firstChanged = build("boolean", "number");
+
+    expect(inventory.blocked).toEqual([
+      { toolKey: "source/duplicate", reason: "duplicate_identity" },
+    ]);
+    expect(inventory.allowedToolKeys).toEqual([]);
+    expect(inventory.scopedTools.source).toHaveLength(1);
+    expect(inventory.fingerprint).toBe(reversed.fingerprint);
+    expect(inventory.fingerprint).not.toBe(firstChanged.fingerprint);
+    expect(buildMcpToolInventoryInstructions(inventory.toolsByMcp, [])).toBe(
+      ""
+    );
+    const routing = selectMcpToolsByMcpForTurn({
+      toolsByMcp: inventory.toolsByMcp,
+      message: "use duplicate",
+      budget: 8,
+      routerMode: "semantic",
+    });
+    expect(routing.trace.candidates).toEqual([]);
+    expect(
+      createMcpToolDefinitions(routing.selectedTools, {
+        gatewayUrl: "http://gateway",
+        workerToken: "token",
+        agentId: "agent-1",
+        channelId: "line-1",
+        conversationId: "conversation-1",
+        platform: "line",
+      })
+    ).toEqual([]);
+    const catalog = buildRuntimeToolCatalog({
+      allTools: inventory.scopedTools,
+      selectedTools: {},
+      allowedToolNames: inventory.allowedToolKeys,
+      blockedToolReasons: { "source/duplicate": "duplicate_identity" },
+    });
+    expect(searchRuntimeToolCatalog(catalog, { query: "duplicate" })).toEqual(
+      []
+    );
+    expect(
+      statusRuntimeToolCatalog(catalog, {
+        mcpId: "source",
+        toolName: "duplicate",
+      })
+    ).toMatchObject({ callBlockedReason: "duplicate_identity" });
+    const callTool = mock(async () => ({
+      content: [{ type: "text" as const, text: "must not run" }],
+    }));
+    await expect(
+      dispatchRuntimeToolCall({
+        catalog,
+        allowedToolKeys: inventory.allowedToolKeys,
+        mcpId: "source",
+        toolName: "duplicate",
+        args: {},
+        callTool,
+      })
+    ).resolves.toMatchObject({ ok: false, code: "duplicate_identity" });
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
+  test("does not confuse distinct identities whose display keys contain slashes", () => {
+    const inventory = buildEffectiveToolInventory({
+      scopedTools: {
+        "source/with-slash": [tool("plain")],
+        source: [tool("with-slash/plain")],
+      },
+      releaseState: { status: "legacy_unenrolled" },
+    });
+
+    expect(inventory.blocked).toEqual([]);
+    expect(inventory.scopedTools["source/with-slash"]).toHaveLength(1);
+    expect(inventory.scopedTools.source).toHaveLength(1);
+  });
+
+  test("blocks only the personal-reminder behavior while ordinary manage_schedules remains callable", async () => {
+    const inventory = buildEffectiveToolInventory({
+      scopedTools: {
+        "lobu-memory": [tool("manage_schedules")],
+      },
+      releaseState: active([]),
+    });
+    const reason = inventory.behaviors.personalReminderDelivery.state;
+    expect(reason).toBe("capability_inactive");
+
+    const reminderRoute = selectMcpToolsByMcpForTurn({
+      toolsByMcp: inventory.toolsByMcp,
+      message: "五分鐘後提醒我喝水",
+      budget: 8,
+      routerMode: "semantic",
+      personalReminderDeliveryBlockedReason: reason,
+    });
+    const listRoute = selectMcpToolsByMcpForTurn({
+      toolsByMcp: inventory.toolsByMcp,
+      message: "列出我的排程",
+      budget: 8,
+      routerMode: "semantic",
+      personalReminderDeliveryBlockedReason: reason,
+    });
+    expect(
+      reminderRoute.trace.candidates.map((entry) => entry.name)
+    ).not.toContain("manage_schedules");
+    expect(reminderRoute.trace.selectedToolNames).not.toContain(
+      "lobu-memory/manage_schedules"
+    );
+    expect(listRoute.trace.selectedToolNames).toContain(
+      "lobu-memory/manage_schedules"
+    );
+
+    const catalog = buildRuntimeToolCatalog({
+      allTools: inventory.scopedTools,
+      selectedTools: listRoute.selectedTools,
+      allowedToolNames: inventory.allowedToolKeys,
+      behaviorBlockedToolReasons: {
+        "lobu-memory/manage_schedules": {
+          personal_reminder: reason,
+        },
+      },
+    });
+    expect(
+      searchRuntimeToolCatalog(catalog, { query: "提醒我" })[0]?.entry
+    ).toMatchObject({
+      name: "manage_schedules",
+      behaviorBlockedReasons: { personal_reminder: "capability_inactive" },
+    });
+    expect(
+      statusRuntimeToolCatalog(catalog, {
+        mcpId: "lobu-memory",
+        toolName: "manage_schedules",
+        executionDestination: "personal_reminder",
+      })
+    ).toMatchObject({
+      callableViaCatalog: false,
+      ordinaryCallableViaCatalog: true,
+      callBlockedReason: "capability_inactive",
+    });
+    expect(
+      statusRuntimeToolCatalog(catalog, {
+        mcpId: "lobu-memory",
+        toolName: "manage_schedules",
+      })
+    ).toMatchObject({ callableViaCatalog: true });
+    const callTool = mock(async () => ({
+      content: [{ type: "text" as const, text: "ok" }],
+    }));
+    await expect(
+      dispatchRuntimeToolCall({
+        catalog,
+        allowedToolKeys: inventory.allowedToolKeys,
+        executionDestination: "personal_reminder",
+        mcpId: "lobu-memory",
+        toolName: "manage_schedules",
+        args: { action: "create" },
+        callTool,
+      })
+    ).resolves.toMatchObject({ ok: false, code: "capability_inactive" });
+    expect(callTool).not.toHaveBeenCalled();
+    await expect(
+      dispatchRuntimeToolCall({
+        catalog,
+        allowedToolKeys: inventory.allowedToolKeys,
+        mcpId: "lobu-memory",
+        toolName: "manage_schedules",
+        args: { action: "list" },
+        callTool,
+      })
+    ).resolves.toMatchObject({ ok: true });
+    expect(callTool).toHaveBeenCalledTimes(1);
+  });
 });

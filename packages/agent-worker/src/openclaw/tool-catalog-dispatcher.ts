@@ -11,6 +11,7 @@ import {
   type ToolCatalogEntry,
 } from "./tool-catalog";
 import { getOrBuildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
+import { snapshotToolsByMcp } from "./tool-inventory-snapshot";
 import {
   getOrBuildToolRetrievalIndex,
   searchToolRetrievalIndex,
@@ -27,6 +28,7 @@ export type RuntimeToolCallBlockedReason =
   | "snapshot_expired"
   | "not_connected"
   | "untrusted_provenance"
+  | "duplicate_identity"
   | "auth_required"
   | "approval_required"
   | "clarification_required";
@@ -44,6 +46,9 @@ export interface RuntimeToolCatalogEntry extends ToolCatalogEntry {
   directVisibleThisTurn: boolean;
   callableViaCatalog: boolean;
   callBlockedReason?: RuntimeToolCallBlockedReason;
+  behaviorBlockedReasons?: Readonly<
+    Record<string, RuntimeToolCallBlockedReason>
+  >;
   /**
    * Kept as a compatibility alias for the Task 1 dynamic tool loader tests.
    * New code should use directVisibleThisTurn.
@@ -58,6 +63,9 @@ export interface BuildRuntimeToolCatalogParams {
   allowedToolNames?: Iterable<string>;
   clarificationBlockedToolKeys?: Iterable<string>;
   blockedToolReasons?: Readonly<Record<string, RuntimeToolCallBlockedReason>>;
+  behaviorBlockedToolReasons?: Readonly<
+    Record<string, Readonly<Record<string, RuntimeToolCallBlockedReason>>>
+  >;
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
 }
@@ -137,6 +145,7 @@ export interface DispatchRuntimeToolCallParams {
   catalog: RuntimeToolCatalogEntry[];
   /** Final turn-local authorization boundary; checked even for stale catalog entries. */
   allowedToolKeys?: Iterable<string>;
+  executionDestination?: string;
   toolName: string;
   mcpId?: string;
   args: Record<string, unknown>;
@@ -151,6 +160,7 @@ type RuntimeMcpToolResultMetadata = {
 export interface RuntimeToolStatusQuery {
   toolName?: string;
   mcpId?: string;
+  executionDestination?: string;
 }
 
 function catalogToolKey(mcpId: string, toolName: string): string {
@@ -227,61 +237,115 @@ export function buildRuntimeToolCatalog(
     params.clarificationBlockedToolKeys ?? []
   );
   const catalog: RuntimeToolCatalogEntry[] = [];
+  const sourceGroups = new Map<
+    string,
+    Array<{
+      mcpId: string;
+      tool: McpToolDef;
+      originalIndex: number;
+      serialized: string;
+    }>
+  >();
   let originalIndex = 0;
-  for (const [mcpId, tools] of Object.entries(params.allTools)) {
+  for (const [mcpId, tools] of Object.entries(
+    snapshotToolsByMcp(params.allTools)
+  )) {
     for (const tool of tools) {
-      const entry = catalogEntryForTool(tool, originalIndex, mcpId, {
+      const name = tool.name?.trim();
+      if (name) {
+        const identityKey = toolIdentityKey(mcpId, name);
+        const group = sourceGroups.get(identityKey) ?? [];
+        group.push({
+          mcpId,
+          tool: tool.name === name ? tool : Object.freeze({ ...tool, name }),
+          originalIndex,
+          serialized: JSON.stringify(tool),
+        });
+        sourceGroups.set(identityKey, group);
+      }
+      originalIndex++;
+    }
+  }
+  const catalogSources = [...sourceGroups.values()]
+    .map((group) => {
+      group.sort(
+        (left, right) =>
+          left.serialized.localeCompare(right.serialized) ||
+          left.originalIndex - right.originalIndex
+      );
+      const representative = group[0];
+      return representative
+        ? {
+            ...representative,
+            originalIndex: Math.min(
+              ...group.map((entry) => entry.originalIndex)
+            ),
+            duplicateIdentity: group.length > 1,
+          }
+        : null;
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+    .sort((left, right) => left.originalIndex - right.originalIndex);
+
+  for (const source of catalogSources) {
+    const { mcpId, tool } = source;
+    const entry = catalogEntryForTool(tool, source.originalIndex, mcpId, {
+      provenance: params.mcpProvenanceById?.[mcpId],
+      trustedOrigins: params.trustedShifuToolboxOrigins,
+    });
+    if (!entry.name) continue;
+    if (
+      isReservedAutomationToolName(entry.name) &&
+      !isTrustedShifuToolMetadataSource({
+        mcpId,
         provenance: params.mcpProvenanceById?.[mcpId],
         trustedOrigins: params.trustedShifuToolboxOrigins,
-      });
-      originalIndex++;
-      if (!entry.name) continue;
-      if (
-        isReservedAutomationToolName(entry.name) &&
-        !isTrustedShifuToolMetadataSource({
-          mcpId,
-          provenance: params.mcpProvenanceById?.[mcpId],
-          trustedOrigins: params.trustedShifuToolboxOrigins,
-        })
-      )
-        continue;
-      if (
-        entry.name === "resolve_calendar_date" &&
-        !isTrustedShifuCalendarResolver({
-          tool,
-          mcpId,
-          provenance: params.mcpProvenanceById?.[mcpId],
-          trustedOrigins: params.trustedShifuToolboxOrigins,
-        })
-      )
-        continue;
-      const directVisibleThisTurn = selectedToolKeys.has(
-        catalogToolKey(mcpId, entry.name)
-      );
-      const allowed = isEntryAllowed(entry, allowedToolNames);
-      const clarificationBlocked =
-        clarificationBlockedToolKeys.has(externalToolKey(mcpId, entry.name)) ||
-        clarificationBlockedToolKeys.has(toolIdentityKey(mcpId, entry.name));
-      const explicitBlockedReason =
-        params.blockedToolReasons?.[externalToolKey(mcpId, entry.name)] ??
-        params.blockedToolReasons?.[toolIdentityKey(mcpId, entry.name)];
-      const callBlockedReason: RuntimeToolCallBlockedReason | undefined =
-        explicitBlockedReason ??
-        (!allowed
-          ? "not_allowed"
-          : clarificationBlocked
-            ? "clarification_required"
-            : undefined);
-      catalog.push({
-        ...entry,
-        title: readCatalogTitle(tool),
-        description: tool.description || "",
-        directVisibleThisTurn,
-        availableThisTurn: directVisibleThisTurn,
-        callableViaCatalog: !callBlockedReason,
-        callBlockedReason,
-      });
-    }
+      })
+    )
+      continue;
+    if (
+      entry.name === "resolve_calendar_date" &&
+      !isTrustedShifuCalendarResolver({
+        tool,
+        mcpId,
+        provenance: params.mcpProvenanceById?.[mcpId],
+        trustedOrigins: params.trustedShifuToolboxOrigins,
+      })
+    )
+      continue;
+    const directVisibleThisTurn = selectedToolKeys.has(
+      catalogToolKey(mcpId, entry.name)
+    );
+    const allowed = isEntryAllowed(entry, allowedToolNames);
+    const clarificationBlocked =
+      clarificationBlockedToolKeys.has(externalToolKey(mcpId, entry.name)) ||
+      clarificationBlockedToolKeys.has(toolIdentityKey(mcpId, entry.name));
+    const explicitBlockedReason =
+      (source.duplicateIdentity ? "duplicate_identity" : undefined) ??
+      params.blockedToolReasons?.[externalToolKey(mcpId, entry.name)] ??
+      params.blockedToolReasons?.[toolIdentityKey(mcpId, entry.name)];
+    const callBlockedReason: RuntimeToolCallBlockedReason | undefined =
+      explicitBlockedReason ??
+      (!allowed
+        ? "not_allowed"
+        : clarificationBlocked
+          ? "clarification_required"
+          : undefined);
+    const behaviorBlockedReasons =
+      params.behaviorBlockedToolReasons?.[externalToolKey(mcpId, entry.name)] ??
+      params.behaviorBlockedToolReasons?.[toolIdentityKey(mcpId, entry.name)];
+    catalog.push({
+      ...entry,
+      title: readCatalogTitle(tool),
+      description: tool.description || "",
+      directVisibleThisTurn,
+      availableThisTurn: directVisibleThisTurn,
+      callableViaCatalog: !callBlockedReason,
+      callBlockedReason,
+      behaviorBlockedReasons: behaviorBlockedReasons
+        ? Object.freeze({ ...behaviorBlockedReasons })
+        : undefined,
+    });
   }
   try {
     runtimeToolSearchContexts.set(
@@ -420,6 +484,7 @@ function isStableErrorCode(value: unknown): value is RuntimeToolCallErrorCode {
     value === "snapshot_expired" ||
     value === "not_connected" ||
     value === "untrusted_provenance" ||
+    value === "duplicate_identity" ||
     value === "clarification_required" ||
     value === "ambiguous_tool" ||
     value === "auth_required" ||
@@ -489,6 +554,14 @@ export async function dispatchRuntimeToolCall(
     };
   }
   const entry = lookup.entry;
+  if (!entry.callableViaCatalog) {
+    return {
+      ok: false,
+      code: entry.callBlockedReason || "not_allowed",
+      message: `Tool ${externalToolKey(entry.mcpId, entry.name)} is not callable via the runtime catalog.`,
+      entry,
+    };
+  }
   if (
     params.allowedToolKeys !== undefined &&
     !new Set(params.allowedToolKeys).has(
@@ -502,11 +575,14 @@ export async function dispatchRuntimeToolCall(
       entry,
     };
   }
-  if (!entry.callableViaCatalog) {
+  const behaviorBlockedReason = params.executionDestination
+    ? entry.behaviorBlockedReasons?.[params.executionDestination]
+    : undefined;
+  if (behaviorBlockedReason) {
     return {
       ok: false,
-      code: entry.callBlockedReason || "not_allowed",
-      message: `Tool ${externalToolKey(entry.mcpId, entry.name)} is not callable via the runtime catalog.`,
+      code: behaviorBlockedReason,
+      message: `Tool ${externalToolKey(entry.mcpId, entry.name)} is blocked for ${params.executionDestination} in this turn.`,
       entry,
     };
   }
@@ -545,7 +621,13 @@ export async function dispatchRuntimeToolCall(
   }
 }
 
-function summarizeEntry(entry: RuntimeToolCatalogEntry) {
+function summarizeEntry(
+  entry: RuntimeToolCatalogEntry,
+  executionDestination?: string
+) {
+  const behaviorBlockedReason = executionDestination
+    ? entry.behaviorBlockedReasons?.[executionDestination]
+    : undefined;
   return {
     mcpId: entry.mcpId,
     name: entry.name,
@@ -559,8 +641,14 @@ function summarizeEntry(entry: RuntimeToolCatalogEntry) {
     requiresConfirmation: entry.requiresConfirmation,
     freshness: entry.freshness,
     directVisibleThisTurn: entry.directVisibleThisTurn,
-    callableViaCatalog: entry.callableViaCatalog,
-    callBlockedReason: entry.callBlockedReason,
+    callableViaCatalog: behaviorBlockedReason
+      ? false
+      : entry.callableViaCatalog,
+    ...(behaviorBlockedReason
+      ? { ordinaryCallableViaCatalog: entry.callableViaCatalog }
+      : {}),
+    callBlockedReason: behaviorBlockedReason ?? entry.callBlockedReason,
+    behaviorBlockedReasons: entry.behaviorBlockedReasons,
   };
 }
 
@@ -575,7 +663,7 @@ export function statusRuntimeToolCatalog(
       query.mcpId
     );
     if (lookup.status === "found") {
-      return summarizeEntry(lookup.entry);
+      return summarizeEntry(lookup.entry, query.executionDestination);
     }
     if (lookup.status === "ambiguous") {
       return {
@@ -611,6 +699,6 @@ export function statusRuntimeToolCatalog(
     catalogCallableToolCount: entries.filter(
       (entry) => entry.callableViaCatalog
     ).length,
-    tools: entries.map(summarizeEntry),
+    tools: entries.map((entry) => summarizeEntry(entry)),
   };
 }

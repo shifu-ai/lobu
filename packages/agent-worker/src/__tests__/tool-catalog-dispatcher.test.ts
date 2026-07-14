@@ -19,7 +19,7 @@ import {
 function tool(name: string, description?: string): McpToolDef {
   return {
     name,
-    description,
+    ...(description === undefined ? {} : { description }),
     inputSchema: {
       type: "object",
       properties: {
@@ -320,6 +320,46 @@ describe("tool catalog dispatcher", () => {
     expect(callTool).not.toHaveBeenCalled();
   });
 
+  test("catalog defensively quarantines duplicate exact identities", async () => {
+    const first = tool("duplicate");
+    const second = tool("duplicate");
+    first.inputSchema = {
+      type: "object",
+      properties: { first: { type: "string" } },
+    };
+    second.inputSchema = {
+      type: "object",
+      properties: { second: { type: "number" } },
+    };
+    const catalog = buildRuntimeToolCatalog({
+      allTools: { source: [first, second] },
+      selectedTools: { source: [first] },
+      allowedToolNames: ["source/duplicate"],
+    });
+
+    expect(catalog).toHaveLength(1);
+    expect(catalog[0]).toMatchObject({
+      mcpId: "source",
+      name: "duplicate",
+      callableViaCatalog: false,
+      callBlockedReason: "duplicate_identity",
+    });
+    const callTool = mock(async () => ({
+      content: [{ type: "text" as const, text: "must not run" }],
+    }));
+    await expect(
+      dispatchRuntimeToolCall({
+        catalog,
+        allowedToolKeys: ["source/duplicate"],
+        mcpId: "source",
+        toolName: "duplicate",
+        args: {},
+        callTool,
+      })
+    ).resolves.toMatchObject({ ok: false, code: "duplicate_identity" });
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
   test("tool_call delegates successful calls to the injected MCP caller", async () => {
     const callTool = mock(async () => ({
       content: [{ type: "text" as const, text: "export queued" }],
@@ -482,5 +522,49 @@ describe("tool catalog dispatcher", () => {
       ok: false,
       code,
     });
+  });
+
+  test("a delegated approval result cannot widen the turn eligibility boundary", async () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        toolbox: [tool("request_export"), tool("admin_export")],
+      },
+      selectedTools: {},
+      allowedToolNames: ["toolbox/request_export", "toolbox/admin_export"],
+    });
+    const allowedToolKeys = Object.freeze(["toolbox/request_export"]);
+    const callTool = mock(async () => ({
+      content: [
+        {
+          type: "text" as const,
+          text: "The user has been asked to approve.",
+        },
+      ],
+      isError: true,
+      errorCode: "approval_required",
+    }));
+
+    await expect(
+      dispatchRuntimeToolCall({
+        catalog,
+        allowedToolKeys,
+        mcpId: "toolbox",
+        toolName: "request_export",
+        args: {},
+        callTool,
+      })
+    ).resolves.toMatchObject({ ok: false, code: "approval_required" });
+    await expect(
+      dispatchRuntimeToolCall({
+        catalog,
+        allowedToolKeys,
+        mcpId: "toolbox",
+        toolName: "admin_export",
+        args: {},
+        callTool,
+      })
+    ).resolves.toMatchObject({ ok: false, code: "policy_denied" });
+    expect(allowedToolKeys).toEqual(["toolbox/request_export"]);
+    expect(callTool).toHaveBeenCalledTimes(1);
   });
 });

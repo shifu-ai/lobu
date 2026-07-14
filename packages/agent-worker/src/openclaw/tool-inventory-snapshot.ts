@@ -26,6 +26,88 @@ let snapshotCacheEvictions = 0;
 let immutableInventoryReuses = 0;
 const deeplyImmutableJsonValues = new WeakSet<object>();
 
+function assertJsonLike(
+  value: unknown,
+  active = new WeakSet<object>(),
+  validated = new WeakSet<object>(),
+  budget = { nodes: 0 }
+): void {
+  budget.nodes++;
+  if (budget.nodes > 100_000) {
+    throw new TypeError("tool inventory exceeds 100000 JSON nodes");
+  }
+  if (value === null) return;
+  if (value === undefined) {
+    throw new TypeError("non-JSON tool inventory value: undefined");
+  }
+  if (typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (Number.isFinite(value)) return;
+    throw new TypeError("non-JSON tool inventory value: non-finite number");
+  }
+  if (typeof value !== "object") {
+    throw new TypeError(`non-JSON tool inventory value: ${typeof value}`);
+  }
+  if (validated.has(value)) return;
+  if (active.has(value)) {
+    throw new TypeError("cyclic tool inventory value");
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (
+    !Array.isArray(value) &&
+    prototype !== Object.prototype &&
+    prototype !== null
+  ) {
+    throw new TypeError("non-JSON tool inventory value: custom prototype");
+  }
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw new TypeError("non-JSON tool inventory value: symbol key");
+  }
+  active.add(value);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Array.isArray(value)) {
+    if (value.length > 100_000) {
+      throw new TypeError(
+        "non-JSON tool inventory array exceeds 100000 entries"
+      );
+    }
+    for (let index = 0; index < value.length; index++) {
+      if (!Object.hasOwn(value, index)) {
+        throw new TypeError("non-JSON tool inventory value: sparse array");
+      }
+    }
+    const namedKeys = Object.keys(descriptors).filter((key) => {
+      if (key === "length") return false;
+      const index = Number(key);
+      return (
+        !Number.isSafeInteger(index) ||
+        index < 0 ||
+        index >= value.length ||
+        String(index) !== key
+      );
+    });
+    if (namedKeys.length > 0) {
+      throw new TypeError(
+        "non-JSON tool inventory value: named array property"
+      );
+    }
+  }
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (Array.isArray(value) && key === "length") continue;
+    if (descriptor.get || descriptor.set) {
+      throw new TypeError("non-JSON tool inventory value: accessor property");
+    }
+    if (!descriptor.enumerable) {
+      throw new TypeError(
+        "non-JSON tool inventory value: non-enumerable property"
+      );
+    }
+    assertJsonLike(descriptor.value, active, validated, budget);
+  }
+  active.delete(value);
+  validated.add(value);
+}
+
 function isDeeplyImmutableJsonLike(
   value: unknown,
   visited = new WeakSet<object>()
@@ -50,7 +132,10 @@ function isDeeplyImmutableJsonLike(
   return true;
 }
 
-export function cloneAndFreezeJsonLike<T>(value: T, seen = new WeakMap()): T {
+function cloneAndFreezeJsonLikeInternal<T>(
+  value: T,
+  seen: WeakMap<object, unknown>
+): T {
   if (value === null || typeof value !== "object") return value;
   const source = value as object;
   const existing = seen.get(source);
@@ -61,12 +146,19 @@ export function cloneAndFreezeJsonLike<T>(value: T, seen = new WeakMap()): T {
     : {};
   seen.set(source, clone);
   for (const [key, nestedValue] of Object.entries(source)) {
-    (clone as Record<string, unknown>)[key] = cloneAndFreezeJsonLike(
-      nestedValue,
-      seen
-    );
+    Object.defineProperty(clone, key, {
+      value: cloneAndFreezeJsonLikeInternal(nestedValue, seen),
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
   }
   return Object.freeze(clone) as T;
+}
+
+export function cloneAndFreezeJsonLike<T>(value: T): T {
+  assertJsonLike(value);
+  return cloneAndFreezeJsonLikeInternal(value, new WeakMap());
 }
 
 function freezeInventory(
@@ -102,14 +194,14 @@ function snapshotCacheKey(serialized: string): string {
 export function snapshotToolsByMcp(
   toolsByMcp: Record<string, McpToolDef[]>
 ): Record<string, McpToolDef[]> {
+  assertJsonLike(toolsByMcp);
   if (isDeeplyImmutableJsonLike(toolsByMcp)) {
     immutableInventoryReuses++;
     return toolsByMcp;
   }
   const serialized = serializeInventory(toolsByMcp);
   if (serialized === null) {
-    snapshotCacheMisses++;
-    return freezeInventory(toolsByMcp);
+    throw new TypeError("non-JSON tool inventory value: serialization failed");
   }
   const cacheKey = snapshotCacheKey(serialized);
   const cached = snapshotCache.get(cacheKey);

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { McpToolDef, ReleaseCapabilityState } from "@lobu/core";
+import { toolIdentityKey } from "./tool-descriptor";
 import { snapshotToolsByMcp } from "./tool-inventory-snapshot";
 
 export const PERSONAL_REMINDER_DELIVERY_CAPABILITY =
@@ -15,6 +16,7 @@ export type EffectiveToolBlockedReason =
   | "policy_denied"
   | "not_connected"
   | "untrusted_provenance"
+  | "duplicate_identity"
   | "approval_required"
   | "clarification_required";
 
@@ -210,23 +212,69 @@ function freezeToolsByMcp(
 export function buildEffectiveToolInventory(
   params: BuildEffectiveToolInventoryParams
 ): EffectiveToolInventory {
-  const scopedTools = snapshotToolsByMcp(params.scopedTools);
-  const discovered = new Map<
+  const rawScopedTools = snapshotToolsByMcp(params.scopedTools);
+  const discoveredGroups = new Map<
     string,
-    { mcpId: string; toolName: string; tool: McpToolDef }
+    Array<{
+      mcpId: string;
+      toolName: string;
+      tool: McpToolDef;
+      canonical: string;
+    }>
   >();
-  for (const [mcpId, tools] of Object.entries(scopedTools)) {
+  let rawDiscoveredCount = 0;
+  for (const [mcpId, tools] of Object.entries(rawScopedTools)) {
     for (const tool of tools) {
       const toolName = tool.name?.trim();
       if (!toolName) continue;
-      discovered.set(`${mcpId}/${toolName}`, { mcpId, toolName, tool });
+      rawDiscoveredCount++;
+      const identityKey = toolIdentityKey(mcpId, toolName);
+      const normalizedTool =
+        tool.name === toolName
+          ? tool
+          : Object.freeze({ ...tool, name: toolName });
+      const group = discoveredGroups.get(identityKey) ?? [];
+      group.push({
+        mcpId,
+        toolName,
+        tool: normalizedTool,
+        canonical: canonicalJson(normalizedTool),
+      });
+      discoveredGroups.set(identityKey, group);
     }
   }
-  if (discovered.size > MAX_DISCOVERED_TOOLS) {
+  if (rawDiscoveredCount > MAX_DISCOVERED_TOOLS) {
     throw new Error(
       `effective tool inventory exceeds ${MAX_DISCOVERED_TOOLS} discovered tools`
     );
   }
+  const duplicateEvidence: Array<readonly [string, readonly string[]]> = [];
+  const discovered = new Map<
+    string,
+    { mcpId: string; toolName: string; tool: McpToolDef }
+  >();
+  for (const [identityKey, group] of [...discoveredGroups.entries()].sort(
+    ([left], [right]) => left.localeCompare(right)
+  )) {
+    group.sort((left, right) => left.canonical.localeCompare(right.canonical));
+    const representative = group[0];
+    if (!representative) continue;
+    discovered.set(identityKey, representative);
+    if (group.length > 1) {
+      duplicateEvidence.push(
+        Object.freeze([
+          identityKey,
+          Object.freeze(group.map((entry) => entry.canonical)),
+        ] as const)
+      );
+    }
+  }
+  const duplicateIdentityKeys = new Set(duplicateEvidence.map(([key]) => key));
+  const scopedTools = freezeToolsByMcp(
+    [...discovered.values()].map((entry) =>
+      Object.freeze([entry.mcpId, entry.tool] as const)
+    )
+  );
 
   const now = params.now ?? new Date();
   const connected = setFrom(params.connectedMcpIds);
@@ -238,11 +286,13 @@ export function buildEffectiveToolInventory(
   const allowed: Array<readonly [string, McpToolDef]> = [];
   const releaseInactive = inactiveReleaseReason(params.releaseState, now);
 
-  for (const [toolKey, entry] of [...discovered.entries()].sort(([a], [b]) =>
-    a.localeCompare(b)
+  for (const [identityKey, entry] of [...discovered.entries()].sort(
+    ([a], [b]) => a.localeCompare(b)
   )) {
+    const toolKey = `${entry.mcpId}/${entry.toolName}`;
     let reason: EffectiveToolBlockedReason | undefined;
-    if (connected && !connected.has(entry.mcpId)) reason = "not_connected";
+    if (duplicateIdentityKeys.has(identityKey)) reason = "duplicate_identity";
+    else if (connected && !connected.has(entry.mcpId)) reason = "not_connected";
     else if (granted && !granted.has(toolKey)) reason = "policy_denied";
     else if (untrusted?.has(toolKey)) reason = "untrusted_provenance";
     else if (
@@ -269,10 +319,13 @@ export function buildEffectiveToolInventory(
     else allowed.push(Object.freeze([entry.mcpId, entry.tool] as const));
   }
 
+  const discoveredExternalKeys = new Set(
+    [...discovered.values()].map((entry) => `${entry.mcpId}/${entry.toolName}`)
+  );
   for (const toolKey of Object.keys(
     params.releaseCapabilityByToolKey ?? {}
   ).sort()) {
-    if (!discovered.has(toolKey)) {
+    if (!discoveredExternalKeys.has(toolKey)) {
       blocked.push(Object.freeze({ toolKey, reason: "not_discovered" }));
     }
   }
@@ -296,6 +349,7 @@ export function buildEffectiveToolInventory(
     blocked,
     releaseProvenance: provenance,
     behaviors,
+    duplicateEvidence,
   };
   const fingerprint = createHash("sha256")
     .update(canonicalJson(fingerprintInput))
