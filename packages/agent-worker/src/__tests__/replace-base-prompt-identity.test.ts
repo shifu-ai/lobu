@@ -19,6 +19,16 @@ const originalObsEnv = {
   toolboxSecret: process.env.TOOLBOX_INTERNAL_SECRET,
 };
 
+function expectNoRawIdentifiers(
+  bodies: unknown[],
+  identifiers: string[]
+): void {
+  const serialized = JSON.stringify(bodies);
+  for (const identifier of identifiers) {
+    expect(serialized).not.toContain(identifier);
+  }
+}
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
   if (originalObsEnv.enabled === undefined) {
@@ -183,14 +193,15 @@ describe("worker model observability", () => {
   const obsBase = {
     trace: {
       traceId: "tr_modelobs123456",
+      parentSpanId: "sp_gatewaymodel123",
       journeyId: "line_reply",
       turnId: "turn_modelobs123",
       actor: "worker",
       traceSource: "incoming" as const,
     },
     conversationId: "conv-1",
-    agentId: "agent-1",
-    userId: "user-1",
+    agentId: "shifu-u-a4175b7e71f4",
+    userId: "toolbox-user-raw-123",
     provider: "openai",
     modelId: "gpt-4.1",
     toolCount: 7,
@@ -272,7 +283,9 @@ describe("worker model observability", () => {
         schema_version: "journey.trace.v1",
         event: "provider.call.started",
         trace_id: "tr_modelobs123456",
+        parent_span_id: "sp_gatewaymodel123",
         journey_id: "line_reply",
+        turn_id: "turn_modelobs123",
         service: "lobu",
         module: "agent-worker",
         status: "started",
@@ -285,6 +298,10 @@ describe("worker model observability", () => {
         },
       },
     });
+    expectNoRawIdentifiers(events, [
+      "shifu-u-a4175b7e71f4",
+      "toolbox-user-raw-123",
+    ]);
     expect(events[1]).toMatchObject({
       eventName: "provider.call.started",
       status: "started",
@@ -327,7 +344,7 @@ describe("worker model observability", () => {
     expect(typeof events[3].durationMs).toBe("number");
   });
 
-  test("emits model failed event when the runner throws", async () => {
+  test("emits provider.call.failed event when the runner throws", async () => {
     const fetchMock = mock(async () => new Response("{}", { status: 202 }));
     enableObs(fetchMock);
 
@@ -344,9 +361,9 @@ describe("worker model observability", () => {
       )
     );
     expect(failed).toMatchObject({
-      eventName: "provider.call.completed",
+      eventName: "provider.call.failed",
       status: "failed",
-      stage: "provider.call.completed",
+      stage: "provider.call.failed",
       metadata: {
         module: "agent-worker",
         provider: "openai",
