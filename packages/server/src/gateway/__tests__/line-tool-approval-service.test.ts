@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
-import { tryGetOrgId } from "../../lobu/stores/org-context.js";
+import { generateWorkerToken, verifyWorkerToken } from "@lobu/core";
+import { orgContext, tryGetOrgId } from "../../lobu/stores/org-context.js";
 import {
   getPendingTool,
   type PendingToolInvocation,
@@ -112,7 +113,7 @@ describe("createToolApprovalService", () => {
       "google_workspace",
       "gws_calendar_events_create",
       { summary: "Demo" },
-      { channelId: "line-user-1" },
+      { approvalReplay: true, channelId: "line-user-1", conversationId: "conv-1" },
     );
   });
 
@@ -134,7 +135,7 @@ describe("createToolApprovalService", () => {
       "google_workspace",
       "gws_calendar_events_create",
       { summary: "Demo" },
-      { channelId: "line-user-1", expectedMcpIdentity },
+      { approvalReplay: true, channelId: "line-user-1", conversationId: "conv-1", expectedMcpIdentity },
     );
   });
 
@@ -228,7 +229,7 @@ describe("createToolApprovalService", () => {
       "google_workspace",
       "gws_calendar_events_create",
       { summary: "Demo" },
-      { channelId: "line-user-1" },
+      { approvalReplay: true, channelId: "line-user-1", conversationId: "conv-1" },
     );
   });
 
@@ -320,6 +321,205 @@ describe("createToolApprovalService", () => {
           isError: false,
         },
       });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("internal approval replay re-signs a bounded RUN token without persisting a bearer", async () => {
+    const originalRunIdentity = { runId: 73, deploymentName: "worker-original" };
+    const releaseState = {
+      status: "active" as const,
+      claim: {
+        environment: "production" as const,
+        toolboxUserId: "toolbox-user-1",
+        agentId: "shifu-u-1",
+        releaseId: "release-original",
+        releaseSequence: 3,
+        snapshotDigest: `sha256:${"a".repeat(64)}`,
+        expiresAt: new Date(Date.now() + 30_000).toISOString(),
+        capabilityIds: ["personal_reminder_delivery.v1"],
+      },
+    };
+    await seedLinePending("ta-resign-run", {
+      organizationId: "org-1",
+      conversationId: "conv-1",
+      channelId: "line-user-1",
+      mcpId: "lobu-memory",
+      toolName: "manage_schedules",
+      args: { action: "list" },
+      releaseState,
+      originalRunIdentity,
+    });
+    const stored = await getPendingTool("ta-resign-run");
+    expect(JSON.stringify(stored)).not.toContain("Bearer");
+    expect(JSON.stringify(stored)).not.toContain(process.env.ENCRYPTION_KEY ?? "never");
+
+    let replayToken: string | undefined;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      replayToken = headers.get("authorization")?.replace(/^Bearer /, "");
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (body.method === "initialize") {
+        return new Response(JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { protocolVersion: "2025-03-26" },
+        }), { headers: { "content-type": "application/json", "mcp-session-id": "internal-replay" } });
+      }
+      if (body.method === "notifications/initialized") return new Response("", { status: 202 });
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [], isError: false } }), { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    try {
+      const proxy = new McpProxy(
+        {
+          getHttpServer: async () => ({
+            id: "lobu-memory",
+            upstreamUrl: "https://internal.test/mcp/org-1",
+            internal: true,
+          }),
+          getAllHttpServers: async () => new Map(),
+        },
+        {
+          secretStore: {
+            get: async () => null,
+            put: async () => "secret://test" as const,
+            delete: async () => undefined,
+            list: async () => [],
+          },
+        },
+      );
+      const service = createToolApprovalService({
+        grantStore: {
+          grant: mock(async () => undefined),
+          hasGrant: mock(async () => false),
+          revoke: mock(async () => undefined),
+        },
+        mcpProxy: proxy,
+        userAgentsStore: { ownsAgent: mock(async () => true) },
+        organizationId: "org-1",
+      });
+      expect(await service.submit({
+        action: "approve_once",
+        approvalId: "ta-resign-run",
+        toolboxUserId: "toolbox-user-1",
+        lineUserId: "line-user-1",
+        agentId: "shifu-u-1",
+      })).toMatchObject({ status: "executed", result: { isError: false } });
+      expect(replayToken).toBeTruthy();
+      expect(verifyWorkerToken(replayToken!)).toMatchObject({
+        tokenKind: "run",
+        runId: 73,
+        userId: "toolbox-user-1",
+        agentId: "shifu-u-1",
+        organizationId: "org-1",
+        conversationId: "conv-1",
+        releaseState,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("approval blocking stores bounded original RUN identity but never the bearer", async () => {
+    const releaseState = {
+      status: "active" as const,
+      claim: {
+        environment: "production" as const,
+        toolboxUserId: "toolbox-user-1",
+        agentId: "shifu-u-1",
+        releaseId: "release-original",
+        releaseSequence: 3,
+        snapshotDigest: `sha256:${"a".repeat(64)}`,
+        expiresAt: new Date(Date.now() + 30_000).toISOString(),
+        capabilityIds: ["personal_reminder_delivery.v1"],
+      },
+    };
+    const workerToken = generateWorkerToken(
+      "toolbox-user-1",
+      "conv-1",
+      "worker-original",
+      {
+        channelId: "line-user-1",
+        agentId: "shifu-u-1",
+        organizationId: "org-1",
+        runId: 73,
+        tokenKind: "run",
+        releaseState,
+      },
+    );
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async (_input, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (body.method === "initialize") {
+        return new Response(JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { protocolVersion: "2025-03-26" },
+        }), { headers: { "content-type": "application/json", "mcp-session-id": "block-session" } });
+      }
+      if (body.method === "notifications/initialized") return new Response("", { status: 202 });
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: {
+          tools: [{ name: "manage_schedules", annotations: { destructiveHint: true } }],
+        },
+      }), { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    let approvalId = "";
+    try {
+      const proxy = new McpProxy(
+        {
+          getHttpServer: async () => ({
+            id: "lobu-memory",
+            upstreamUrl: "https://internal.test/mcp/org-1",
+            internal: true,
+          }),
+          getAllHttpServers: async () => new Map(),
+        },
+        {
+          secretStore: {
+            get: async () => null,
+            put: async () => "secret://test" as const,
+            delete: async () => undefined,
+            list: async () => [],
+          },
+          grantStore: {
+            grant: mock(async () => undefined),
+            hasGrant: mock(async () => false),
+            revoke: mock(async () => undefined),
+          },
+        },
+      );
+      proxy.onToolBlocked = async (requestId) => {
+        approvalId = requestId;
+      };
+      expect(await orgContext.run({ organizationId: "org-1" }, () =>
+        proxy.callToolWithApproval(
+          "shifu-u-1",
+          "toolbox-user-1",
+          "lobu-memory",
+          "manage_schedules",
+          { action: "list" },
+          {
+            token: workerToken,
+            channelId: "line-user-1",
+            conversationId: "conv-1",
+            organizationId: "org-1",
+            personalReminderDeliveryIntent: true,
+          },
+        ),
+      )).toMatchObject({ status: "blocked-notified" });
+      const pending = await getPendingTool(approvalId);
+      expect(pending).toMatchObject({
+        originalRunIdentity: { runId: 73, deploymentName: "worker-original" },
+        releaseState,
+        personalReminderDeliveryIntent: true,
+      });
+      expect(JSON.stringify(pending)).not.toContain(workerToken);
+      expect(JSON.stringify(pending)).not.toContain("Bearer");
     } finally {
       globalThis.fetch = originalFetch;
     }

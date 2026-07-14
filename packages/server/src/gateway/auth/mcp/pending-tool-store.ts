@@ -31,6 +31,12 @@ export interface PendingToolInvocation {
     configDigest: string;
   };
 	releaseState?: ReleaseCapabilityState;
+	/** Bounded non-secret identity used to re-sign an internal approval replay. */
+	originalRunIdentity?: {
+		runId: number;
+		deploymentName: string;
+	};
+	personalReminderDeliveryIntent?: true;
 }
 
 export interface PendingToolExecutionOptions {
@@ -41,18 +47,24 @@ export interface PendingToolExecutionOptions {
   channelId?: string;
   organizationId?: string;
 	releaseState?: ReleaseCapabilityState;
+	approvalReplay: true;
+	originalRunIdentity?: NonNullable<PendingToolInvocation["originalRunIdentity"]>;
+	conversationId?: string;
+	personalReminderDeliveryIntent?: true;
 }
 
 /**
  * Preserve the security context captured at discovery time when an approved
  * invocation is replayed. Omit absent fields instead of writing undefined over
- * an execution path's existing scope, and omit the options argument entirely
- * for legacy pending rows that carry no scoped context.
+ * an execution path's existing scope. Every claimed row carries the replay
+ * marker so internal MCPs can fail closed when legacy rows lack run identity;
+ * external MCPs ignore the marker and remain backward compatible.
  */
 export function buildPendingToolExecutionOptions(
 	pending: PendingToolInvocation,
 ): PendingToolExecutionOptions | undefined {
   const options: PendingToolExecutionOptions = {
+		approvalReplay: true,
     ...(pending.courseToolScope
       ? { courseToolScope: pending.courseToolScope }
       : {}),
@@ -64,8 +76,15 @@ export function buildPendingToolExecutionOptions(
 			? { organizationId: pending.organizationId }
       : {}),
 		...(pending.releaseState ? { releaseState: pending.releaseState } : {}),
+		...(pending.originalRunIdentity
+			? { originalRunIdentity: pending.originalRunIdentity }
+			: {}),
+		...(pending.conversationId ? { conversationId: pending.conversationId } : {}),
+		...(pending.personalReminderDeliveryIntent
+			? { personalReminderDeliveryIntent: true as const }
+			: {}),
   };
-  return Object.keys(options).length > 0 ? options : undefined;
+	return options;
 }
 
 export async function storePendingTool(

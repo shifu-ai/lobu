@@ -67,6 +67,10 @@ interface McpProxyDirectExecution {
       channelId?: string;
       organizationId?: string;
 			releaseState?: import("@lobu/core").ReleaseCapabilityState;
+			approvalReplay?: true;
+			originalRunIdentity?: { runId: number; deploymentName: string };
+			conversationId?: string;
+			personalReminderDeliveryIntent?: true;
     },
   ): Promise<{
     content: Array<{ type: string; text: string }>;

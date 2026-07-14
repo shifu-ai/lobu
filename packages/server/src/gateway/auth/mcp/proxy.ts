@@ -3,6 +3,7 @@ import {
   applyMcpToolFilter,
   createLogger,
   emitAgentObsEvent,
+  generateWorkerToken,
   type GuardrailRegistry,
   isReservedAutomationToolName,
   type McpToolFilter,
@@ -881,6 +882,7 @@ export class McpProxy {
       courseToolScope?: TrustedCourseToolScope;
       expectedMcpIdentity?: ExpectedMcpConfigIdentity;
 			releaseState?: import("@lobu/core").ReleaseCapabilityState;
+			personalReminderDeliveryIntent?: true;
     } = {},
   ): Promise<{
     status: "executed" | "blocked-notified" | "blocked-no-channel";
@@ -902,8 +904,25 @@ export class McpProxy {
       courseToolScope: tokenContext.courseToolScope,
       expectedMcpIdentity: tokenContext.expectedMcpIdentity,
 			releaseState: tokenContext.releaseState,
+			personalReminderDeliveryIntent:
+				tokenContext.personalReminderDeliveryIntent,
     };
     const token = tokenContext.token ?? "";
+		const verifiedRun = token ? verifyWorkerToken(token) : null;
+		const verifiedRunMatches = Boolean(
+			verifiedRun?.tokenKind === "run" &&
+			Number.isInteger(verifiedRun.runId) &&
+			verifiedRun.runId! > 0 &&
+			verifiedRun.userId === userId &&
+			verifiedRun.agentId === agentId &&
+			verifiedRun.conversationId === tokenContext.conversationId &&
+			verifiedRun.organizationId === tokenContext.organizationId &&
+			typeof verifiedRun.deploymentName === "string" &&
+			verifiedRun.deploymentName.length > 0,
+		);
+		if (verifiedRunMatches && verifiedRun) {
+			tokenData.releaseState = verifiedRun.releaseState;
+		}
 
     const coursePolicy = applyTrustedCourseToolPolicy(
       toolName,
@@ -983,6 +1002,7 @@ export class McpProxy {
 				...(tokenData.releaseState
 					? { releaseState: tokenData.releaseState }
 					: {}),
+				...(token ? { directAuthToken: token } : {}),
       },
     );
     return { status: "executed", ...result };
@@ -1001,6 +1021,11 @@ export class McpProxy {
       channelId?: string;
       organizationId?: string;
 			releaseState?: import("@lobu/core").ReleaseCapabilityState;
+			approvalReplay?: true;
+			originalRunIdentity?: { runId: number; deploymentName: string };
+			conversationId?: string;
+			directAuthToken?: string;
+			personalReminderDeliveryIntent?: true;
     },
   ): Promise<{
     content: Array<{ type: string; text: string }>;
@@ -1066,6 +1091,44 @@ export class McpProxy {
         diagnosticCode: "tool_not_found",
       };
     }
+		let directAuthToken = options?.directAuthToken;
+		if (httpServer.internal && options?.approvalReplay) {
+			const original = options.originalRunIdentity;
+			const state = options.releaseState;
+			const identityValid = Boolean(
+				original &&
+				Number.isInteger(original.runId) &&
+				original.runId > 0 &&
+				original.deploymentName.length > 0 &&
+				original.deploymentName.length <= 200 &&
+				options.organizationId &&
+				options.conversationId &&
+				options.channelId &&
+				state &&
+				(state.status !== "active" ||
+					(state.claim.toolboxUserId === userId && state.claim.agentId === agentId)),
+			);
+			if (!identityValid || !original || !state) {
+				return {
+					content: [{ type: "text", text: "Approval run identity is invalid." }],
+					isError: true,
+					diagnosticCode: "APPROVAL_RUN_IDENTITY_INVALID",
+				};
+			}
+			directAuthToken = generateWorkerToken(
+				userId,
+				options.conversationId!,
+				original.deploymentName,
+				{
+					channelId: options.channelId!,
+					agentId,
+					organizationId: options.organizationId,
+					runId: original.runId,
+					tokenKind: "run",
+					releaseState: state,
+				},
+			);
+		}
     const scopeKey = this.computeScopeKey(
       httpServer,
       userId,
@@ -1142,11 +1205,19 @@ export class McpProxy {
       params: { name: toolName, arguments: args },
       id: 1,
     });
+		const replayHeaders = trustedPersonalReminderForwardHeaders({
+			mcpId,
+			toolName,
+			internal: httpServer.internal === true,
+			workerIntentHeader: options?.personalReminderDeliveryIntent
+				? PERSONAL_REMINDER_DELIVERY_CONTRACT
+				: undefined,
+		});
 
     try {
       let lastResponseStatus: number | undefined;
       if (!this.getSession(sessionKey)) {
-        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey);
+        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey, directAuthToken);
       }
 
       let response = await this.sendUpstreamRequest(
@@ -1156,6 +1227,8 @@ export class McpProxy {
         "POST",
         jsonRpcBody,
         scopeKey,
+			directAuthToken,
+			replayHeaders,
       );
       lastResponseStatus = response.status;
       if (
@@ -1166,7 +1239,7 @@ export class McpProxy {
         await response.body?.cancel().catch(() => {
           /* noop */
         });
-        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey);
+        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey, directAuthToken);
         response = await this.sendUpstreamRequest(
           httpServer,
           agentId,
@@ -1174,6 +1247,8 @@ export class McpProxy {
           "POST",
           jsonRpcBody,
           scopeKey,
+			directAuthToken,
+			replayHeaders,
         );
         lastResponseStatus = response.status;
       }
@@ -2048,6 +2123,9 @@ export class McpProxy {
       );
     }
     auth.tokenData.expectedMcpIdentity = expected.identity;
+		auth.tokenData.personalReminderDeliveryIntent =
+			c.req.header("x-lobu-personal-reminder-delivery-intent") ===
+			PERSONAL_REMINDER_DELIVERY_CONTRACT;
     const healthKey = this.buildServerHealthKey(agentId, mcpId);
 
     // Parse body early so tool arguments are available for the approval message.
@@ -3005,6 +3083,18 @@ export class McpProxy {
     });
 
     if (!this.onToolBlocked) return "blocked-no-channel";
+		const verifiedRun = token ? verifyWorkerToken(token) : null;
+		const verifiedRunMatches = Boolean(
+			verifiedRun?.tokenKind === "run" &&
+			Number.isInteger(verifiedRun.runId) &&
+			verifiedRun.runId! > 0 &&
+			verifiedRun.userId === tokenData.userId &&
+			verifiedRun.agentId === agentId &&
+			verifiedRun.conversationId === tokenData.conversationId &&
+			verifiedRun.organizationId === tokenData.organizationId &&
+			typeof verifiedRun.deploymentName === "string" &&
+			verifiedRun.deploymentName.length > 0,
+		);
 
     const requestId = `ta_${randomUUID()}`;
     const originMessageId =
@@ -3036,7 +3126,20 @@ export class McpProxy {
         courseToolScope: tokenData.courseToolScope,
         expectedMcpIdentity: tokenData.expectedMcpIdentity,
         organizationId: tokenData.organizationId,
-				releaseState: tokenData.releaseState,
+				...(verifiedRunMatches && verifiedRun?.releaseState
+					? { releaseState: verifiedRun.releaseState }
+					: {}),
+				...(tokenData.personalReminderDeliveryIntent === true
+					? { personalReminderDeliveryIntent: true as const }
+					: {}),
+				...(verifiedRunMatches && verifiedRun
+					? {
+						originalRunIdentity: {
+							runId: verifiedRun.runId!,
+							deploymentName: verifiedRun.deploymentName,
+						},
+					}
+					: {}),
       },
       this.PENDING_TOOL_TTL,
     ).catch((err: unknown) =>

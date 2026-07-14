@@ -131,6 +131,7 @@ describe("CLI gateway pending-tool approval replay", () => {
       "create_automation",
       { prompt: "提醒 Irene" },
 			{
+				approvalReplay: true,
 				courseToolScope,
 				expectedMcpIdentity,
 				channelId: "line-user-1",
@@ -148,7 +149,7 @@ describe("CLI gateway pending-tool approval replay", () => {
     };
     await storePendingTool(
       "cli-reserved-stale",
-      {
+			{
         mcpId: "shifu-toolbox",
         toolName: "list_automations",
         args: {},
@@ -184,11 +185,11 @@ describe("CLI gateway pending-tool approval replay", () => {
       "shifu-toolbox",
       "list_automations",
       {},
-			{ expectedMcpIdentity, channelId: "line-user-1" },
+			{ approvalReplay: true, expectedMcpIdentity, channelId: "line-user-1" },
     );
   });
 
-  test("legacy pending rows omit the options argument instead of forwarding undefined fields", () => {
+  test("legacy pending rows carry only the replay marker and no invented identity", () => {
     const legacy: PendingToolInvocation = {
       mcpId: "github",
       toolName: "read_issue",
@@ -196,6 +197,6 @@ describe("CLI gateway pending-tool approval replay", () => {
       agentId: "agent-1",
       userId: "user-1",
     };
-    expect(buildPendingToolExecutionOptions(legacy)).toBeUndefined();
+    expect(buildPendingToolExecutionOptions(legacy)).toEqual({ approvalReplay: true });
   });
 });

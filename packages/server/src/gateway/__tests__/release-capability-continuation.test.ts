@@ -43,6 +43,6 @@ describe("release capability continuation", () => {
       userId: "user-1",
       organizationId: "org-1",
       releaseState,
-    })).toEqual({ organizationId: "org-1", releaseState });
+    })).toEqual({ approvalReplay: true, organizationId: "org-1", releaseState });
   });
 });
