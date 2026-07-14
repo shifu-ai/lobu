@@ -109,6 +109,40 @@ describe("signed managed agent release apply", () => {
 		expect(rows[0]?.user_md).toBe("release user");
 	});
 
+	test("rejects legacy provisioning before metadata, membership, ownership, or lifecycle mutation", async () => {
+		const app = await buildApp();
+		const sql = await db();
+		await sql`
+			UPDATE agents
+			SET name = 'Released Agent',
+			    description = 'released description',
+			    is_workspace_agent = true,
+			    workspace_id = 'released-workspace'
+			WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
+		`;
+		const release = await putApply(app, latestSignedApplyRequest());
+		expect(release.status).toBe(200);
+		const before = await provisioningMutationSnapshot(sql, "legacy-owner");
+
+		const legacy = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: AGENT_ID,
+				name: "Legacy Agent",
+				description: "legacy description",
+				ownerUserId: "legacy-owner",
+				settings: { userMd: "legacy user prompt" },
+			}),
+		});
+
+		expect(legacy.status).toBe(409);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(await provisioningMutationSnapshot(sql, "legacy-owner")).toEqual(
+			before,
+		);
+	});
+
 	test("serializes legacy provisioning against managed release apply without post-release overwrite", async () => {
 		const app = await buildApp();
 		const [release, legacy] = await Promise.all([
@@ -1509,6 +1543,45 @@ async function currentIdentity(): Promise<string | null> {
 		WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
 	`;
 	return rows[0]?.identity_md ?? null;
+}
+
+async function provisioningMutationSnapshot(
+	sql: Awaited<ReturnType<typeof db>>,
+	legacyOwnerUserId: string,
+) {
+	const [agent] = await sql`
+		SELECT name, description, owner_platform, owner_user_id,
+		       is_workspace_agent, workspace_id, user_md
+		FROM agents
+		WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
+	`;
+	const memberships = await sql`
+		SELECT "userId", role
+		FROM "member"
+		WHERE "organizationId" = ${ORG_ID}
+		  AND "userId" = ${legacyOwnerUserId}
+	`;
+	const users = await sql`
+		SELECT id
+		FROM "user"
+		WHERE id = ${legacyOwnerUserId}
+	`;
+	const owners = await sql`
+		SELECT platform, user_id
+		FROM agent_users
+		WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
+		ORDER BY platform, user_id
+	`;
+	const lifecycle = await sql`
+		SELECT id
+		FROM events
+		WHERE organization_id = ${ORG_ID}
+		  AND semantic_type = 'change'
+		  AND metadata->>'category' = 'lifecycle'
+		  AND metadata->>'entity_type' = 'agent'
+		  AND metadata->>'entity_id' = ${AGENT_ID}
+	`;
+	return { agent, memberships, users, owners, lifecycle };
 }
 
 async function putApply(

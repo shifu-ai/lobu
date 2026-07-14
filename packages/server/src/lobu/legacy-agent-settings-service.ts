@@ -1,6 +1,7 @@
 import type { AgentSettings } from "@lobu/core";
 import type { DbClient } from "../db/client.js";
 import { getDb } from "../db/client.js";
+import { recordLifecycleEvent } from "../utils/insert-event.js";
 
 export const AGENT_SETTINGS_MANAGED_BY_RELEASE =
 	"agent_settings_managed_by_release";
@@ -56,19 +57,13 @@ async function lockAgentAndAssertReleaseFence(
 	return true;
 }
 
-/** Full legacy provisioning replacement, including the five release-owned fields. */
-export async function saveLegacyProvisionedAgentSettings(
+async function replaceAgentSettings(
+	tx: DbClient,
 	organizationId: string,
 	agentId: string,
 	settings: Omit<AgentSettings, "updatedAt">,
 ): Promise<void> {
-	const sql = getDb();
-	await sql.begin(async (tx) => {
-		if (
-			!(await lockAgentAndAssertReleaseFence(tx, organizationId, agentId, true))
-		)
-			return;
-		await tx`
+	await tx`
       UPDATE agents SET
         model = ${settings.model ?? null},
         model_selection = ${tx.json(settings.modelSelection ?? {})},
@@ -90,7 +85,123 @@ export async function saveLegacyProvisionedAgentSettings(
         updated_at = NOW()
       WHERE organization_id = ${organizationId} AND id = ${agentId}
     `;
+}
+
+export async function provisionLegacyAgent(input: {
+	organizationId: string;
+	agentId: string;
+	name: string;
+	description?: string;
+	ownerUserId: string;
+	patUserId: string;
+	membershipId: string;
+	ownerEmail: string;
+	settings: Omit<AgentSettings, "updatedAt">;
+}): Promise<{ created: boolean; membership: { ensured: true; role: string } }> {
+	const sql = getDb();
+	const result = await sql.begin(async (tx) => {
+		// INSERT-first serializes concurrent bootstrap attempts. On conflict it
+		// does not mutate the existing row; the following FOR UPDATE then shares
+		// the exact lock and ordering used by managed release apply.
+		const inserted = await tx`
+			INSERT INTO agents (
+				id, organization_id, name, description, owner_platform, owner_user_id,
+				is_workspace_agent, workspace_id, created_at
+			) VALUES (
+				${input.agentId}, ${input.organizationId}, ${input.name},
+				${input.description ?? null}, 'toolbox', ${input.ownerUserId},
+				false, NULL, NOW()
+			)
+			ON CONFLICT (organization_id, id) DO NOTHING
+			RETURNING 1
+		`;
+		const created = inserted.length > 0;
+		if (
+			!(await lockAgentAndAssertReleaseFence(
+				tx,
+				input.organizationId,
+				input.agentId,
+				true,
+			))
+		) {
+			throw new Error("Provisioned agent disappeared before settings write");
+		}
+
+		await tx`
+			INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+			VALUES (
+				${input.ownerUserId}, ${input.ownerUserId}, ${input.ownerEmail},
+				true, NOW(), NOW()
+			)
+			ON CONFLICT (id) DO NOTHING
+		`;
+		await tx`
+			INSERT INTO "member" (id, "organizationId", "userId", role, "createdAt")
+			VALUES (
+				${input.membershipId}, ${input.organizationId}, ${input.ownerUserId},
+				'member', NOW()
+			)
+			ON CONFLICT ("organizationId", "userId") DO NOTHING
+		`;
+		const membershipRows = await tx<{ role: string }>`
+			SELECT role
+			FROM "member"
+			WHERE "organizationId" = ${input.organizationId}
+			  AND "userId" = ${input.ownerUserId}
+			LIMIT 1
+		`;
+
+		await tx`
+			UPDATE agents SET
+				name = ${input.name},
+				description = ${input.description ?? null},
+				owner_platform = 'toolbox',
+				owner_user_id = ${input.ownerUserId},
+				is_workspace_agent = false,
+				workspace_id = NULL,
+				updated_at = NOW()
+			WHERE organization_id = ${input.organizationId} AND id = ${input.agentId}
+		`;
+		await replaceAgentSettings(
+			tx,
+			input.organizationId,
+			input.agentId,
+			input.settings,
+		);
+		await tx`
+			DELETE FROM agent_users
+			WHERE organization_id = ${input.organizationId}
+			  AND agent_id = ${input.agentId}
+			  AND platform = 'toolbox'
+			  AND user_id <> ${input.ownerUserId}
+		`;
+		await tx`
+			INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
+			VALUES
+				(${input.organizationId}, ${input.agentId}, 'toolbox', ${input.ownerUserId}, NOW()),
+				(${input.organizationId}, ${input.agentId}, 'external', ${input.patUserId}, NOW())
+			ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
+		`;
+
+		return {
+			created,
+			membership: {
+				ensured: true as const,
+				role: String(membershipRows[0]?.role ?? "member"),
+			},
+		};
 	});
+
+	recordLifecycleEvent({
+		organizationId: input.organizationId,
+		entityType: "agent",
+		op: result.created ? "created" : "updated",
+		entityId: input.agentId,
+		summary: result.created
+			? `Agent "${input.name}" created`
+			: `Agent "${input.name}" updated`,
+	});
+	return result;
 }
 
 /** Atomic legacy config patch that never rewrites fields absent from the request. */

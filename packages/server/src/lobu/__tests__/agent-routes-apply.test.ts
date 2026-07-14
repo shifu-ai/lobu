@@ -155,7 +155,11 @@ async function seedAgent(orgId: string, agentId: string): Promise<void> {
   `;
 }
 
-async function seedAppliedManagedRelease(orgId: string, agentId: string): Promise<void> {
+async function seedManagedReleaseReceipt(
+  orgId: string,
+  agentId: string,
+  status: 'applying' | 'applied' | 'failed' = 'applied'
+): Promise<void> {
   const { getDb } = await import('../../db/client.js');
   const sql = getDb();
   const digest = `sha256:${'a'.repeat(64)}`;
@@ -170,7 +174,7 @@ async function seedAppliedManagedRelease(orgId: string, agentId: string): Promis
       ${orgId}, ${agentId}, 'production',
       'agent-2026.07.14.1', 1, 1,
       'agent-2026.07.14.1', 1, 1,
-      'stable', ${digest}, ${digest}, 'applied',
+      'stable', ${digest}, ${digest}, ${status},
       ${`lobu:${agentId}:agent-release:1`}, ${digest}
     )
   `;
@@ -328,6 +332,31 @@ describe('PATCH /:agentId/config — managed release fence', () => {
   });
 
   test.each([
+    ['applying'],
+    ['failed'],
+  ] as const)('allows managed settings while a release receipt is %s', async (status) => {
+    const app = await importAgentRoutes();
+    const agentId = `managed-receipt-${status}`;
+    await seedAgent(ORG_A, agentId);
+    await seedManagedReleaseReceipt(ORG_A, agentId, status);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ userMd: `${status} receipt update` }),
+    });
+
+    expect(response.status).toBe(200);
+    const { getDb } = await import('../../db/client.js');
+    const rows = await getDb()`
+      SELECT user_md
+      FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(rows[0]?.user_md).toBe(`${status} receipt update`);
+  });
+
+  test.each([
     ['identityMd', 'stale identity'],
     ['soulMd', 'stale soul'],
     ['userMd', 'stale user'],
@@ -337,7 +366,7 @@ describe('PATCH /:agentId/config — managed release fence', () => {
     const app = await importAgentRoutes();
     const agentId = `managed-${String(key).toLowerCase()}`;
     await seedAgent(ORG_A, agentId);
-    await seedAppliedManagedRelease(ORG_A, agentId);
+    await seedManagedReleaseReceipt(ORG_A, agentId);
 
     const response = await app.request(`/${agentId}/config`, {
       method: 'PATCH',
@@ -365,7 +394,7 @@ describe('PATCH /:agentId/config — managed release fence', () => {
           mcp_servers = ${sql.json({ existing: { url: 'https://old.example' } })}
       WHERE organization_id = ${ORG_A} AND id = ${agentId}
     `;
-    await seedAppliedManagedRelease(ORG_A, agentId);
+    await seedManagedReleaseReceipt(ORG_A, agentId);
 
     const response = await app.request(`/${agentId}/config`, {
       method: 'PATCH',

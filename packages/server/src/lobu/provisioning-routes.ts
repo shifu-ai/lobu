@@ -27,7 +27,7 @@ import {
 } from "./agent-release-service.js";
 import {
 	AgentSettingsManagedByReleaseError,
-	saveLegacyProvisionedAgentSettings,
+	provisionLegacyAgent,
 } from "./legacy-agent-settings-service.js";
 import {
 	validateExpectedGrantPatterns,
@@ -186,46 +186,6 @@ function deterministicToolboxOwnerEmail(
 	return `toolbox-owner-${digest}@toolbox.local`;
 }
 
-async function ensureToolboxOwnerMembership(
-	organizationId: string,
-	ownerUserId: string,
-): Promise<{ ensured: true; role: string }> {
-	const sql = getDb();
-	await sql`
-		INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
-		VALUES (
-			${ownerUserId},
-			${ownerUserId},
-			${deterministicToolboxOwnerEmail(organizationId, ownerUserId)},
-			true,
-			NOW(),
-			NOW()
-		)
-		ON CONFLICT (id) DO NOTHING
-	`;
-	await sql`
-		INSERT INTO "member" (id, "organizationId", "userId", role, "createdAt")
-		VALUES (
-			${deterministicMembershipId(organizationId, ownerUserId)},
-			${organizationId},
-			${ownerUserId},
-			'member',
-			NOW()
-		)
-		ON CONFLICT ("organizationId", "userId") DO NOTHING
-	`;
-
-	const rows = await sql<{ role: string }>`
-		SELECT role
-		FROM "member"
-		WHERE "organizationId" = ${organizationId}
-		  AND "userId" = ${ownerUserId}
-		LIMIT 1
-	`;
-
-	return { ensured: true, role: String(rows[0]?.role ?? "member") };
-}
-
 function redirectUri(publicGatewayUrl: string): string {
 	return `${publicGatewayUrl.replace(/\/+$/, "")}/mcp/oauth/callback`;
 }
@@ -250,31 +210,6 @@ async function ensureUsableOAuthCredential(
 		credential,
 	);
 	return refreshed;
-}
-
-async function syncProvisioningAgentUsers(params: {
-	organizationId: string;
-	agentId: string;
-	ownerUserId: string;
-	patUserId: string;
-}): Promise<void> {
-	const sql = getDb();
-	await sql.begin(async (tx) => {
-		await tx`
-			DELETE FROM agent_users
-			WHERE organization_id = ${params.organizationId}
-			  AND agent_id = ${params.agentId}
-			  AND platform = 'toolbox'
-			  AND user_id <> ${params.ownerUserId}
-		`;
-		await tx`
-			INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
-			VALUES
-				(${params.organizationId}, ${params.agentId}, 'toolbox', ${params.ownerUserId}, NOW()),
-				(${params.organizationId}, ${params.agentId}, 'external', ${params.patUserId}, NOW())
-			ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
-		`;
-	});
 }
 
 async function syncProvisioningGrants(
@@ -365,28 +300,22 @@ export function createProvisioningRoutes(
 			);
 		}
 
-		const existing = await configStore.getMetadata(agentId);
-		const created = !existing;
-		const membership = await ensureToolboxOwnerMembership(
-			organizationId,
-			ownerUserId,
-		);
-		await configStore.saveMetadata(agentId, {
-			agentId,
-			name,
-			description,
-			owner: { platform: "toolbox", userId: ownerUserId },
-			organizationId,
-			isWorkspaceAgent: false,
-			createdAt: existing?.createdAt ?? Date.now(),
-			lastUsedAt: existing?.lastUsedAt,
-		});
+		let provisioned: Awaited<ReturnType<typeof provisionLegacyAgent>>;
 		try {
-			await saveLegacyProvisionedAgentSettings(
+			provisioned = await provisionLegacyAgent({
 				organizationId,
 				agentId,
+				name,
+				description,
+				ownerUserId,
+				patUserId: user.id,
+				membershipId: deterministicMembershipId(organizationId, ownerUserId),
+				ownerEmail: deterministicToolboxOwnerEmail(
+					organizationId,
+					ownerUserId,
+				),
 				settings,
-			);
+			});
 		} catch (error) {
 			if (error instanceof AgentSettingsManagedByReleaseError) {
 				return c.json(
@@ -396,23 +325,17 @@ export function createProvisioningRoutes(
 			}
 			throw error;
 		}
-		await syncProvisioningAgentUsers({
-			organizationId,
-			agentId,
-			ownerUserId,
-			patUserId: user.id,
-		});
 		await syncProvisioningGrants(agentId, settings, organizationId);
 
 		return c.json(
 			{
 				ok: true,
 				agentId,
-				created,
-				membership,
+				created: provisioned.created,
+				membership: provisioned.membership,
 				revisionRef: `lobu:${agentId}`,
 			},
-			created ? 201 : 200,
+			provisioned.created ? 201 : 200,
 		);
 	});
 
