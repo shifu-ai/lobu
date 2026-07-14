@@ -15,7 +15,10 @@
  */
 import type { McpStatus, McpToolDef } from "@lobu/core";
 import { createLogger } from "@lobu/core";
-import type { GatewayParams } from "../shared/tool-implementations";
+import type {
+  ExpectedMcpConfigIdentity,
+  GatewayParams,
+} from "../shared/tool-implementations";
 import {
   callMcpTool,
   checkMcpLogin,
@@ -174,16 +177,32 @@ function renderHelp(
 function findTool(
   mcpId: string,
   toolName: string,
-  ref: McpRuntimeRef
+  ref: McpRuntimeRef,
+  state: McpRuntimeState
 ): McpToolDef | undefined {
-  const tool = ref.current.mcpTools[mcpId]?.find(
+  const tool = state.mcpTools[mcpId]?.find(
     (candidate) => candidate.name === toolName
   );
   if (!tool) return undefined;
   return !ref.isToolInvocationAllowed ||
-    ref.isToolInvocationAllowed(mcpId, tool, ref.current)
+    ref.isToolInvocationAllowed(mcpId, tool, state)
     ? tool
     : undefined;
+}
+
+function expectedMcpIdentityFor(
+  mcpId: string,
+  state: McpRuntimeState
+): ExpectedMcpConfigIdentity | undefined {
+  const status = state.mcpStatus.find((candidate) => candidate.id === mcpId);
+  if (!status?.upstreamOrigin || !status.configSource || !status.configDigest) {
+    return undefined;
+  }
+  return {
+    upstreamOrigin: status.upstreamOrigin,
+    configSource: status.configSource,
+    configDigest: status.configDigest,
+  };
 }
 
 export function parsePayload(
@@ -234,7 +253,8 @@ export function buildMcpServerHandler(
 
     // <tool> --schema
     if (args[1] === "--schema") {
-      const tool = findTool(mcpId, subcommand, ref);
+      const state = ref.current;
+      const tool = findTool(mcpId, subcommand, ref, state);
       if (!tool) {
         return {
           stdout: "",
@@ -251,7 +271,8 @@ export function buildMcpServerHandler(
     }
 
     // <tool> [json]
-    const tool = findTool(mcpId, subcommand, ref);
+    const state = ref.current;
+    const tool = findTool(mcpId, subcommand, ref, state);
     if (!tool) {
       return {
         stdout: "",
@@ -266,7 +287,16 @@ export function buildMcpServerHandler(
     }
 
     try {
-      const result = await deps.callTool(gw, mcpId, subcommand, parsed.payload);
+      const expectedMcpIdentity = expectedMcpIdentityFor(mcpId, state);
+      const result = await deps.callTool(
+        gw,
+        mcpId,
+        subcommand,
+        parsed.payload,
+        {
+          ...(expectedMcpIdentity ? { expectedMcpIdentity } : {}),
+        }
+      );
       const text = result.content
         .filter((c) => c.type === "text")
         .map((c) => c.text)
