@@ -327,7 +327,7 @@ describe("worker model observability", () => {
     expect(typeof events[3].durationMs).toBe("number");
   });
 
-  test("emits model failed event when the runner throws", async () => {
+  test("emits provider.call.failed event when the runner throws", async () => {
     const fetchMock = mock(async () => new Response("{}", { status: 202 }));
     enableObs(fetchMock);
 
@@ -344,9 +344,9 @@ describe("worker model observability", () => {
       )
     );
     expect(failed).toMatchObject({
-      eventName: "provider.call.completed",
+      eventName: "provider.call.failed",
       status: "failed",
-      stage: "provider.call.completed",
+      stage: "provider.call.failed",
       metadata: {
         module: "agent-worker",
         provider: "openai",

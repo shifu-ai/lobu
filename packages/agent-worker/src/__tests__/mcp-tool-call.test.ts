@@ -21,7 +21,10 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { RESERVED_AUTOMATION_TOOL_NAMES } from "@lobu/core";
 import { createMcpToolDefinitions } from "../openclaw/custom-tools";
-import { emitWorkerToolsRegisteredObsEvent } from "../openclaw/session-runner";
+import {
+  emitWorkerLifecycleObsEvent,
+  emitWorkerToolsRegisteredObsEvent,
+} from "../openclaw/session-runner";
 import {
   askUserQuestion,
   callMcpTool,
@@ -601,6 +604,90 @@ describe("callMcpTool: approval-blocked response from gateway", () => {
 });
 
 describe("worker MCP tool registration observability", () => {
+  test("emits worker lifecycle events with incoming trace lineage", async () => {
+    process.env.SHIFU_AGENT_OBS_ENABLED = "true";
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";
+    delete process.env.SHIFU_AGENT_OBS_TOKEN;
+
+    const fetchMock = mock(async () => new Response("{}", { status: 202 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await emitWorkerLifecycleObsEvent({
+      trace: {
+        traceId: "tr_workerlife123456",
+        parentSpanId: "sp_gatewayparent123",
+        journeyId: "line_reply",
+        turnId: "turn_workerlife123",
+        actor: "worker",
+        traceSource: "incoming",
+      },
+      conversationId: "conv-1",
+      sessionId: "session-1",
+      agentId: "agent-1",
+      userId: "user-secret-1",
+      event: "lobu.worker.completed",
+      status: "ok",
+      durationMs: 37,
+      fields: {
+        output_chars: 42,
+        authorization: "Bearer leaked-token",
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const journeyPayload = JSON.parse(
+      String(
+        (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body
+      )
+    );
+    expect(journeyPayload).toMatchObject({
+      schemaVersion: "journey.trace.v1",
+      payload: {
+        schema_version: "journey.trace.v1",
+        event: "lobu.worker.completed",
+        trace_id: "tr_workerlife123456",
+        parent_span_id: "sp_gatewayparent123",
+        journey_id: "line_reply",
+        turn_id: "turn_workerlife123",
+        service: "lobu",
+        module: "agent-worker",
+        status: "ok",
+        duration_ms: 37,
+        output_chars: 42,
+        conversation_id: "conv-1",
+        session_id: "session-1",
+      },
+    });
+    const serialized = JSON.stringify(journeyPayload);
+    expect(serialized).not.toContain("user-secret-1");
+    expect(serialized).not.toContain("leaked-token");
+
+    const obsPayload = JSON.parse(
+      String(
+        (fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1].body
+      )
+    );
+    expect(obsPayload).toMatchObject({
+      eventName: "lobu.worker.completed",
+      status: "ok",
+      stage: "lobu.worker.completed",
+      traceId: "tr_workerlife123456",
+      turnId: "turn_workerlife123",
+      conversationId: "conv-1",
+      sessionId: "session-1",
+      agentId: "agent-1",
+      metadata: {
+        journey_id: "line_reply",
+        parent_span_id: "sp_gatewayparent123",
+        trace_source: "incoming",
+        module: "agent-worker",
+        duration_ms: 37,
+        output_chars: 42,
+      },
+    });
+    expect(JSON.stringify(obsPayload)).not.toContain("leaked-token");
+  });
+
   test("does not wait for tools_registered observability ingest response", async () => {
     process.env.SHIFU_AGENT_OBS_ENABLED = "true";
     process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";

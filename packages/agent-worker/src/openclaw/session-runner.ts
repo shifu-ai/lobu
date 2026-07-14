@@ -737,6 +737,48 @@ function emitWorkerJourneyObsEvent(input: {
   });
 }
 
+export function emitWorkerLifecycleObsEvent(input: {
+  trace: WorkerShifuTraceContext;
+  conversationId?: string;
+  sessionId?: string;
+  agentId?: string;
+  userId?: string;
+  event: "lobu.worker.started" | "lobu.worker.completed" | "lobu.worker.failed";
+  status: "started" | "ok" | "failed";
+  durationMs?: number;
+  fields?: Record<string, unknown>;
+}): void {
+  const metadata = {
+    ...(input.durationMs !== undefined
+      ? { duration_ms: input.durationMs }
+      : {}),
+    ...input.fields,
+  };
+  emitWorkerJourneyObsEvent({
+    trace: input.trace,
+    conversationId: input.conversationId,
+    sessionId: input.sessionId,
+    agentId: input.agentId,
+    userId: input.userId,
+    event: input.event,
+    status: input.status,
+    durationMs: input.durationMs,
+    fields: input.fields,
+  });
+  emitWorkerObsEvent({
+    trace: input.trace,
+    conversationId: input.conversationId,
+    sessionId: input.sessionId,
+    agentId: input.agentId,
+    userId: input.userId,
+    eventName: input.event,
+    status: input.status,
+    stage: input.event,
+    durationMs: input.durationMs,
+    metadata,
+  });
+}
+
 function normalizeJourneyTraceStatus(status: string): JourneyTraceStatus {
   switch (status) {
     case "started":
@@ -895,7 +937,7 @@ export async function runModelWithObs(
         sessionId: input.sessionId,
         agentId: input.agentId,
         userId: input.userId,
-        event: "provider.call.completed",
+        event: "provider.call.failed",
         status: "failed",
         durationMs,
         fields: {
@@ -913,9 +955,9 @@ export async function runModelWithObs(
         sessionId: input.sessionId,
         agentId: input.agentId,
         userId: input.userId,
-        eventName: "provider.call.completed",
+        eventName: "provider.call.failed",
         status: "failed",
-        stage: "provider.call.completed",
+        stage: "provider.call.failed",
         durationMs,
         metadata: {
           provider: input.provider,
@@ -934,7 +976,7 @@ export async function runModelWithObs(
       sessionId: input.sessionId,
       agentId: input.agentId,
       userId: input.userId,
-      event: "provider.call.completed",
+      event: "provider.call.failed",
       status: "failed",
       durationMs,
       fields: {
@@ -953,9 +995,9 @@ export async function runModelWithObs(
       sessionId: input.sessionId,
       agentId: input.agentId,
       userId: input.userId,
-      eventName: "provider.call.completed",
+      eventName: "provider.call.failed",
       status: "failed",
-      stage: "provider.call.completed",
+      stage: "provider.call.failed",
       durationMs,
       metadata: {
         provider: input.provider,
@@ -1030,7 +1072,10 @@ export async function runAISession(
   const mcpExposure: "tools" | "cli" =
     configuredMcpExposure === "cli" ? "cli" : "tools";
   const shifuTrace = parseWorkerShifuTrace(platformMetadata, "worker");
-  emitWorkerJourneyObsEvent({
+  const workerRunStartedAt = Date.now();
+  const workerRunDurationMs = () =>
+    Math.max(0, Date.now() - workerRunStartedAt);
+  emitWorkerLifecycleObsEvent({
     trace: shifuTrace,
     conversationId,
     sessionId: sessionKey,
@@ -2358,6 +2403,19 @@ Use it when the user references past discussions or you need context.`);
         status: "completed",
         finalSummary: { reason: "session_reset" },
       });
+      emitWorkerLifecycleObsEvent({
+        trace: shifuTrace,
+        conversationId,
+        sessionId: sessionKey,
+        agentId: agentId || context.agentId,
+        userId: context.userId,
+        event: "lobu.worker.completed",
+        status: "ok",
+        durationMs: workerRunDurationMs(),
+        fields: {
+          reason: "session_reset",
+        },
+      });
 
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (deltaTimer) clearTimeout(deltaTimer);
@@ -2493,6 +2551,19 @@ Use it when the user references past discussions or you need context.`);
         status: "failed",
         error: { message: errorWithHint },
       });
+      emitWorkerLifecycleObsEvent({
+        trace: shifuTrace,
+        conversationId,
+        sessionId: sessionKey,
+        agentId: agentId || context.agentId,
+        userId: context.userId,
+        event: "lobu.worker.failed",
+        status: "failed",
+        durationMs: workerRunDurationMs(),
+        fields: {
+          error_class: "model_error",
+        },
+      });
       return {
         success: false,
         exitCode: 1,
@@ -2590,6 +2661,20 @@ Use it when the user references past discussions or you need context.`);
         taskId: executionReporter.taskId,
       },
     });
+    emitWorkerLifecycleObsEvent({
+      trace: shifuTrace,
+      conversationId,
+      sessionId: sessionKey,
+      agentId: agentId || context.agentId,
+      userId: context.userId,
+      event: "lobu.worker.completed",
+      status: "ok",
+      durationMs: workerRunDurationMs(),
+      fields: {
+        output_chars: guardedFinalText.length,
+        awaiting_human_decision: turnController.awaitingHumanDecision,
+      },
+    });
 
     return {
       success: true,
@@ -2626,6 +2711,22 @@ Use it when the user references past discussions or you need context.`);
       message: "Agent run failed.",
       status: "failed",
       error: { message: errorWithHint },
+    });
+    emitWorkerLifecycleObsEvent({
+      trace: shifuTrace,
+      conversationId,
+      sessionId: sessionKey,
+      agentId: agentId || context.agentId,
+      userId: context.userId,
+      event: "lobu.worker.failed",
+      status: "failed",
+      durationMs: workerRunDurationMs(),
+      fields: {
+        error_class: isProviderPromptTooLongError(errorMsg)
+          ? "context_pressure"
+          : "worker_error",
+        error_name: error instanceof Error ? error.name : typeof error,
+      },
     });
 
     return {
