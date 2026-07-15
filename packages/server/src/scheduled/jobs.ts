@@ -192,6 +192,14 @@ function registerMaintenanceTasks(
 	// registered below so spawn() can find them.
 	registerScheduledJobsTicker(scheduler);
 
+	// Observer only: Toolbox's Cloudflare cron remains the sole report sender.
+	scheduler.register("sales_battle_report_observer", async (ctx) => {
+		logger.info(
+			{ payload: ctx.payload },
+			"[task] sales battle report observer fired",
+		);
+	});
+
 	// Handler: send_notification. Payload mirrors the notify-tool shape;
 	// resolves recipients to user_ids and inserts events + notification_targets.
 	scheduler.register("send_notification", async (ctx) => {

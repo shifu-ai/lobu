@@ -33,6 +33,10 @@ import {
 	verifyRuntimeGrantPatterns,
 } from "./runtime-grant-verifier.js";
 import {
+	type ReconcileSalesBattleReportScheduleInput,
+	reconcileSalesBattleReportSchedule,
+} from "./sales-battle-report-schedule-reconcile.js";
+import {
 	AGENT_ID_PATTERN,
 	createPostgresAgentConfigStore,
 	createPostgresAgentConnectionStore,
@@ -245,6 +249,81 @@ export function createProvisioningRoutes(
 			options.agentReleaseEnvironment ?? process.env.AGENT_RELEASE_ENVIRONMENT,
 		transactionHooks: options.agentReleaseTransactionHooks,
 	});
+
+	provisioningRoutes.put(
+		"/sales-battle-report-schedules/:toolboxScheduleId",
+		async (c) => {
+			const denied = requireAdminPat(c);
+			if (denied) return denied;
+
+			const authenticatedOrganizationId = c.get("organizationId") as
+				| string
+				| null;
+			if (!authenticatedOrganizationId) {
+				return c.json({ error: "Authentication required" }, 401);
+			}
+
+			let body: Partial<ReconcileSalesBattleReportScheduleInput>;
+			try {
+				body = await c.req.json();
+			} catch {
+				return c.json({ error: "invalid_json" }, 400);
+			}
+
+			const toolboxScheduleId = c.req.param("toolboxScheduleId").trim();
+			const organizationId =
+				typeof body.organizationId === "string"
+					? body.organizationId.trim()
+					: "";
+			const createdByUser =
+				typeof body.createdByUser === "string" ? body.createdByUser.trim() : "";
+			const agentId =
+				typeof body.agentId === "string" ? body.agentId.trim() : "";
+			const courseName =
+				typeof body.courseName === "string" ? body.courseName.trim() : "";
+			const desiredState = body.desiredState;
+			const weekdays = Array.isArray(body.salesTalkWeekdays)
+				? [...new Set(body.salesTalkWeekdays)]
+				: [];
+			if (
+				!toolboxScheduleId ||
+				!organizationId ||
+				!createdByUser ||
+				!agentId ||
+				!courseName ||
+				!Number.isInteger(body.scheduleRevision) ||
+				Number(body.scheduleRevision) < 1 ||
+				!weekdays.length ||
+				!weekdays.every(
+					(weekday) =>
+						Number.isInteger(weekday) && weekday >= 0 && weekday <= 6,
+				) ||
+				!(["active", "paused", "deleted"] as const).includes(
+					desiredState as "active" | "paused" | "deleted",
+				)
+			) {
+				return c.json({ error: "invalid_sales_battle_report_schedule" }, 400);
+			}
+			if (organizationId !== authenticatedOrganizationId) {
+				return c.json(
+					{ error: "organizationId does not match authenticated org" },
+					403,
+				);
+			}
+
+			const result = await reconcileSalesBattleReportSchedule({
+				organizationId,
+				createdByUser,
+				agentId,
+				toolboxScheduleId,
+				scheduleRevision: Number(body.scheduleRevision),
+				courseName,
+				salesTalkWeekdays: weekdays as number[],
+				desiredState: desiredState as "active" | "paused" | "deleted",
+			});
+			return c.json(result, 200);
+		},
+	);
 
 	provisioningRoutes.post("/agents", async (c) => {
 		const denied = requireAdminPat(c);
