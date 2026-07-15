@@ -25,9 +25,16 @@ if (
   throw new Error("invalid immutable Lobu artifact identity");
 }
 const capabilities = ["agent-release.readiness.v1"];
-const buildIdentityDigest = `sha256:${createHash("sha256").update(canonical({
-  sourceRevision, buildTime, imageDigest: artifactDigest, capabilities,
-})).digest("hex")}`;
+const buildIdentityDigest = `sha256:${createHash("sha256")
+  .update(
+    canonical({
+      sourceRevision,
+      buildTime,
+      imageDigest: artifactDigest,
+      capabilities,
+    })
+  )
+  .digest("hex")}`;
 const observedAt = new Date().toISOString();
 const expiresAt = new Date(
   Date.parse(observedAt) + 48 * 60 * 60 * 1000
