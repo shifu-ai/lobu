@@ -18,6 +18,10 @@ describe("app image build receipt workflow", () => {
     expect(workflow).toContain(
       "APP_BUILD_TIME=${{ needs.generate-tag.outputs.build_time }}"
     );
+    expect(workflow).toContain(
+      `build_time=$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')`
+    );
+    expect(workflow).not.toContain("%Y-%m-%dT%H:%M:%SZ");
     expect(workflow).toContain("${{ steps.push-app.outputs.digest }}");
     expect(workflow).toContain("name: lobu-app-image-receipt");
     expect(workflow).toContain("actions/upload-artifact@v4");
@@ -82,5 +86,19 @@ describe("app image build receipt workflow", () => {
     );
     expect(receipt).not.toHaveProperty("capabilities");
     expect(receipt.provides).toEqual(["agent-release.readiness.v1"]);
+    expect(receipt.buildTime).toBe("2026-07-15T00:00:00.000Z");
+    expect(receipt.expiresAt).toBe("2026-07-17T01:00:00.000Z");
+    expect(() =>
+      createUnsignedLobuBuildReceipt({
+        sourceRevision: "a".repeat(40),
+        artifactDigest,
+        artifactIdentity: `ghcr.io/shifu-ai/lobu-app@${artifactDigest}`,
+        buildTime: "2026-07-15T00:00:00Z",
+        observedAt: "2026-07-15T01:00:00.000Z",
+        runId: "123",
+        runAttempt: "2",
+        keyId: "lobu-build-key-v1",
+      })
+    ).toThrow(/build time identity/);
   });
 });

@@ -25,9 +25,10 @@ export function createUnsignedLobuBuildReceipt(input) {
   } = input;
   if (
     !/^[0-9a-f]{40}$/.test(sourceRevision) ||
-    !/^sha256:[0-9a-f]{64}$/.test(artifactDigest)
+    !/^sha256:[0-9a-f]{64}$/.test(artifactDigest) ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/.test(buildTime)
   ) {
-    throw new Error("invalid immutable Lobu artifact identity");
+    throw new Error("invalid immutable Lobu artifact or build time identity");
   }
   const provides = ["agent-release.readiness.v1"];
   const buildIdentityDigest = `sha256:${createHash("sha256")
