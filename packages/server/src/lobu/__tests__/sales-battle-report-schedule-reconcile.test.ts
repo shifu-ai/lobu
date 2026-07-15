@@ -134,6 +134,60 @@ describe("sales battle report schedule reconciliation", () => {
 		});
 	}, 30_000);
 
+	test("rejects an oversized reconciliation body before database mutation", async () => {
+		const app = buildApp();
+		const declared = await app.request(
+			"/api/provisioning/sales-battle-report-schedules/sales_battle_report_schedule_001",
+			{
+				method: "PUT",
+				headers: {
+					"content-type": "application/json",
+					"content-length": String(64 * 1024 + 1),
+				},
+				body: "{}",
+			},
+		);
+		expect(declared.status).toBe(413);
+		expect(await declared.json()).toEqual({
+			error: "sales_battle_report_schedule_body_too_large",
+		});
+		expect(await observerRows()).toEqual([]);
+	});
+
+	test.each([
+		["toolboxScheduleId", "s".repeat(129)],
+		["agentId", "a".repeat(129)],
+		["createdByUser", "u".repeat(129)],
+		["courseName", "課".repeat(257)],
+	] as const)("rejects an overlong %s", async (field, value) => {
+		const path =
+			field === "toolboxScheduleId"
+				? `/api/provisioning/sales-battle-report-schedules/${value}`
+				: "/api/provisioning/sales-battle-report-schedules/sales_battle_report_schedule_001";
+		const body = {
+			organizationId: ORGANIZATION_ID,
+			createdByUser: "toolbox-user-1",
+			agentId: "shifu-u-reconcile",
+			scheduleRevision: 1,
+			courseName: "技術分析全攻略",
+			salesTalkWeekdays: [0],
+			desiredState: "active",
+			...(field === "toolboxScheduleId" ? {} : { [field]: value }),
+		};
+
+		const response = await buildApp().request(path, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({
+			error: "invalid_sales_battle_report_schedule",
+		});
+		expect(await observerRows()).toEqual([]);
+	});
+
 	test("creates one observer-only job for desired revision 1", async () => {
 		const response = await buildApp().request(
 			"/api/provisioning/sales-battle-report-schedules/sales_battle_report_schedule_001",

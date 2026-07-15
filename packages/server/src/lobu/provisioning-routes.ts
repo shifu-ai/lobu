@@ -46,6 +46,9 @@ import { parseStrictJsonBytes, StrictJsonError } from "./strict-json-parser.js";
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
 const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 const MAX_AGENT_RELEASE_BODY_BYTES = 1024 * 1024;
+const MAX_SALES_BATTLE_REPORT_BODY_BYTES = 64 * 1024;
+const MAX_SALES_BATTLE_REPORT_IDENTIFIER_LENGTH = 128;
+const MAX_SALES_BATTLE_REPORT_COURSE_NAME_LENGTH = 256;
 const SHIFU_UI_MANAGED_MCP_IDS = new Set([
 	"google_workspace",
 	"notion",
@@ -252,6 +255,11 @@ export function createProvisioningRoutes(
 
 	provisioningRoutes.put(
 		"/sales-battle-report-schedules/:toolboxScheduleId",
+		bodyLimit({
+			maxSize: MAX_SALES_BATTLE_REPORT_BODY_BYTES,
+			onError: (c) =>
+				c.json({ error: "sales_battle_report_schedule_body_too_large" }, 413),
+		}),
 		async (c) => {
 			const denied = requireAdminPat(c);
 			if (denied) return denied;
@@ -270,7 +278,8 @@ export function createProvisioningRoutes(
 					return c.json({ error: "invalid_sales_battle_report_schedule" }, 400);
 				}
 				body = parsed;
-			} catch {
+			} catch (error) {
+				if (!(error instanceof SyntaxError)) throw error;
 				return c.json({ error: "invalid_json" }, 400);
 			}
 
@@ -291,10 +300,14 @@ export function createProvisioningRoutes(
 				: [];
 			if (
 				!toolboxScheduleId ||
+				toolboxScheduleId.length > MAX_SALES_BATTLE_REPORT_IDENTIFIER_LENGTH ||
 				!organizationId ||
 				!createdByUser ||
+				createdByUser.length > MAX_SALES_BATTLE_REPORT_IDENTIFIER_LENGTH ||
 				!agentId ||
+				agentId.length > MAX_SALES_BATTLE_REPORT_IDENTIFIER_LENGTH ||
 				!courseName ||
+				courseName.length > MAX_SALES_BATTLE_REPORT_COURSE_NAME_LENGTH ||
 				!Number.isSafeInteger(body.scheduleRevision) ||
 				Number(body.scheduleRevision) < 1 ||
 				Number(body.scheduleRevision) > 2_147_483_647 ||
