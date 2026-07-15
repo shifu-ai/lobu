@@ -191,13 +191,11 @@ export async function reconcileSalesBattleReportSchedule(
 			)
 		`;
 
-		const syncRows = await tx<
-			Array<{
-				last_accepted_revision: number;
-				desired_state: string;
-				accepted_request_fingerprint: string | null;
-			}>
-		>`
+		const syncRows = await tx<{
+			last_accepted_revision: number;
+			desired_state: string;
+			accepted_request_fingerprint: string | null;
+		}>`
 			SELECT last_accepted_revision, desired_state, accepted_request_fingerprint
 			FROM toolbox_sales_battle_report_schedule_sync
 			WHERE organization_id = ${input.organizationId}

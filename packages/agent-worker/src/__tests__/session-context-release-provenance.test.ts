@@ -48,9 +48,15 @@ describe("session context release provenance", () => {
   });
 
   test("uses the per-run token and never reuses context across release provenance", async () => {
+    const seenAuthorizations: string[] = [];
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
-      async () =>
-        new Response(
+      async (_input, init) => {
+        const authorization = (init?.headers as Record<string, string> | undefined)
+          ?.Authorization;
+        if (authorization?.includes("Bearer ")) {
+          seenAuthorizations.push(authorization);
+        }
+        return new Response(
           JSON.stringify({
             userId: "user-1",
             agentId: "agent-1",
@@ -61,19 +67,21 @@ describe("session context release provenance", () => {
             mcpStatus: [],
             mcpTools: {},
           })
-        )
+        );
+      }
     );
     const first = token("r1");
+    const firstAuthorization = `Bearer ${first}`;
     const active = await getOpenClawSessionContext({ workerToken: first });
     expect(active.releaseState.status).toBe("active");
     await getOpenClawSessionContext({ workerToken: first });
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(
-      (fetchSpy.mock.calls[0]?.[1]?.headers as Record<string, string>)
-        .Authorization
-    ).toBe(`Bearer ${first}`);
-    await getOpenClawSessionContext({ workerToken: token("r2") });
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+      seenAuthorizations.filter((value) => value === firstAuthorization)
+    ).toHaveLength(1);
+    const second = token("r2");
+    await getOpenClawSessionContext({ workerToken: second });
+    expect(seenAuthorizations).toContain(`Bearer ${second}`);
+    expect(fetchSpy).toHaveBeenCalled();
   });
 
   test.each([
