@@ -529,7 +529,7 @@ export class RunsQueue implements IMessageQueue {
       },
     };
     this.workers.set(queueName, worker);
-    await this.startConsumerLeaseHeartbeat(queueName);
+    if (!worker.paused) await this.startConsumerLeaseHeartbeat(queueName);
 
     const channel = notifyChannelFor(queueName);
     let channelSet = this.subscribersByChannel.get(channel);
@@ -615,12 +615,19 @@ export class RunsQueue implements IMessageQueue {
     const w = this.workers.get(queueName);
     if (!w) return;
     w.paused = true;
+		const timer = this.consumerLeaseTimers.get(queueName);
+		if (timer) clearInterval(timer);
+		this.consumerLeaseTimers.delete(queueName);
+		await expireQueueConsumerLease(getDb(), queueName, this.claimedBy).catch((err) => {
+			logger.warn({ queueName, err }, "queue consumer lease expiration failed");
+		});
   }
 
   async resumeWorker(queueName: string): Promise<void> {
     const w = this.workers.get(queueName);
     if (!w) return;
     w.paused = false;
+		await this.startConsumerLeaseHeartbeat(queueName);
     w.wakeup();
   }
 

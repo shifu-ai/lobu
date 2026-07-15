@@ -2083,6 +2083,10 @@ export async function runAISession(
       sessionKey,
       channelId,
       platform,
+		effectiveToolInventory: context.releaseState?.status === "active" ? {
+			names: effectiveTools.allowedToolKeys,
+			fingerprint: effectiveTools.fingerprint,
+		} : undefined,
     },
   });
   await executionReporter.record({

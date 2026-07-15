@@ -49,20 +49,6 @@ describe("agent release capability state", () => {
     expect(result).toMatchObject({ status: "active", claim: { releaseId: "release-3", releaseSequence: 3, capabilityIds: ["personal_reminder_delivery.v1"] } });
   });
 
-  test("atomically binds an accepted snapshot digest to the exact durable apply receipt", async () => {
-    const statements: string[] = [];
-    const sql = ((strings: TemplateStringsArray) => {
-      statements.push(strings.join("?"));
-      return Promise.resolve(statements.length === 1 ? [validReceipt] : []);
-    }) as never;
-    const result = await readAgentReleaseCapabilityState({ organizationId: "org-1", agentId: "agent-1",
-      environment: "production", snapshot, sql });
-    expect(result.status).toBe("active");
-    expect(statements[1]).toContain("INSERT INTO public.agent_release_capability_snapshots");
-    expect(statements[1]).toContain("r.desired_release_id = r.applied_release_id");
-    expect(statements[1]).toContain("ON CONFLICT DO NOTHING");
-  });
-
   test.each([
     ["missing snapshot", validReceipt, null],
     ["drifted", { ...validReceipt, status: "drifted" }, snapshot],

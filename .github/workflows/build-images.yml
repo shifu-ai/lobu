@@ -90,6 +90,7 @@ jobs:
 
   build-app:
     runs-on: ubuntu-latest
+    environment: production
     # Push the app image LAST. Flux's ImageUpdateAutomation only watches
     # the app image policy, but the chart applies one shared tag to app,
     # worker, AND embeddings. If app pushed before worker or embeddings,
@@ -190,6 +191,20 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             https://api.github.com/user/packages/container/lobu-app/visibility \
             -d '{"visibility":"public"}' || true
+
+      - name: Verify immutable app image is pullable
+        run: docker manifest inspect ghcr.io/shifu-ai/lobu-app@${{ steps.push-app.outputs.digest }} > /dev/null
+
+      - name: Sign and publish Lobu build artifact receipt
+        env:
+          IMAGE_DIGEST: ${{ steps.push-app.outputs.digest }}
+          IMAGE_REFERENCE: ghcr.io/shifu-ai/lobu-app@${{ steps.push-app.outputs.digest }}
+          BUILD_TIME: ${{ needs.generate-tag.outputs.build_time }}
+          RECEIPT_KEY_ID: ${{ secrets.AGENT_RELEASE_LOBU_BUILD_RECEIPT_KEY_ID }}
+          RECEIPT_PRIVATE_KEY_PKCS8: ${{ secrets.AGENT_RELEASE_LOBU_BUILD_RECEIPT_PRIVATE_KEY_PKCS8 }}
+          TOOLBOX_RECEIPT_INGRESS_URL: https://api.shifu-ai.org/agent-workbench/internal/agent-release-deployment-receipts
+          TOOLBOX_INTERNAL_SECRET: ${{ secrets.TOOLBOX_INTERNAL_SECRET }}
+        run: node scripts/publish-agent-release-build-receipt.mjs > lobu-app-signed-build-receipt.json
 
   build-worker:
     runs-on: ubuntu-latest

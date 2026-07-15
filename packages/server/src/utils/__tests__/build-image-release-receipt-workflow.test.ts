@@ -19,6 +19,15 @@ describe("app image build receipt workflow", () => {
 		expect(workflow).toContain("${{ steps.push-app.outputs.digest }}");
 		expect(workflow).toContain("name: lobu-app-image-receipt");
 		expect(workflow).toContain("actions/upload-artifact@v4");
+		expect(workflow).toContain("Verify immutable app image is pullable");
+		expect(workflow).toContain("publish-agent-release-build-receipt.mjs");
+		expect(workflow).toContain("AGENT_RELEASE_LOBU_BUILD_RECEIPT_PRIVATE_KEY_PKCS8");
+		const producer = readFileSync(path.resolve(__dirname,
+			"../../../../../scripts/publish-agent-release-build-receipt.mjs"), "utf8");
+		expect(producer).toContain('purpose: "lobu_build_artifact_receipt"');
+		expect(producer).toContain('workflow: ".github/workflows/build-images.yml"');
+		expect(producer).toContain("for (let attempt = 1; attempt <= 5; attempt++)");
+		expect(producer).toContain('"x-internal-secret": secret');
 		expect(workflow).not.toContain(
 			"APP_DECLARED_IMAGE_DIGEST=${{ steps.push-app.outputs.digest }}",
 		);

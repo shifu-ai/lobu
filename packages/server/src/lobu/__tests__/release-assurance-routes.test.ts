@@ -66,4 +66,26 @@ describe("release assurance bounded provisioning readback", () => {
 			error: "agent_release_assurance_not_found",
 		});
 	});
+
+	it("exposes serving-runtime consumer mismatch through the authenticated bounded route", async () => {
+		const runtime = { schemaVersion: 1, service: "lobu-runtime", queueConsumer: {
+			status: "red", reasonCodes: ["consumer_runtime_mismatch"], requiredQueues: ["messages"],
+			activeConsumerCount: 1, consumers: [] } };
+		const response = await appWith({ readRuntime: async () => runtime, readAgent: async () => null })
+			.request("/api/provisioning/release-assurance");
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual(runtime);
+	});
+
+	it("exposes an expired effective inventory as unavailable through the authenticated agent route", async () => {
+		const agent = { schemaVersion: 1, agentId: "shifu-u-test", managedReleaseReceipt: { status: "applied" },
+			liveManagedSettingsDigest: `sha256:${"a".repeat(64)}`, capabilitySnapshotDigest: `sha256:${"b".repeat(64)}`,
+			effectiveMcpToolInventory: { status: "missing", names: [], fingerprint: null, releaseId: null,
+				releaseSequence: null, capabilitySnapshotDigest: null, observedAt: null, expiresAt: null },
+			observedAt: "2026-07-15T10:00:00.000Z" };
+		const response = await appWith({ readRuntime: async () => ({}), readAgent: async () => agent })
+			.request("/api/provisioning/agents/shifu-u-test/release-assurance");
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual(agent);
+	});
 });

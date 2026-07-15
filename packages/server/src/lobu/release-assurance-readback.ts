@@ -27,6 +27,7 @@ export interface QueueConsumerReadiness {
 		| "consumer_stale"
 		| "consumer_identity_conflict"
 		| "consumer_carrier_mismatch"
+		| "consumer_runtime_mismatch"
 	>;
 	requiredQueues: readonly string[];
 	activeConsumerCount: number;
@@ -37,6 +38,7 @@ export function evaluateQueueConsumerReadiness(
 	facts: QueueConsumerLeaseFact[],
 	requiredQueues: readonly string[],
 	now = new Date(),
+	servingIdentity?: { revision: string; declaredImageDigest: string | null },
 ): QueueConsumerReadiness {
 	const relevant = facts.filter((fact) =>
 		requiredQueues.includes(fact.queueName),
@@ -64,6 +66,11 @@ export function evaluateQueueConsumerReadiness(
 		),
 	);
 	if (carriers.size > 1) reasons.add("consumer_carrier_mismatch");
+	if (servingIdentity && active.some((fact) =>
+		fact.deploymentRevision !== servingIdentity.revision ||
+		fact.declaredImageDigest !== servingIdentity.declaredImageDigest)) {
+		reasons.add("consumer_runtime_mismatch");
+	}
 	return {
 		status: reasons.size === 0 ? "green" : "red",
 		reasonCodes: [...reasons],
@@ -94,6 +101,7 @@ export async function readQueueConsumerReadiness(
 	sql: DbClient = getDb(),
 	now = new Date(),
 ) {
+	const runtime = getRuntimeInfo();
 	const rows = await sql<QueueLeaseRow>`
     WITH ranked AS (
       SELECT queue_name, consumer_id, deployment_revision, declared_image_digest,
@@ -120,6 +128,7 @@ export async function readQueueConsumerReadiness(
 		})),
 		REQUIRED_RELEASE_QUEUE_NAMES,
 		now,
+		{ revision: runtime.revision, declaredImageDigest: runtime.declared_image_digest },
 	);
 	if (REQUIRED_RELEASE_QUEUE_NAMES.some((queueName) =>
 		rows.filter((row) => row.queue_name === queueName).length > 64)) {
@@ -177,27 +186,42 @@ export function canonicalToolInventory(input: readonly string[]) {
 	return { names, fingerprint: digest(names) };
 }
 
-export async function recordAgentToolInventoryTruth(
+export async function recordAgentEffectiveToolInventoryTruth(
 	input: {
 		organizationId: string;
 		agentId: string;
-		mcpId: string;
+		releaseId: string;
+		releaseSequence: number;
+		capabilitySnapshotDigest: string;
+		snapshotAuthority: string;
 		toolNames: readonly string[];
+		fingerprint: string;
+		observedAt?: Date;
+		expiresAt?: Date;
 	},
 	sql: DbClient = getDb(),
 ): Promise<void> {
 	const inventory = canonicalToolInventory(input.toolNames);
+	if (!/^sha256:[0-9a-f]{64}$/.test(input.fingerprint)) throw new Error("effective inventory fingerprint is invalid");
+	const observedAt = input.observedAt ?? new Date();
+	const expiresAt = input.expiresAt ?? new Date(observedAt.getTime() + 5 * 60_000);
 	await sql`
-    INSERT INTO public.agent_mcp_tool_inventory_snapshots (
-      organization_id, agent_id, mcp_id, tool_names, inventory_fingerprint, observed_at
+    INSERT INTO public.agent_effective_tool_inventory_snapshots (
+      organization_id, agent_id, release_id, release_sequence, capability_snapshot_digest,
+      snapshot_authority, tool_names, inventory_fingerprint, observed_at, expires_at
     ) VALUES (
-      ${input.organizationId}, ${input.agentId}, ${input.mcpId}, ${sql.json(inventory.names)},
-      ${inventory.fingerprint}, now()
+      ${input.organizationId}, ${input.agentId}, ${input.releaseId}, ${input.releaseSequence},
+      ${input.capabilitySnapshotDigest}, ${input.snapshotAuthority}, ${sql.json(inventory.names)},
+		${input.fingerprint}, ${observedAt}, ${expiresAt}
     )
-    ON CONFLICT (organization_id, agent_id, mcp_id) DO UPDATE SET
+    ON CONFLICT (organization_id, agent_id, snapshot_authority) DO UPDATE SET
+      release_id = EXCLUDED.release_id,
+      release_sequence = EXCLUDED.release_sequence,
+      capability_snapshot_digest = EXCLUDED.capability_snapshot_digest,
       tool_names = EXCLUDED.tool_names,
       inventory_fingerprint = EXCLUDED.inventory_fingerprint,
-      observed_at = EXCLUDED.observed_at
+      observed_at = EXCLUDED.observed_at,
+      expires_at = EXCLUDED.expires_at
   `;
 }
 
@@ -234,13 +258,26 @@ export async function readAgentToolInventoryTruth(
 	const rows = await sql<{
 		tool_names: unknown;
 		inventory_fingerprint: string;
+		release_id: string;
+		release_sequence: number | string;
+		capability_snapshot_digest: string;
 		observed_at: Date | string;
+		expires_at: Date | string;
 	}>`
-    SELECT tool_names, inventory_fingerprint, observed_at
-    FROM public.agent_mcp_tool_inventory_snapshots
-    WHERE organization_id = ${input.organizationId} AND agent_id = ${input.agentId}
-    ORDER BY mcp_id ASC
-    LIMIT 64
+    SELECT i.tool_names, i.inventory_fingerprint, i.release_id, i.release_sequence,
+           i.capability_snapshot_digest, i.observed_at, i.expires_at
+    FROM public.agent_effective_tool_inventory_snapshots i
+    JOIN public.agent_release_applies r
+      ON r.organization_id = i.organization_id AND r.agent_id = i.agent_id
+     AND r.applied_release_id = i.release_id AND r.applied_release_sequence = i.release_sequence
+    JOIN public.agent_release_capability_snapshots c
+      ON c.organization_id = i.organization_id AND c.agent_id = i.agent_id
+     AND c.release_id = i.release_id AND c.release_sequence = i.release_sequence
+     AND c.snapshot_digest = i.capability_snapshot_digest
+    WHERE i.organization_id = ${input.organizationId} AND i.agent_id = ${input.agentId}
+      AND r.status = 'applied' AND i.expires_at > now() AND c.expires_at > now()
+    ORDER BY i.observed_at DESC
+    LIMIT 1
   `;
 	if (rows.length === 0)
 		return {
@@ -248,20 +285,30 @@ export async function readAgentToolInventoryTruth(
 			names: [] as string[],
 			fingerprint: null,
 			observedAt: null,
+			expiresAt: null,
+			releaseId: null,
+			releaseSequence: null,
+			capabilitySnapshotDigest: null,
 		};
 	const rawNames = rows
 		.flatMap((row) => (Array.isArray(row.tool_names) ? row.tool_names : []))
 		.filter((name): name is string => typeof name === "string");
 	try {
 		const inventory = canonicalToolInventory(rawNames);
+		if (!/^sha256:[0-9a-f]{64}$/.test(rows[0]!.inventory_fingerprint)) throw new Error("invalid fingerprint");
 		return {
 			status: "available" as const,
 			names: inventory.names,
-			fingerprint: inventory.fingerprint,
-			observedAt: rows.map((row) => iso(row.observed_at)).sort().at(-1) ?? null,
+			fingerprint: rows[0]!.inventory_fingerprint,
+			releaseId: rows[0]!.release_id,
+			releaseSequence: Number(rows[0]!.release_sequence),
+			capabilitySnapshotDigest: rows[0]!.capability_snapshot_digest,
+			observedAt: iso(rows[0]!.observed_at),
+			expiresAt: iso(rows[0]!.expires_at),
 		};
 	} catch {
-		return { status: "missing" as const, names: [] as string[], fingerprint: null, observedAt: null };
+		return { status: "missing" as const, names: [] as string[], fingerprint: null, observedAt: null,
+			expiresAt: null, releaseId: null, releaseSequence: null, capabilitySnapshotDigest: null };
 	}
 }
 
@@ -301,5 +348,30 @@ export async function readAgentCapabilitySnapshotTruth(
 			: [],
 		observedAt: iso(row.observed_at),
 		expiresAt: iso(row.expires_at),
+	};
+}
+
+export function createReleaseAssuranceReadback(input: {
+	sql?: DbClient;
+	findAgentBase(query: { organizationId: string; agentId: string }): Promise<{
+		managedReleaseReceipt: unknown;
+		liveManagedSettingsDigest: string | null;
+	} | null>;
+	now?: () => Date;
+}) {
+	const sql = () => input.sql ?? getDb();
+	return {
+		readRuntime: () => readRuntimeReleaseAssurance(sql(), input.now?.() ?? new Date()),
+		readAgent: async (query: { organizationId: string; agentId: string }) => {
+			const base = await input.findAgentBase(query);
+			if (!base) return null;
+			const [inventory, capabilitySnapshot] = await Promise.all([
+				readAgentToolInventoryTruth(query, sql()), readAgentCapabilitySnapshotTruth(query, sql()),
+			]);
+			return { schemaVersion: 1 as const, agentId: query.agentId, ...base,
+				capabilitySnapshotDigest: capabilitySnapshot?.snapshotDigest ?? null,
+				effectiveMcpToolInventory: inventory,
+				observedAt: (input.now?.() ?? new Date()).toISOString() };
+		},
 	};
 }

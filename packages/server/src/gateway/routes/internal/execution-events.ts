@@ -9,6 +9,7 @@ import {
 import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
 import { authenticateWorker } from "./middleware.js";
 import type { WorkerContext } from "./types.js";
+import { recordAgentEffectiveToolInventoryTruth } from "../../../lobu/release-assurance-readback.js";
 
 const logger = createLogger("internal-execution-events-routes");
 
@@ -113,6 +114,21 @@ export function createExecutionEventRoutes(): Hono<WorkerContext> {
           status: readOptionalStatus(body.status) ?? "running",
           metadata: readOptionalRecord(body.metadata) ?? {},
         });
+				const inventory = readEffectiveInventory(body.metadata);
+				if (inventory && worker.organizationId && worker.agentId && worker.releaseState?.status === "active") {
+					const claim = worker.releaseState.claim;
+					await recordAgentEffectiveToolInventoryTruth({
+						organizationId: worker.organizationId,
+						agentId: worker.agentId,
+						releaseId: claim.releaseId,
+						releaseSequence: claim.releaseSequence,
+						capabilitySnapshotDigest: claim.snapshotDigest,
+						snapshotAuthority: taskId,
+						toolNames: inventory.names,
+						fingerprint: inventory.fingerprint,
+						expiresAt: new Date(Math.min(Date.parse(claim.expiresAt), Date.now() + 5 * 60_000)),
+					}).catch((error) => logger.warn("Failed to persist effective tool inventory snapshot:", error));
+				}
         return c.json({ success: true, taskId: task.id });
       }
 
@@ -151,4 +167,13 @@ export function createExecutionEventRoutes(): Hono<WorkerContext> {
 
   logger.debug("Internal execution event routes registered");
   return router;
+}
+
+function readEffectiveInventory(metadata: unknown): { names: string[]; fingerprint: string } | null {
+	if (!isRecord(metadata) || !isRecord(metadata.effectiveToolInventory)) return null;
+	const value = metadata.effectiveToolInventory;
+	if (!Array.isArray(value.names) || value.names.length > 256 ||
+		!value.names.every((name) => typeof name === "string") ||
+		typeof value.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(value.fingerprint)) return null;
+	return { names: value.names, fingerprint: `sha256:${value.fingerprint}` };
 }

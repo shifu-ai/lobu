@@ -39,9 +39,7 @@ import {
 } from "./stores/postgres-stores";
 import { parseStrictJsonBytes, StrictJsonError } from "./strict-json-parser.js";
 import {
-	readAgentCapabilitySnapshotTruth,
-	readAgentToolInventoryTruth,
-	readRuntimeReleaseAssurance,
+	createReleaseAssuranceReadback,
 } from "./release-assurance-readback.js";
 
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
@@ -254,28 +252,18 @@ export function createProvisioningRoutes(
 			options.agentReleaseEnvironment ?? process.env.AGENT_RELEASE_ENVIRONMENT,
 		transactionHooks: options.agentReleaseTransactionHooks,
 	});
-	const releaseAssuranceReadback = options.releaseAssuranceReadback ?? {
-		readRuntime: () => readRuntimeReleaseAssurance(),
-		readAgent: async ({ organizationId, agentId }: { organizationId: string; agentId: string }) => {
+	const releaseAssuranceReadback = options.releaseAssuranceReadback ?? createReleaseAssuranceReadback({
+		findAgentBase: async ({ organizationId, agentId }: { organizationId: string; agentId: string }) => {
 			const metadata = await configStore.getMetadata(agentId);
 			if (!metadata || metadata.organizationId !== organizationId) return null;
 			const receipt = await agentReleaseService.getEvidence({ organizationId, agentId });
-			const [inventory, capabilitySnapshot] = await Promise.all([
-				readAgentToolInventoryTruth({ organizationId, agentId }),
-				readAgentCapabilitySnapshotTruth({ organizationId, agentId }),
-			]);
 			return {
-				schemaVersion: 1,
-				agentId,
 				managedReleaseReceipt: receipt,
 				liveManagedSettingsDigest: receipt?.status === "drifted"
 					? receipt.liveSettingsHash ?? null : receipt?.settingsHash ?? null,
-				capabilitySnapshotDigest: capabilitySnapshot?.snapshotDigest ?? null,
-				effectiveMcpToolInventory: inventory,
-				observedAt: new Date().toISOString(),
 			};
 		},
-	};
+	});
 
 	provisioningRoutes.get("/release-assurance", async (c) => {
 		const denied = requireAdminPat(c);
@@ -841,3 +829,4 @@ export function createProvisioningRoutes(
 }
 
 export const provisioningRoutes = createProvisioningRoutes();
+export { createReleaseAssuranceReadback };
