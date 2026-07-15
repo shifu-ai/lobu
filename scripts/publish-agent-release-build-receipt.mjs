@@ -16,7 +16,13 @@ const canonical = (value) =>
   );
 
 export function createUnsignedLobuBuildReceipt(input) {
-  const { sourceRevision, artifactDigest, buildTime, artifactIdentity, observedAt } = input;
+  const {
+    sourceRevision,
+    artifactDigest,
+    buildTime,
+    artifactIdentity,
+    observedAt,
+  } = input;
   if (
     !/^[0-9a-f]{40}$/.test(sourceRevision) ||
     !/^sha256:[0-9a-f]{64}$/.test(artifactDigest)
@@ -116,6 +122,9 @@ async function main() {
   process.stdout.write(`${canonical(receipt)}\n`);
 }
 
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+if (
+  process.argv[1] &&
+  pathToFileURL(process.argv[1]).href === import.meta.url
+) {
   await main();
 }
