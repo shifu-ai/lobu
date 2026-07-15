@@ -13,6 +13,7 @@ import {
 import type { Context } from "hono";
 import { Hono } from "hono";
 
+import { recordAgentToolInventoryTruth } from "../../../lobu/release-assurance-readback.js";
 import { getOrgId, orgContext } from "../../../lobu/stores/org-context.js";
 import { resolveAgentGuardrails } from "../../guardrails/aggregator.js";
 import { recordGuardrailTrip } from "../../guardrails/audit.js";
@@ -1966,6 +1967,14 @@ export class McpProxy {
       if (this.toolCache && (filteredTools.length > 0 || hasFilter)) {
         this.toolCache.setServerInfo(cacheMcpId, serverInfo, agentId);
       }
+      if (agentId) {
+        void recordAgentToolInventoryTruth({
+          organizationId: getOrgId(), agentId, mcpId,
+          toolNames: filteredTools.map((tool) => tool.name),
+        }).catch((error) => {
+          logger.warn({ mcpId, agentId, error }, "durable MCP inventory snapshot failed");
+        });
+      }
       emitJourneyEvent({
         event: "mcp.tools_list.completed",
         trace,
@@ -2086,6 +2095,14 @@ export class McpProxy {
           if (this.toolCache) {
             this.toolCache.setServerInfo(cacheMcpId, serverInfo, agentId);
           }
+        }
+        if (agentId) {
+          void recordAgentToolInventoryTruth({
+            organizationId: getOrgId(), agentId, mcpId,
+            toolNames: filteredRetryTools.map((tool) => tool.name),
+          }).catch((error) => {
+            logger.warn({ mcpId, agentId, error }, "durable MCP inventory snapshot failed");
+          });
         }
         logger.info("Retry succeeded for MCP tool fetch", {
           mcpId,

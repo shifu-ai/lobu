@@ -38,6 +38,11 @@ import {
 	createPostgresAgentConnectionStore,
 } from "./stores/postgres-stores";
 import { parseStrictJsonBytes, StrictJsonError } from "./strict-json-parser.js";
+import {
+	readAgentCapabilitySnapshotTruth,
+	readAgentToolInventoryTruth,
+	readRuntimeReleaseAssurance,
+} from "./release-assurance-readback.js";
 
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
 const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
@@ -76,6 +81,10 @@ interface ProvisioningRoutesOptions {
 	};
 	agentReleaseTransactionHooks?: {
 		afterAgentLock?: () => Promise<void>;
+	};
+	releaseAssuranceReadback?: {
+		readRuntime(): Promise<unknown>;
+		readAgent(input: { organizationId: string; agentId: string }): Promise<unknown | null>;
 	};
 }
 
@@ -244,6 +253,49 @@ export function createProvisioningRoutes(
 		expectedEnvironment:
 			options.agentReleaseEnvironment ?? process.env.AGENT_RELEASE_ENVIRONMENT,
 		transactionHooks: options.agentReleaseTransactionHooks,
+	});
+	const releaseAssuranceReadback = options.releaseAssuranceReadback ?? {
+		readRuntime: () => readRuntimeReleaseAssurance(),
+		readAgent: async ({ organizationId, agentId }: { organizationId: string; agentId: string }) => {
+			const metadata = await configStore.getMetadata(agentId);
+			if (!metadata || metadata.organizationId !== organizationId) return null;
+			const receipt = await agentReleaseService.getEvidence({ organizationId, agentId });
+			const [inventory, capabilitySnapshot] = await Promise.all([
+				readAgentToolInventoryTruth({ organizationId, agentId }),
+				readAgentCapabilitySnapshotTruth({ organizationId, agentId }),
+			]);
+			return {
+				schemaVersion: 1,
+				agentId,
+				managedReleaseReceipt: receipt,
+				liveManagedSettingsDigest: receipt?.status === "drifted"
+					? receipt.liveSettingsHash ?? null : receipt?.settingsHash ?? null,
+				capabilitySnapshotDigest: capabilitySnapshot?.snapshotDigest ?? null,
+				effectiveMcpToolInventory: inventory,
+				observedAt: new Date().toISOString(),
+			};
+		},
+	};
+
+	provisioningRoutes.get("/release-assurance", async (c) => {
+		const denied = requireAdminPat(c);
+		if (denied) return denied;
+		const organizationId = c.get("organizationId") as string | null;
+		if (!organizationId) return c.json({ error: "Authentication required" }, 401);
+		return c.json(await releaseAssuranceReadback.readRuntime(), 200);
+	});
+
+	provisioningRoutes.get("/agents/:agentId/release-assurance", async (c) => {
+		const denied = requireAdminPat(c);
+		if (denied) return denied;
+		const organizationId = c.get("organizationId") as string | null;
+		if (!organizationId) return c.json({ error: "Authentication required" }, 401);
+		const agentId = c.req.param("agentId")?.trim() ?? "";
+		const agentIdError = validateShifuAgentId(agentId);
+		if (agentIdError) return c.json({ error: agentIdError }, 400);
+		const result = await releaseAssuranceReadback.readAgent({ organizationId, agentId });
+		if (!result) return c.json({ error: "agent_release_assurance_not_found" }, 404);
+		return c.json(result, 200);
 	});
 
 	provisioningRoutes.post("/agents", async (c) => {

@@ -268,13 +268,35 @@ export async function readAgentReleaseCapabilityState(input: {
 	`;
 	const row = rows[0];
 	if (!row) return { status: "legacy_unenrolled" };
-	return classifyAgentReleaseCapabilityState({
+	const state = classifyAgentReleaseCapabilityState({
 		agent: row,
 		receipt: row,
 		agentId: input.agentId,
 		environment: input.environment,
 		snapshot: input.snapshot,
 	});
+	if (state.status === "active") {
+		const claim = state.claim;
+		await sql`
+			INSERT INTO public.agent_release_capability_snapshots (
+				organization_id, agent_id, release_id, release_sequence,
+				snapshot_digest, capability_ids, observed_at, expires_at
+			)
+			SELECT r.organization_id, r.agent_id, r.applied_release_id, r.applied_release_sequence,
+			       ${claim.snapshotDigest}, ${JSON.stringify(claim.capabilityIds)}::jsonb, now(), ${claim.expiresAt}
+			FROM public.agent_release_applies r
+			WHERE r.organization_id = ${input.organizationId}
+			  AND r.agent_id = ${input.agentId}
+			  AND r.status = 'applied'
+			  AND r.applied_release_id = ${claim.releaseId}
+			  AND r.applied_release_sequence = ${claim.releaseSequence}
+			  AND r.desired_release_id = r.applied_release_id
+			  AND r.desired_release_sequence = r.applied_release_sequence
+			  AND r.desired_feed_sequence = r.applied_feed_sequence
+			ON CONFLICT DO NOTHING
+		`;
+	}
+	return state;
 }
 
 export function createAgentReleaseService(options: {

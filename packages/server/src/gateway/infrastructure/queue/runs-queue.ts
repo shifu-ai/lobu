@@ -23,6 +23,11 @@ import { createLogger } from "@lobu/core";
 import * as Sentry from "@sentry/node";
 import { getDb, getDbListener, type DbClient } from "../../../db/client.js";
 import { incrementCounter } from "../../metrics/prometheus.js";
+import {
+  expireQueueConsumerLease,
+  QUEUE_CONSUMER_HEARTBEAT_MS,
+  recordQueueConsumerHeartbeat,
+} from "./queue-consumer-lease.js";
 import type {
   IMessageQueue,
   JobHandler,
@@ -152,6 +157,8 @@ export class RunsQueue implements IMessageQueue {
    * prevent cross-pod ownership corruption.
    */
   private readonly claimedBy: string;
+  private readonly consumerStartedAt = new Date();
+  private readonly consumerLeaseTimers = new Map<string, ReturnType<typeof setInterval>>();
 
   constructor() {
     if (!process.env.DATABASE_URL) {
@@ -254,6 +261,15 @@ export class RunsQueue implements IMessageQueue {
 
     this.workers.clear();
     this.subscribersByChannel.clear();
+
+    const leaseSql = getDb();
+    for (const [queueName, timer] of this.consumerLeaseTimers) {
+      clearInterval(timer);
+      await expireQueueConsumerLease(leaseSql, queueName, this.claimedBy).catch((err) => {
+        logger.warn({ queueName, err }, "queue consumer lease expiry failed");
+      });
+    }
+    this.consumerLeaseTimers.clear();
 
     if (this.staleSweepTimer) {
       clearInterval(this.staleSweepTimer);
@@ -513,6 +529,7 @@ export class RunsQueue implements IMessageQueue {
       },
     };
     this.workers.set(queueName, worker);
+    await this.startConsumerLeaseHeartbeat(queueName);
 
     const channel = notifyChannelFor(queueName);
     let channelSet = this.subscribersByChannel.get(channel);
@@ -568,6 +585,30 @@ export class RunsQueue implements IMessageQueue {
       }
     };
     void loop();
+  }
+
+  private async startConsumerLeaseHeartbeat(queueName: string): Promise<void> {
+    const existing = this.consumerLeaseTimers.get(queueName);
+    if (existing) clearInterval(existing);
+    const heartbeat = async () => {
+      const revision = process.env.APP_GIT_SHA?.trim() || "unknown";
+      const candidate = process.env.APP_DECLARED_IMAGE_DIGEST?.trim() || "";
+      const declaredImageDigest = /^sha256:[0-9a-f]{64}$/.test(candidate) ? candidate : null;
+      await recordQueueConsumerHeartbeat(getDb(), {
+        queueName, consumerId: this.claimedBy, deploymentRevision: revision,
+        declaredImageDigest, startedAt: this.consumerStartedAt, now: new Date(),
+      });
+    };
+    await heartbeat().catch((err) => {
+      logger.warn({ queueName, err }, "queue consumer heartbeat registration failed");
+    });
+    const timer = setInterval(() => {
+      void heartbeat().catch((err) => {
+        logger.warn({ queueName, err }, "queue consumer heartbeat failed");
+      });
+    }, QUEUE_CONSUMER_HEARTBEAT_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    this.consumerLeaseTimers.set(queueName, timer);
   }
 
   async pauseWorker(queueName: string): Promise<void> {

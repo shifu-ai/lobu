@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import packageJson from '../../package.json';
 
 /** Stable capabilities attested by the deployed Lobu runtime carrier. */
@@ -12,6 +13,7 @@ interface RuntimeEnvLike {
   NODE_ENV?: string;
   APP_GIT_SHA?: string;
   APP_BUILD_TIME?: string;
+  APP_DECLARED_IMAGE_DIGEST?: string;
   SHIFU_MEMBER_AGENT_DIRECT_AUTH?: string;
 }
 
@@ -33,16 +35,26 @@ export function getRuntimeInfo(env?: RuntimeEnvLike | null) {
   const memberScheduleDirectAuth =
     cleanString(env?.SHIFU_MEMBER_AGENT_DIRECT_AUTH) ??
     cleanString(process.env.SHIFU_MEMBER_AGENT_DIRECT_AUTH);
+  const revision = cleanString(env?.APP_GIT_SHA) || cleanString(process.env.APP_GIT_SHA) || 'unknown';
+  const buildTime = cleanString(env?.APP_BUILD_TIME) || cleanString(process.env.APP_BUILD_TIME) || null;
+  const imageDigestCandidate = cleanString(env?.APP_DECLARED_IMAGE_DIGEST) ||
+    cleanString(process.env.APP_DECLARED_IMAGE_DIGEST);
+  const declaredImageDigest = imageDigestCandidate && /^sha256:[0-9a-f]{64}$/.test(imageDigestCandidate)
+    ? imageDigestCandidate : null;
+  const production = resolveRuntimeEnvironment(env) === 'production';
+  const buildIdentityStatus = !production || (revision !== 'unknown' && buildTime !== null &&
+    declaredImageDigest !== null) ? 'green' : 'red';
+  const buildIdentityDigest = `sha256:${createHash('sha256').update(JSON.stringify({
+    buildSource: 'github:shifu-ai/lobu', revision, buildTime, declaredImageDigest,
+    capabilities: ['agent-release.readiness.v1'],
+  })).digest('hex')}`;
   return {
     version: packageJson.version,
-    revision:
-      cleanString(env?.APP_GIT_SHA) ||
-      cleanString(process.env.APP_GIT_SHA) ||
-      'unknown',
-    build_time:
-      cleanString(env?.APP_BUILD_TIME) ||
-      cleanString(process.env.APP_BUILD_TIME) ||
-      null,
+    revision,
+    build_time: buildTime,
+    declared_image_digest: declaredImageDigest,
+    build_identity_status: buildIdentityStatus,
+    build_identity_digest: buildIdentityDigest,
     environment: resolveRuntimeEnvironment(env),
     carrier_capabilities: RUNTIME_CARRIER_CAPABILITIES.filter(
       (capability) =>
