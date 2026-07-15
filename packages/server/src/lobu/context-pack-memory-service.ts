@@ -54,6 +54,7 @@ export interface ContextPackMemoryResult {
   eventId: number;
   semanticType: string;
   agentId: string;
+  courseEntityIds: string[];
   viewUrl?: string;
 }
 
@@ -432,6 +433,7 @@ export async function writeContextPackMemory(
     eventId,
     semanticType: saved.semantic_type ?? parsed.semanticType,
     agentId: parsed.agentId,
+    courseEntityIds: parsed.entityIds ?? [],
     ...(saved.view_url ? { viewUrl: saved.view_url } : {}),
   };
 }

@@ -159,6 +159,7 @@ describe('Toolbox context pack memory route', () => {
         viewUrl: expect.any(String),
         semanticType: 'project_profile',
         agentId: AGENT_ID,
+        courseEntityIds: ['course:user-001:super-ai'],
       },
     });
 
@@ -399,6 +400,10 @@ describe('writeContextPackMemory', () => {
       eventId: 123,
       semanticType: 'project_profile',
       agentId: AGENT_ID,
+      courseEntityIds: [
+        'course:user-001:super-ai',
+        'course:user-001:advanced-ai',
+      ],
       viewUrl: 'https://app.example.test/events/123',
     });
     expect(calls).toHaveLength(1);

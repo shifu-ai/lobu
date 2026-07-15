@@ -250,6 +250,7 @@ memoryRoutes.post('/context-packs', async (c) => {
         viewUrl: result.viewUrl ?? null,
         semanticType: result.semanticType,
         agentId: result.agentId,
+        courseEntityIds: result.courseEntityIds,
       },
     });
   } catch (error) {
