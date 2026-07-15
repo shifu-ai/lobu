@@ -1,10 +1,13 @@
 import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { getDb } from "../../db/client.js";
 import {
 	ensureDbForGatewayTests,
 	resetTestDatabase,
 	seedAgentRow,
 } from "../../gateway/__tests__/helpers/db-setup.js";
+import { salesBattleReportObserverLogFields } from "../sales-battle-report-observer-log.js";
+import type { ScheduledJobRow } from "../scheduled-jobs-service.js";
 import {
 	cancelTrustedCourseWake,
 	dispatchScheduledJobCandidate,
@@ -12,7 +15,6 @@ import {
 	upsertScheduledJobByExternalKey,
 	upsertScheduledJobByExternalKeyWithQuota,
 } from "../scheduled-jobs-service.js";
-import type { ScheduledJobRow } from "../scheduled-jobs-service.js";
 
 const ORGANIZATION_ID = "org-revision";
 const OWNER_USER_ID = "pm-revision";
@@ -30,6 +32,33 @@ function actionArgs(version: string, scheduledFor: string) {
 }
 
 describe("scheduled job revision guard", () => {
+	test("bounds sales battle report observer logs to stable identifiers", () => {
+		const source = readFileSync(new URL("../jobs.ts", import.meta.url), "utf8");
+		const observerHandler = source.match(
+			/scheduler\.register\("sales_battle_report_observer"[\s\S]*?\n\t}\);/,
+		)?.[0];
+		expect(observerHandler).toBeDefined();
+		expect(observerHandler).not.toContain("{ payload: ctx.payload }");
+		expect(observerHandler).toContain(
+			"salesBattleReportObserverLogFields(ctx.payload)",
+		);
+		expect(
+			salesBattleReportObserverLogFields({
+				toolboxScheduleId: `schedule-${"s".repeat(200)}`,
+				agentId: `agent-${"a".repeat(200)}`,
+				scheduleRevision: 7,
+				salesTalkWeekday: 3,
+				courseName: "private course name",
+				prompt: "must not be logged",
+			}),
+		).toEqual({
+			toolboxScheduleId: `schedule-${"s".repeat(119)}`,
+			agentId: `agent-${"a".repeat(122)}`,
+			scheduleRevision: 7,
+			salesTalkWeekday: 3,
+		});
+	});
+
 	beforeAll(async () => {
 		await ensureDbForGatewayTests();
 	}, 60_000);
@@ -66,7 +95,7 @@ describe("scheduled job revision guard", () => {
 			  AND external_key = ${externalKey}
 		`;
 
-		const futureAt = "2026-07-14T09:00:00.000Z";
+		const futureAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 		await upsertScheduledJobByExternalKey({
 			externalKey,
 			organizationId: ORGANIZATION_ID,
