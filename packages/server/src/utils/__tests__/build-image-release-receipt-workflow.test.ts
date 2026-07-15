@@ -24,7 +24,8 @@ describe("app image build receipt workflow", () => {
     expect(workflow).not.toContain("%Y-%m-%dT%H:%M:%SZ");
     expect(workflow).toContain("${{ steps.push-app.outputs.digest }}");
     expect(workflow).toContain("name: lobu-app-image-receipt");
-    expect(workflow).toContain("actions/upload-artifact@v4");
+    expect(workflow).not.toMatch(/actions\/(?:upload|download)-artifact@v4(?:\s|$)/);
+    expect(workflow).toContain("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02");
     expect(workflow).toContain("Verify immutable app image is pullable");
     expect(workflow).toContain("publish-agent-release-build-receipt.mjs");
     expect(workflow).toContain("sign-lobu-build-receipt:");
@@ -41,6 +42,15 @@ describe("app image build receipt workflow", () => {
     expect(signerJob).not.toContain("actions/checkout");
     expect(signerJob).not.toContain("publish-agent-release-build-receipt.mjs");
     expect(signerJob).not.toContain("TOOLBOX_INTERNAL_SECRET");
+    expect(signerJob).toContain("actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093");
+    expect(signerJob).toContain("name: lobu-app-image-receipt");
+    expect(signerJob).toContain("receipt.sourceRevision !== process.env.GITHUB_SHA");
+    expect(signerJob).toContain("receipt.provenance.runId !== process.env.GITHUB_RUN_ID");
+    expect(signerJob).toContain("receipt.provenance.runAttempt !== process.env.GITHUB_RUN_ATTEMPT");
+    expect(signerJob).toContain("receipt.signing.keyId !== 'pending-protected-signer'");
+    expect(signerJob).toContain("receipt.signing.keyId = process.env.RECEIPT_KEY_ID");
+    expect(signerJob).toContain("['manifest', 'inspect', '--verbose', receipt.artifactIdentity]");
+    expect(signerJob).toContain("receipt.artifactIdentity");
     const publisherJob = workflow.slice(
       workflow.indexOf("  publish-lobu-build-receipt:"),
       workflow.indexOf("  build-worker:"),
@@ -77,7 +87,7 @@ describe("app image build receipt workflow", () => {
       observedAt: "2026-07-15T01:00:00.000Z",
       runId: "123",
       runAttempt: "2",
-      keyId: "lobu-build-key-v1",
+      keyId: "pending-protected-signer",
     });
     expect(Object.keys(receipt).sort()).toEqual(
       [
@@ -111,8 +121,20 @@ describe("app image build receipt workflow", () => {
         observedAt: "2026-07-15T01:00:00.000Z",
         runId: "123",
         runAttempt: "2",
-        keyId: "lobu-build-key-v1",
+        keyId: "pending-protected-signer",
       }),
     ).toThrow(/build time identity/);
+    expect(() => createUnsignedLobuBuildReceipt({
+      sourceRevision: "a".repeat(40), artifactDigest,
+      artifactIdentity: `ghcr.io/attacker/lobu-app@${artifactDigest}`,
+      buildTime: "2026-07-15T00:00:00.000Z", observedAt: "2026-07-15T01:00:00.000Z",
+      runId: "123", runAttempt: "2", keyId: "pending-protected-signer",
+    })).toThrow(/artifact identity/);
+    expect(() => createUnsignedLobuBuildReceipt({
+      sourceRevision: "a".repeat(40), artifactDigest,
+      artifactIdentity: `ghcr.io/shifu-ai/lobu-app@${artifactDigest}`,
+      buildTime: "2026-07-15T00:00:00.000Z", observedAt: "2026-07-15T01:00:00.000Z",
+      runId: "fake-run", runAttempt: "2", keyId: "pending-protected-signer",
+    })).toThrow(/workflow identity/);
   });
 });

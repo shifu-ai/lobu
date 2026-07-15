@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { Hono } from "hono";
@@ -28,11 +29,13 @@ describe("authenticated agent release readback with isolated Postgres", () => {
 		await db.query(`INSERT INTO public.agent_release_capability_snapshots VALUES
 			($1,$2,'release-1',1,$3,'["cap.v1"]','2026-07-15T10:00:00Z','2099-01-01T00:00:00Z')`, [ORG, AGENT, DIGEST]);
 		await db.query(`INSERT INTO public.agent_effective_tool_inventory_snapshots VALUES
-			($1,$2,'release-1',1,$3,'turn-1','["kept","removed"]',$3,'2026-07-15T10:00:00Z','2099-01-01T00:00:00Z')`, [ORG, AGENT, DIGEST]);
+			($1,$2,'release-1',1,$3,'turn-1','["kept","removed"]',$4,'2026-07-15T10:00:00Z','2099-01-01T00:00:00Z')`,
+			[ORG, AGENT, DIGEST, inventoryFingerprint(["kept", "removed"])]);
 		await db.query(`INSERT INTO public.agent_effective_tool_inventory_snapshots VALUES
-			($1,$2,'release-1',1,$3,'turn-1','["kept"]',$3,'2026-07-15T10:01:00Z','2099-01-01T00:00:00Z')
+			($1,$2,'release-1',1,$3,'turn-1','["kept"]',$4,'2026-07-15T10:01:00Z','2099-01-01T00:00:00Z')
 			ON CONFLICT (organization_id,agent_id,snapshot_authority) DO UPDATE SET
-			tool_names=excluded.tool_names,observed_at=excluded.observed_at`, [ORG, AGENT, DIGEST]);
+			tool_names=excluded.tool_names,inventory_fingerprint=excluded.inventory_fingerprint,
+			observed_at=excluded.observed_at`, [ORG, AGENT, DIGEST, inventoryFingerprint(["kept"])]);
 		const readback = createReleaseAssuranceReadback({ sql: tagged(db),
 			findAgentBase: async () => ({ managedReleaseReceipt: { status: "applied" },
 				liveManagedSettingsDigest: DIGEST }) });
@@ -49,6 +52,10 @@ describe("authenticated agent release readback with isolated Postgres", () => {
 		expect((await changed.json()).effectiveMcpToolInventory).toMatchObject({ status: "missing", names: [] });
 	});
 });
+
+function inventoryFingerprint(names: string[]) {
+	return `sha256:${createHash("sha256").update(JSON.stringify([...new Set(names)].sort())).digest("hex")}`;
+}
 
 function tagged(db: PGlite) {
 	const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {

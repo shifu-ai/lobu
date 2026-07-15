@@ -30,6 +30,16 @@ export function createUnsignedLobuBuildReceipt(input) {
   ) {
     throw new Error("invalid immutable Lobu artifact or build time identity");
   }
+  if (artifactIdentity !== `ghcr.io/shifu-ai/lobu-app@${artifactDigest}`) {
+    throw new Error("invalid immutable Lobu artifact identity");
+  }
+  if (
+    !/^[1-9][0-9]{0,15}$/.test(input.runId) ||
+    !/^[1-9][0-9]{0,15}$/.test(input.runAttempt) ||
+    input.keyId !== "pending-protected-signer"
+  ) {
+    throw new Error("invalid protected workflow identity");
+  }
   const provides = ["agent-release.readiness.v1"];
   const buildIdentityDigest = `sha256:${createHash("sha256")
     .update(

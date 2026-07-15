@@ -176,7 +176,7 @@ jobs:
             > lobu-app-image-receipt.json
 
       - name: Upload bounded app image receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: lobu-app-image-receipt
           path: lobu-app-image-receipt.json
@@ -200,13 +200,13 @@ jobs:
           IMAGE_DIGEST: ${{ steps.push-app.outputs.digest }}
           IMAGE_REFERENCE: ghcr.io/shifu-ai/lobu-app@${{ steps.push-app.outputs.digest }}
           BUILD_TIME: ${{ needs.generate-tag.outputs.build_time }}
-          RECEIPT_KEY_ID: lobu-build-key-v1
+          RECEIPT_KEY_ID: pending-protected-signer
         run: |
           node scripts/publish-agent-release-build-receipt.mjs > lobu-app-unsigned-build-receipt.json
           test "$(wc -c < lobu-app-unsigned-build-receipt.json)" -le 32768
 
       - name: Upload bounded unsigned Lobu build receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: lobu-app-unsigned-build-receipt
           path: lobu-app-unsigned-build-receipt.json
@@ -220,41 +220,55 @@ jobs:
     permissions:
       contents: none
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: lobu-app-unsigned-build-receipt
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: lobu-app-image-receipt
       - name: Strictly validate and sign bounded receipt without repository code
         env:
           RECEIPT_PRIVATE_KEY_PKCS8: ${{ secrets.AGENT_RELEASE_LOBU_BUILD_RECEIPT_PRIVATE_KEY_PKCS8 }}
+          RECEIPT_KEY_ID: ${{ secrets.AGENT_RELEASE_LOBU_BUILD_RECEIPT_KEY_ID }}
         run: |
           node <<'NODE'
           const fs = require('node:fs');
           const { createHash, createPrivateKey, sign } = require('node:crypto');
+          const { execFileSync } = require('node:child_process');
           const path = 'lobu-app-unsigned-build-receipt.json';
           if (fs.statSync(path).size > 32768) throw new Error('unsigned receipt too large');
+          if (fs.statSync('lobu-app-image-receipt.json').size > 32768) throw new Error('image receipt too large');
           const receipt = JSON.parse(fs.readFileSync(path, 'utf8'));
+          const image = JSON.parse(fs.readFileSync('lobu-app-image-receipt.json', 'utf8'));
           const keys = x => Object.keys(x).sort().join(',');
           const expected = 'artifactDigest,artifactIdentity,buildIdentityDigest,buildTime,dependencyId,expiresAt,observedAt,origin,provenance,provides,receiptKind,requires,scope,signing,sourceRevision';
           if (!receipt || Array.isArray(receipt) || keys(receipt) !== expected) throw new Error('closed receipt schema required');
+          if (!image || Array.isArray(image) || keys(image) !== 'buildTime,gitRevision,image,imageDigest,schemaVersion,sourceRepository' || image.schemaVersion !== 1) throw new Error('closed image receipt schema required');
           if (keys(receipt.provenance) !== 'breakGlass,conclusion,environmentProtected,provider,ref,repository,runAttempt,runId,workflow') throw new Error('closed provenance schema required');
           if (keys(receipt.signing) !== 'algorithm,keyId,purpose') throw new Error('closed signing schema required');
           if (receipt.receiptKind !== 'build_artifact' || receipt.scope !== 'global' || receipt.dependencyId !== 'lobu-runtime') throw new Error('invalid receipt identity');
           if (!/^sha256:[0-9a-f]{64}$/.test(receipt.artifactDigest) || receipt.artifactIdentity !== `ghcr.io/shifu-ai/lobu-app@${receipt.artifactDigest}`) throw new Error('invalid OCI digest binding');
           if (!/^[0-9a-f]{40}$/.test(receipt.sourceRevision) || receipt.origin !== 'ghcr.io/shifu-ai/lobu-app') throw new Error('invalid source identity');
+          if (receipt.sourceRevision !== process.env.GITHUB_SHA || process.env.GITHUB_REPOSITORY !== 'shifu-ai/lobu' || process.env.GITHUB_REF !== 'refs/heads/main') throw new Error('signer source context mismatch');
           if (receipt.provenance.repository !== 'shifu-ai/lobu' || receipt.provenance.workflow !== '.github/workflows/build-images.yml' || receipt.provenance.ref !== 'refs/heads/main' || receipt.provenance.conclusion !== 'success' || receipt.provenance.environmentProtected !== true || receipt.provenance.breakGlass !== false) throw new Error('invalid provenance');
+          if (receipt.provenance.runId !== process.env.GITHUB_RUN_ID || receipt.provenance.runAttempt !== process.env.GITHUB_RUN_ATTEMPT) throw new Error('signer run context mismatch');
           if (receipt.signing.algorithm !== 'Ed25519' || receipt.signing.purpose !== 'lobu_build_artifact_receipt') throw new Error('invalid signing policy');
+          if (receipt.signing.keyId !== 'pending-protected-signer' || !process.env.RECEIPT_KEY_ID || !/^[A-Za-z0-9._:-]{1,128}$/.test(process.env.RECEIPT_KEY_ID)) throw new Error('invalid protected signing key id');
+          if (image.sourceRepository !== process.env.GITHUB_REPOSITORY || image.gitRevision !== receipt.sourceRevision || image.buildTime !== receipt.buildTime || image.imageDigest !== receipt.artifactDigest || image.image !== `ghcr.io/shifu-ai/lobu-app:${image.image.split(':').at(-1)}`) throw new Error('independent build output mismatch');
+          execFileSync('docker', ['manifest', 'inspect', '--verbose', receipt.artifactIdentity], { timeout: 20000, maxBuffer: 65536, stdio: ['ignore', 'pipe', 'pipe'] });
           if (!Array.isArray(receipt.provides) || receipt.provides.join(',') !== 'agent-release.readiness.v1' || !Array.isArray(receipt.requires) || receipt.requires.length) throw new Error('invalid capability contract');
           if (Date.parse(receipt.expiresAt) - Date.parse(receipt.observedAt) !== 172800000) throw new Error('invalid receipt lifetime');
           const canonical = value => JSON.stringify(value, (_k, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a],[b]) => a.localeCompare(b))) : item);
           const expectedBuildIdentity = `sha256:${createHash('sha256').update(canonical({sourceRevision:receipt.sourceRevision,buildTime:receipt.buildTime,imageDigest:receipt.artifactDigest,capabilities:receipt.provides})).digest('hex')}`;
           if (receipt.buildIdentityDigest !== expectedBuildIdentity) throw new Error('invalid build identity digest');
+          receipt.signing.keyId = process.env.RECEIPT_KEY_ID;
           const key = createPrivateKey({ key: Buffer.from(process.env.RECEIPT_PRIVATE_KEY_PKCS8, 'base64'), format: 'der', type: 'pkcs8' });
           receipt.signing.signature = sign(null, Buffer.from(canonical(receipt)), key).toString('base64');
           const output = canonical(receipt) + '\n';
           if (Buffer.byteLength(output) > 32768) throw new Error('signed receipt too large');
           fs.writeFileSync('lobu-app-signed-build-receipt.json', output, { flag: 'wx' });
           NODE
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: lobu-app-signed-build-receipt
           path: lobu-app-signed-build-receipt.json
@@ -268,7 +282,7 @@ jobs:
     permissions:
       contents: none
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: lobu-app-signed-build-receipt
       - name: Publish signed receipt without signing key
