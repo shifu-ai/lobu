@@ -67,7 +67,8 @@ function sameObserver(
 	input: ReconcileSalesBattleReportScheduleInput,
 	weekday: number,
 ): boolean {
-	const args = row.action_args;
+	const args = actionArgsObject(row);
+	if (!args) return false;
 	return (
 		row.external_key ===
 			observerExternalKey({
@@ -87,7 +88,28 @@ function sameObserver(
 }
 
 function observerWeekday(row: ScheduledJobRow): number {
-	return Number(row.action_args.salesTalkWeekday);
+	const args = actionArgsObject(row);
+	return args ? Number(args.salesTalkWeekday) : Number.NaN;
+}
+
+function actionArgsObject(
+	row: ScheduledJobRow,
+): Record<string, unknown> | null {
+	const value: unknown = row.action_args;
+	return value !== null && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: null;
+}
+
+function isOwnedObserver(
+	row: ScheduledJobRow,
+	toolboxScheduleId: string,
+): boolean {
+	const args = actionArgsObject(row);
+	return (
+		row.action_type === OBSERVER_ACTION_TYPE &&
+		args?.toolboxScheduleId === toolboxScheduleId
+	);
 }
 
 function preferredObserver(
@@ -107,10 +129,22 @@ function preferredObserver(
 }
 
 function observerRevision(row: ScheduledJobRow): number {
-	const actionRevision = Number(row.action_args.scheduleRevision);
-	if (Number.isSafeInteger(actionRevision)) return actionRevision;
-	const storedRevision = Number(row.schedule_revision);
-	if (Number.isSafeInteger(storedRevision)) return storedRevision;
+	const actionRevision = actionArgsObject(row)?.scheduleRevision;
+	if (
+		typeof actionRevision === "number" &&
+		Number.isSafeInteger(actionRevision) &&
+		actionRevision > 0
+	) {
+		return actionRevision;
+	}
+	const storedRevision: unknown = row.schedule_revision;
+	if (
+		typeof storedRevision === "number" &&
+		Number.isSafeInteger(storedRevision) &&
+		storedRevision > 0
+	) {
+		return storedRevision;
+	}
 	return 0;
 }
 
@@ -169,10 +203,8 @@ export async function reconcileSalesBattleReportSchedule(
 			ORDER BY created_at ASC
 			FOR UPDATE
 		`) as unknown as ScheduledJobRow[];
-		const existing = lockedRows.filter(
-			(row) =>
-				row.action_type === OBSERVER_ACTION_TYPE &&
-				row.action_args.toolboxScheduleId === input.toolboxScheduleId,
+		const existing = lockedRows.filter((row) =>
+			isOwnedObserver(row, input.toolboxScheduleId),
 		);
 
 		const created: string[] = [];

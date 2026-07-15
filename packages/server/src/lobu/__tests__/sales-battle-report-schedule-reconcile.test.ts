@@ -609,4 +609,109 @@ describe("sales battle report schedule reconciliation", () => {
 		expect(rows[0].id).toBe(legacyId);
 		expect(rows[0].action_args.scheduleRevision).toBe(2);
 	});
+
+	test("returns typed conflicts for canonical-key holders with non-object action args", async () => {
+		await reconcileRequest(1, { salesTalkWeekdays: [0] });
+		const malformedValues: Array<{
+			label: string;
+			value: unknown;
+			actionType: string;
+		}> = [
+			{
+				label: "json null",
+				value: null,
+				actionType: "sales_battle_report_observer",
+			},
+			{ label: "string", value: "primitive", actionType: "wake_agent" },
+			{ label: "number", value: 42, actionType: "wake_agent" },
+			{ label: "array", value: ["primitive"], actionType: "wake_agent" },
+		];
+
+		for (const malformed of malformedValues) {
+			const conflict = await insertCanonicalKeyConflict({
+				actionType: malformed.actionType,
+				toolboxScheduleId: "will_be_replaced",
+				weekday: 0,
+			});
+			await getDb()`
+				UPDATE scheduled_jobs
+				SET action_args = ${JSON.stringify(malformed.value)}::jsonb
+				WHERE id = ${conflict.id}
+			`;
+
+			const response = await reconcileRequest(2, { salesTalkWeekdays: [0] });
+
+			expect(response.status, malformed.label).toBe(409);
+			expect(await response.json()).toEqual({
+				error: "observer_external_key_conflict",
+				conflictingJobIds: [conflict.id],
+			});
+			const holder = await getDb()<
+				Array<{
+					external_key: string;
+					action_type: string;
+					action_args: unknown;
+				}>
+			>`
+				SELECT external_key, action_type, action_args
+				FROM scheduled_jobs WHERE id = ${conflict.id}
+			`;
+			expect(holder).toEqual([
+				{
+					external_key: conflict.externalKey,
+					action_type: malformed.actionType,
+					action_args: malformed.value,
+				},
+			]);
+			const sync = await getDb()<Array<{ last_accepted_revision: number }>>`
+				SELECT last_accepted_revision
+				FROM toolbox_sales_battle_report_schedule_sync
+				WHERE organization_id = ${ORGANIZATION_ID}
+				  AND toolbox_schedule_id = 'sales_battle_report_schedule_001'
+			`;
+			expect(sync).toEqual([{ last_accepted_revision: 1 }]);
+			await getDb()`DELETE FROM scheduled_jobs WHERE id = ${conflict.id}`;
+		}
+	});
+
+	test("falls back to typed revisions for null empty-string and false action revisions", async () => {
+		await reconcileRequest(1, { salesTalkWeekdays: [0, 1, 2] });
+		const nullRevision = await insertLegacyObserver({
+			weekday: 0,
+			revision: 9,
+		});
+		const emptyRevision = await insertLegacyObserver({
+			weekday: 1,
+			revision: 10,
+		});
+		const falseRevision = await insertLegacyObserver({
+			weekday: 2,
+			revision: 11,
+		});
+		await getDb()`
+			UPDATE scheduled_jobs SET action_args = jsonb_set(action_args, '{scheduleRevision}', 'null')
+			WHERE id = ${nullRevision}
+		`;
+		await getDb()`
+			UPDATE scheduled_jobs SET action_args = jsonb_set(action_args, '{scheduleRevision}', '""')
+			WHERE id = ${emptyRevision}
+		`;
+		await getDb()`
+			UPDATE scheduled_jobs SET action_args = jsonb_set(action_args, '{scheduleRevision}', 'false')
+			WHERE id = ${falseRevision}
+		`;
+
+		const response = await reconcileRequest(2, {
+			salesTalkWeekdays: [0, 1, 2],
+		});
+
+		expect(response.status).toBe(200);
+		const rows = await observerRows();
+		expect(rows.map((row) => row.id).sort()).toEqual(
+			[nullRevision, emptyRevision, falseRevision].sort(),
+		);
+		expect(rows.every((row) => row.action_args.scheduleRevision === 2)).toBe(
+			true,
+		);
+	});
 });
