@@ -58,6 +58,7 @@ async function insertLegacyObserver(input: {
 	revision: number;
 	paused?: boolean;
 	externalKey?: string | null;
+	createdByUser?: string;
 }) {
 	const rows = await getDb()<Array<{ id: string }>>`
 		INSERT INTO scheduled_jobs (
@@ -74,7 +75,7 @@ async function insertLegacyObserver(input: {
 				agentId: "shifu-u-reconcile",
 			})},
 			'5 5 * * *', now(), ${input.paused ?? false}, 'legacy observer',
-			'toolbox-user-1'
+			${input.createdByUser ?? "toolbox-user-1"}
 		)
 		RETURNING id
 	`;
@@ -379,6 +380,89 @@ describe("sales battle report schedule reconciliation", () => {
 
 		expect(responses.every((response) => response.status === 200)).toBe(true);
 		const rows = await observerRows();
+		expect(rows.filter((row) => !row.paused)).toHaveLength(2);
+		expect(rows.map((row) => row.action_args.salesTalkWeekday).sort()).toEqual([
+			0, 3,
+		]);
+	});
+
+	test("repairs cross-owner duplicate observer keys to one requested-owner survivor", async () => {
+		await reconcileRequest(1, { salesTalkWeekdays: [0] });
+		const canonicalKey =
+			"toolbox:sales-battle-report:sales_battle_report_schedule_001:weekday:0:observer";
+		await insertLegacyObserver({
+			weekday: 0,
+			revision: 0,
+			externalKey: canonicalKey,
+			createdByUser: "toolbox-user-2",
+		});
+
+		const response = await reconcileRequest(3, {
+			createdByUser: "toolbox-user-2",
+			salesTalkWeekdays: [0],
+		});
+
+		expect(response.status).toBe(200);
+		const rows = await observerRows();
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({
+			external_key: canonicalKey,
+			paused: false,
+		});
+		const owners = await getDb()<Array<{ created_by_user: string }>>`
+			SELECT created_by_user FROM scheduled_jobs WHERE id = ${rows[0].id}
+		`;
+		expect(owners).toEqual([{ created_by_user: "toolbox-user-2" }]);
+	});
+
+	test("repairs swapped weekday external keys without a unique violation", async () => {
+		await reconcileRequest(1, { salesTalkWeekdays: [0, 3] });
+		const rows = await observerRows();
+		const weekday0 = rows.find((row) => row.action_args.salesTalkWeekday === 0);
+		const weekday3 = rows.find((row) => row.action_args.salesTalkWeekday === 3);
+		expect(weekday0).toBeDefined();
+		expect(weekday3).toBeDefined();
+		await getDb()`
+			UPDATE scheduled_jobs SET external_key = NULL
+			WHERE id IN (${weekday0?.id}, ${weekday3?.id})
+		`;
+		await getDb()`
+			UPDATE scheduled_jobs
+			SET external_key = CASE
+				WHEN id = ${weekday0?.id} THEN ${weekday3?.external_key}
+				ELSE ${weekday0?.external_key}
+			END
+			WHERE id IN (${weekday0?.id}, ${weekday3?.id})
+		`;
+
+		const response = await reconcileRequest(2, { salesTalkWeekdays: [0, 3] });
+
+		expect(response.status).toBe(200);
+		const repaired = await observerRows();
+		expect(repaired).toHaveLength(2);
+		for (const row of repaired) {
+			expect(row.external_key).toBe(
+				`toolbox:sales-battle-report:sales_battle_report_schedule_001:weekday:${row.action_args.salesTalkWeekday}:observer`,
+			);
+			expect(row.action_args.scheduleRevision).toBe(2);
+		}
+	});
+
+	test("serializes concurrent requests from differing owners", async () => {
+		const responses = await Promise.all([
+			reconcileRequest(10, {
+				createdByUser: "toolbox-user-1",
+				salesTalkWeekdays: [0, 3],
+			}),
+			reconcileRequest(10, {
+				createdByUser: "toolbox-user-2",
+				salesTalkWeekdays: [0, 3],
+			}),
+		]);
+
+		expect(responses.every((response) => response.status === 200)).toBe(true);
+		const rows = await observerRows();
+		expect(rows).toHaveLength(2);
 		expect(rows.filter((row) => !row.paused)).toHaveLength(2);
 		expect(rows.map((row) => row.action_args.salesTalkWeekday).sort()).toEqual([
 			0, 3,

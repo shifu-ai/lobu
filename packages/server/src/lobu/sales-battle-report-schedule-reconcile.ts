@@ -1,4 +1,4 @@
-import { getDb } from "../db/client.js";
+import { getDb, pgTextArray } from "../db/client.js";
 import type { ScheduledJobRow } from "../scheduled/scheduled-jobs-service.js";
 import { nextRunAt } from "../utils/cron.js";
 
@@ -135,15 +135,29 @@ export async function reconcileSalesBattleReportSchedule(
 			};
 		}
 
-		const existing = (await tx`
+		const canonicalExternalKeys = Array.from({ length: 7 }, (_, weekday) =>
+			observerExternalKey({
+				toolboxScheduleId: input.toolboxScheduleId,
+				weekday,
+			}),
+		);
+		const lockedRows = (await tx`
 			SELECT *
 			FROM scheduled_jobs
 			WHERE organization_id = ${input.organizationId}
-			  AND action_type = ${OBSERVER_ACTION_TYPE}
-			  AND action_args->>'toolboxScheduleId' = ${input.toolboxScheduleId}
+			  AND (
+				(action_type = ${OBSERVER_ACTION_TYPE}
+				 AND action_args->>'toolboxScheduleId' = ${input.toolboxScheduleId})
+				OR external_key = ANY(${pgTextArray(canonicalExternalKeys)}::text[])
+			  )
 			ORDER BY created_at ASC
 			FOR UPDATE
 		`) as unknown as ScheduledJobRow[];
+		const existing = lockedRows.filter(
+			(row) =>
+				row.action_type === OBSERVER_ACTION_TYPE &&
+				row.action_args.toolboxScheduleId === input.toolboxScheduleId,
+		);
 
 		const created: string[] = [];
 		const updated: string[] = [];
@@ -170,6 +184,19 @@ export async function reconcileSalesBattleReportSchedule(
 			};
 		}
 
+		const originalExternalKeys = new Map(
+			existing.map((row) => [row.id, row.external_key]),
+		);
+		for (const row of lockedRows) {
+			if (row.external_key === null) continue;
+			await tx`
+				UPDATE scheduled_jobs
+				SET external_key = NULL, updated_at = now()
+				WHERE id = ${row.id}
+			`;
+			row.external_key = null;
+		}
+
 		const candidatesByWeekday = new Map<number, ScheduledJobRow[]>();
 		for (const row of existing) {
 			const weekday = observerWeekday(row);
@@ -185,6 +212,24 @@ export async function reconcileSalesBattleReportSchedule(
 			for (const duplicate of duplicates) {
 				await tx`DELETE FROM scheduled_jobs WHERE id = ${duplicate.id}`;
 				deletedDuplicates.push(duplicate.id);
+			}
+		}
+
+		const repairedExternalKeys = new Set<string>();
+		for (const [weekday, survivor] of survivors) {
+			if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) continue;
+			const externalKey = observerExternalKey({
+				toolboxScheduleId: input.toolboxScheduleId,
+				weekday,
+			});
+			await tx`
+				UPDATE scheduled_jobs
+				SET external_key = ${externalKey}, updated_at = now()
+				WHERE id = ${survivor.id}
+			`;
+			survivor.external_key = externalKey;
+			if (originalExternalKeys.get(survivor.id) !== externalKey) {
+				repairedExternalKeys.add(survivor.id);
 			}
 		}
 
@@ -249,6 +294,9 @@ export async function reconcileSalesBattleReportSchedule(
 				`;
 				paused.push(survivor.id);
 			}
+		}
+		for (const id of repairedExternalKeys) {
+			if (!updated.includes(id)) updated.push(id);
 		}
 
 		await tx`
