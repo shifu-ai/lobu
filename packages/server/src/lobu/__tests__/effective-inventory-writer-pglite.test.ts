@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
+import { canonicalize } from "json-canonicalize";
 import { generateWorkerToken } from "@lobu/core";
 import { PGlite } from "@electric-sql/pglite";
 import { Hono } from "hono";
@@ -27,26 +29,27 @@ describe("worker effective inventory writer to public release readback", () => {
       CREATE TABLE public.agent_release_applies (organization_id text,agent_id text,
         applied_release_id text,applied_release_sequence bigint,status text);`);
     for (const file of [
+      "20260627120000_execution_observability.sql",
       "20260715020000_agent_effective_tool_inventory_snapshots.sql",
       "20260715030000_agent_release_capability_snapshots.sql",
     ]) {
       const source = readFileSync(
         path.resolve(__dirname, `../../../../../db/migrations/${file}`),
-        "utf8"
+        "utf8",
       );
       await pg.exec(
-        source.split("-- migrate:down")[0]!.replace("-- migrate:up", "")
+        source.split("-- migrate:down")[0]!.replace("-- migrate:up", ""),
       );
     }
     await pg.query("INSERT INTO agents VALUES($1,$2)", [ORG, AGENT]);
     await pg.query(
       "INSERT INTO public.agent_release_applies VALUES($1,$2,'release-1',1,'applied')",
-      [ORG, AGENT]
+      [ORG, AGENT],
     );
     await pg.query(
       `INSERT INTO public.agent_release_capability_snapshots VALUES
       ($1,$2,'release-1',1,$3,'["cap.v1"]',now(),now()+interval '1 hour')`,
-      [ORG, AGENT, CAP]
+      [ORG, AGENT, CAP],
     );
     const sql = tagged(pg);
     const inventoryStore = createPostgresEffectiveToolInventoryStore(sql);
@@ -73,13 +76,12 @@ describe("worker effective inventory writer to public release readback", () => {
     app.route(
       "/",
       createExecutionEventRoutes({
-        inventoryStore,
-        createTask: async (input) => ({ id: input.id }) as never,
-      })
+        sql,
+      }),
     );
     app.route(
       "/api/provisioning",
-      createProvisioningRoutes({ releaseAssuranceReadback: readback })
+      createProvisioningRoutes({ releaseAssuranceReadback: readback }),
     );
   });
   afterAll(async () => {
@@ -90,11 +92,16 @@ describe("worker effective inventory writer to public release readback", () => {
 
   it("binds token authority, full-replaces names, rejects wrong scope, and expires", async () => {
     const expiresAt = new Date(Date.now() + 800).toISOString();
-    await write(workerToken(ORG, "release-1", 1, expiresAt), [
+    await write(workerToken(ORG, "release-1", 1, expiresAt), "exec:first", [
       "kept",
       "removed",
     ]);
-    await write(workerToken(ORG, "release-1", 1, expiresAt), ["kept"]);
+    await write(workerToken(ORG, "release-1", 1, expiresAt), "exec:authority", [
+      "kept",
+    ]);
+    await write(workerToken(ORG, "release-1", 1, expiresAt), "exec:authority", [
+      "kept",
+    ]);
     expect(await inventory()).toMatchObject({
       status: "available",
       names: ["kept"],
@@ -102,20 +109,64 @@ describe("worker effective inventory writer to public release readback", () => {
       capabilitySnapshotDigest: CAP,
     });
 
-    await write(workerToken(ORG, "release-2", 2, expiresAt), ["wrong_release"], 409);
-    await write(workerToken("org-other", "release-1", 1, expiresAt), [
-      "wrong_org",
-    ], 409);
+    await write(
+      workerToken(ORG, "release-1", 1, expiresAt),
+      "exec:authority",
+      ["changed"],
+      409,
+    );
+    await write(
+      workerToken(ORG, "release-2", 2, expiresAt),
+      "exec:wrong-release",
+      ["wrong_release"],
+      409,
+    );
+    await write(
+      workerToken("org-other", "release-1", 1, expiresAt),
+      "exec:wrong-org",
+      ["wrong_org"],
+      409,
+    );
+    await write(
+      workerToken(ORG, "release-1", 1, expiresAt),
+      "exec:bad-fingerprint",
+      ["bad"],
+      409,
+      "f".repeat(64),
+    );
+    const partial = await pg.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM public.execution_tasks WHERE id='exec:bad-fingerprint'",
+    );
+    expect(partial.rows[0]?.count).toBe(0);
     expect(await inventory()).toMatchObject({
       status: "available",
       names: ["kept"],
     });
+    const replayCount = await pg.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM public.execution_tasks WHERE id='exec:authority'",
+    );
+    expect(replayCount.rows[0]?.count).toBe(1);
+    await pg.query(
+      "UPDATE public.agent_effective_tool_inventory_snapshots SET inventory_fingerprint=$1 WHERE snapshot_authority='exec:authority'",
+      [`sha256:${"e".repeat(64)}`],
+    );
+    expect(await inventory()).toMatchObject({ status: "missing", names: [] });
+    await pg.query(
+      "UPDATE public.agent_effective_tool_inventory_snapshots SET inventory_fingerprint=$1 WHERE snapshot_authority='exec:authority'",
+      [inventoryFingerprint(["kept"])],
+    );
     await new Promise((resolve) => setTimeout(resolve, 850));
     expect(await inventory()).toMatchObject({ status: "missing", names: [] });
   });
 });
 
-async function write(token: string, names: string[], expectedStatus = 200) {
+async function write(
+  token: string,
+  taskId: string,
+  names: string[],
+  expectedStatus = 200,
+  fingerprint = inventoryFingerprint(names).slice("sha256:".length),
+) {
   const response = await app.request("/internal/execution-events", {
     method: "POST",
     headers: {
@@ -124,12 +175,12 @@ async function write(token: string, names: string[], expectedStatus = 200) {
     },
     body: JSON.stringify({
       action: "create",
-      taskId: "exec:authority",
+      taskId,
       agentId: AGENT,
       conversationId: "conversation-1",
       userId: "user-1",
       metadata: {
-        effectiveToolInventory: { names, fingerprint: "b".repeat(64) },
+        effectiveToolInventory: { names, fingerprint },
       },
     }),
   });
@@ -137,7 +188,7 @@ async function write(token: string, names: string[], expectedStatus = 200) {
 }
 async function inventory() {
   const response = await app.request(
-    `/api/provisioning/agents/${AGENT}/release-assurance`
+    `/api/provisioning/agents/${AGENT}/release-assurance`,
   );
   expect(response.status).toBe(200);
   return (await response.json()).effectiveMcpToolInventory;
@@ -146,7 +197,7 @@ function workerToken(
   organizationId: string,
   releaseId: string,
   releaseSequence: number,
-  expiresAt: string
+  expiresAt: string,
 ) {
   return generateWorkerToken("user-1", "conversation-1", "deploy-1", {
     channelId: "line:U1",
@@ -178,11 +229,18 @@ function tagged(db: PGlite) {
       await db.query(
         text,
         values.map((value) =>
-          Array.isArray(value) ? JSON.stringify(value) : value
-        ) as never[]
+          Array.isArray(value) ? JSON.stringify(value) : value,
+        ) as never[],
       )
     ).rows;
   }) as any;
   sql.json = (value: unknown) => JSON.stringify(value);
+  sql.begin = async (fn: (tx: ReturnType<typeof tagged>) => Promise<unknown>) =>
+    db.transaction(async (tx) => fn(tagged(tx as unknown as PGlite)));
   return sql;
+}
+
+function inventoryFingerprint(names: string[]) {
+  const canonical = [...new Set(names.map((name) => name.trim()))].sort();
+  return `sha256:${createHash("sha256").update(canonicalize(canonical)).digest("hex")}`;
 }

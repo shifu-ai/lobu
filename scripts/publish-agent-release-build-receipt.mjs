@@ -1,4 +1,4 @@
-import { createHash, createPrivateKey, sign } from "node:crypto";
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 const required = (name) => {
@@ -87,40 +87,10 @@ async function main() {
     runAttempt: required("GITHUB_RUN_ATTEMPT"),
     keyId: required("RECEIPT_KEY_ID"),
   });
-  const key = createPrivateKey({
-    key: Buffer.from(required("RECEIPT_PRIVATE_KEY_PKCS8"), "base64"),
-    format: "der",
-    type: "pkcs8",
-  });
-  const signature = sign(null, Buffer.from(canonical(unsigned)), key).toString(
-    "base64"
-  );
-  const receipt = {
-    ...unsigned,
-    signing: { ...unsigned.signing, signature },
-  };
-  const body = canonical({ receipt });
-  const url = required("TOOLBOX_RECEIPT_INGRESS_URL");
-  const secret = required("TOOLBOX_INTERNAL_SECRET");
-  let response;
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-internal-secret": secret,
-      },
-      body,
-    });
-    if (response.ok) break;
-    if (attempt < 5)
-      await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
-  }
-  if (!response?.ok)
-    throw new Error(
-      `receipt ingress failed (${response?.status ?? "no_response"})`
-    );
-  process.stdout.write(`${canonical(receipt)}\n`);
+  const output = `${canonical(unsigned)}\n`;
+  if (Buffer.byteLength(output) > 32 * 1024)
+    throw new Error("unsigned Lobu build receipt exceeds 32 KiB");
+  process.stdout.write(output);
 }
 
 if (

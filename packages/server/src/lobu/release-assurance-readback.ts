@@ -34,13 +34,13 @@ export function evaluateQueueConsumerReadiness(
   facts: QueueConsumerLeaseFact[],
   requiredQueues: readonly string[],
   now = new Date(),
-  servingIdentity?: { revision: string; declaredImageDigest: string | null }
+  servingIdentity?: { revision: string; declaredImageDigest: string | null },
 ): QueueConsumerReadiness {
   const relevant = facts.filter((fact) =>
-    requiredQueues.includes(fact.queueName)
+    requiredQueues.includes(fact.queueName),
   );
   const active = relevant.filter(
-    (fact) => Date.parse(fact.leaseExpiresAt) > now.getTime()
+    (fact) => Date.parse(fact.leaseExpiresAt) > now.getTime(),
   );
   const reasons = new Set<QueueConsumerReadiness["reasonCodes"][number]>();
   for (const queueName of requiredQueues) {
@@ -48,7 +48,7 @@ export function evaluateQueueConsumerReadiness(
     if (queueFacts.length === 0) reasons.add("consumer_missing");
     else if (
       !queueFacts.some(
-        (fact) => Date.parse(fact.leaseExpiresAt) > now.getTime()
+        (fact) => Date.parse(fact.leaseExpiresAt) > now.getTime(),
       )
     ) {
       reasons.add("consumer_stale");
@@ -69,8 +69,8 @@ export function evaluateQueueConsumerReadiness(
     reasons.add("consumer_identity_conflict");
   const carriers = new Set(
     active.map(
-      (fact) => `${fact.deploymentRevision}\0${fact.declaredImageDigest ?? ""}`
-    )
+      (fact) => `${fact.deploymentRevision}\0${fact.declaredImageDigest ?? ""}`,
+    ),
   );
   if (carriers.size > 1) reasons.add("consumer_carrier_mismatch");
   if (
@@ -78,7 +78,7 @@ export function evaluateQueueConsumerReadiness(
     active.some(
       (fact) =>
         fact.deploymentRevision !== servingIdentity.revision ||
-        fact.declaredImageDigest !== servingIdentity.declaredImageDigest
+        fact.declaredImageDigest !== servingIdentity.declaredImageDigest,
     )
   ) {
     reasons.add("consumer_runtime_mismatch");
@@ -101,7 +101,7 @@ function iso(value: Date | string): string {
 export async function readQueueConsumerReadiness(
   sql: DbClient = getDb(),
   now = new Date(),
-  store: QueueConsumerLeaseStore = createPostgresQueueConsumerLeaseStore(sql)
+  store: QueueConsumerLeaseStore = createPostgresQueueConsumerLeaseStore(sql),
 ) {
   const runtime = getRuntimeInfo();
   const rows = await store.list(REQUIRED_RELEASE_QUEUE_NAMES);
@@ -112,12 +112,12 @@ export async function readQueueConsumerReadiness(
     {
       revision: runtime.revision,
       declaredImageDigest: runtime.declared_image_digest,
-    }
+    },
   );
   if (
     REQUIRED_RELEASE_QUEUE_NAMES.some(
       (queueName) =>
-        rows.filter((row) => row.queueName === queueName).length > 64
+        rows.filter((row) => row.queueName === queueName).length > 64,
     )
   ) {
     return {
@@ -136,7 +136,7 @@ export async function readQueueConsumerReadiness(
 
 export async function readMigrationTruth(
   sql: DbClient = getDb(),
-  observedAt = new Date()
+  observedAt = new Date(),
 ) {
   const rows = await sql<{ version: string }>`
     SELECT version FROM public.schema_migrations ORDER BY version ASC LIMIT 257
@@ -145,7 +145,7 @@ export async function readMigrationTruth(
   const versions = rows.slice(0, 256).map((row) => String(row.version));
   const historyDigest = digest(versions);
   const databaseIdentityDigest = digest(
-    databaseIdentitySubject(process.env.DATABASE_URL)
+    databaseIdentitySubject(process.env.DATABASE_URL),
   );
   return {
     status:
@@ -196,11 +196,13 @@ export async function recordAgentEffectiveToolInventoryTruth(
     observedAt?: Date;
     expiresAt?: Date;
   },
-  sql: DbClient = getDb()
+  sql: DbClient = getDb(),
 ): Promise<void> {
   const inventory = canonicalToolInventory(input.toolNames);
-  if (!/^sha256:[0-9a-f]{64}$/.test(input.fingerprint))
-    throw new Error("effective inventory fingerprint is invalid");
+  if (input.fingerprint !== inventory.fingerprint)
+    throw new Error(
+      "effective inventory fingerprint does not match tool names",
+    );
   const observedAt = input.observedAt ?? new Date();
   const expiresAt =
     input.expiresAt ?? new Date(observedAt.getTime() + 5 * 60_000);
@@ -220,24 +222,45 @@ export async function recordAgentEffectiveToolInventoryTruth(
       AND r.status='applied' AND r.applied_release_id=${input.releaseId}
       AND r.applied_release_sequence=${input.releaseSequence}
       AND c.snapshot_digest=${input.capabilitySnapshotDigest} AND c.expires_at > ${observedAt}
-    ON CONFLICT (organization_id, agent_id, snapshot_authority) DO UPDATE SET
-      release_id = EXCLUDED.release_id,
-      release_sequence = EXCLUDED.release_sequence,
-      capability_snapshot_digest = EXCLUDED.capability_snapshot_digest,
-      tool_names = EXCLUDED.tool_names,
-      inventory_fingerprint = EXCLUDED.inventory_fingerprint,
-      observed_at = EXCLUDED.observed_at,
-      expires_at = EXCLUDED.expires_at
+    ON CONFLICT (organization_id, agent_id, snapshot_authority) DO NOTHING
     RETURNING snapshot_authority
   `;
-  if (rows.length !== 1)
-    throw new Error("effective inventory authority is not current");
+  if (rows.length === 1) return;
+  const existing = await sql<{
+    release_id: string;
+    release_sequence: number | string;
+    capability_snapshot_digest: string;
+    tool_names: unknown;
+    inventory_fingerprint: string;
+  }>`
+    SELECT release_id, release_sequence, capability_snapshot_digest,
+           tool_names, inventory_fingerprint
+    FROM public.agent_effective_tool_inventory_snapshots
+    WHERE organization_id=${input.organizationId} AND agent_id=${input.agentId}
+      AND snapshot_authority=${input.snapshotAuthority}
+    LIMIT 1
+  `;
+  const row = existing[0];
+  const existingNames = Array.isArray(row?.tool_names)
+    ? row.tool_names.filter((name): name is string => typeof name === "string")
+    : [];
+  if (
+    !row ||
+    row.release_id !== input.releaseId ||
+    Number(row.release_sequence) !== input.releaseSequence ||
+    row.capability_snapshot_digest !== input.capabilitySnapshotDigest ||
+    row.inventory_fingerprint !== inventory.fingerprint ||
+    canonicalize(canonicalToolInventory(existingNames).names) !==
+      canonicalize(inventory.names)
+  ) {
+    throw new Error("effective inventory authority conflicts with prior write");
+  }
 }
 
 export async function readRuntimeReleaseAssurance(
   sql: DbClient = getDb(),
   now = new Date(),
-  leaseStore?: QueueConsumerLeaseStore
+  leaseStore?: QueueConsumerLeaseStore,
 ) {
   const runtime = getRuntimeInfo();
   const [queueConsumer, migration] = await Promise.all([
@@ -263,7 +286,7 @@ export async function readRuntimeReleaseAssurance(
 
 export async function readAgentToolInventoryTruth(
   input: { organizationId: string; agentId: string },
-  sql: DbClient = getDb()
+  sql: DbClient = getDb(),
 ) {
   const rows = await sql<{
     tool_names: unknown;
@@ -305,8 +328,8 @@ export async function readAgentToolInventoryTruth(
     .filter((name): name is string => typeof name === "string");
   try {
     const inventory = canonicalToolInventory(rawNames);
-    if (!/^sha256:[0-9a-f]{64}$/.test(rows[0]!.inventory_fingerprint))
-      throw new Error("invalid fingerprint");
+    if (rows[0]!.inventory_fingerprint !== inventory.fingerprint)
+      throw new Error("inventory fingerprint mismatch");
     return {
       status: "available" as const,
       names: inventory.names,
@@ -333,7 +356,7 @@ export async function readAgentToolInventoryTruth(
 
 export interface EffectiveToolInventoryStore {
   write(
-    input: Parameters<typeof recordAgentEffectiveToolInventoryTruth>[0]
+    input: Parameters<typeof recordAgentEffectiveToolInventoryTruth>[0],
   ): Promise<void>;
   read(input: {
     organizationId: string;
@@ -342,7 +365,7 @@ export interface EffectiveToolInventoryStore {
 }
 
 export function createPostgresEffectiveToolInventoryStore(
-  sql: DbClient
+  sql: DbClient,
 ): EffectiveToolInventoryStore {
   return {
     write: (input) => recordAgentEffectiveToolInventoryTruth(input, sql),
@@ -352,7 +375,7 @@ export function createPostgresEffectiveToolInventoryStore(
 
 export async function readAgentCapabilitySnapshotTruth(
   input: { organizationId: string; agentId: string },
-  sql: DbClient = getDb()
+  sql: DbClient = getDb(),
 ) {
   const rows = await sql<{
     release_id: string;
@@ -405,7 +428,7 @@ export function createReleaseAssuranceReadback(input: {
       readRuntimeReleaseAssurance(
         sql(),
         input.now?.() ?? new Date(),
-        input.leaseStore
+        input.leaseStore,
       ),
     readAgent: async (query: { organizationId: string; agentId: string }) => {
       const base = await input.findAgentBase(query);

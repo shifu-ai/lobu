@@ -195,16 +195,96 @@ jobs:
       - name: Verify immutable app image is pullable
         run: docker manifest inspect ghcr.io/shifu-ai/lobu-app@${{ steps.push-app.outputs.digest }} > /dev/null
 
-      - name: Sign and publish Lobu build artifact receipt
+      - name: Produce bounded unsigned Lobu build receipt
         env:
           IMAGE_DIGEST: ${{ steps.push-app.outputs.digest }}
           IMAGE_REFERENCE: ghcr.io/shifu-ai/lobu-app@${{ steps.push-app.outputs.digest }}
           BUILD_TIME: ${{ needs.generate-tag.outputs.build_time }}
-          RECEIPT_KEY_ID: ${{ secrets.AGENT_RELEASE_LOBU_BUILD_RECEIPT_KEY_ID }}
+          RECEIPT_KEY_ID: lobu-build-key-v1
+        run: |
+          node scripts/publish-agent-release-build-receipt.mjs > lobu-app-unsigned-build-receipt.json
+          test "$(wc -c < lobu-app-unsigned-build-receipt.json)" -le 32768
+
+      - name: Upload bounded unsigned Lobu build receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: lobu-app-unsigned-build-receipt
+          path: lobu-app-unsigned-build-receipt.json
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-lobu-build-receipt:
+    needs: [build-app]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: none
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lobu-app-unsigned-build-receipt
+      - name: Strictly validate and sign bounded receipt without repository code
+        env:
           RECEIPT_PRIVATE_KEY_PKCS8: ${{ secrets.AGENT_RELEASE_LOBU_BUILD_RECEIPT_PRIVATE_KEY_PKCS8 }}
-          TOOLBOX_RECEIPT_INGRESS_URL: https://api.shifu-ai.org/agent-workbench/internal/agent-release-deployment-receipts
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { createHash, createPrivateKey, sign } = require('node:crypto');
+          const path = 'lobu-app-unsigned-build-receipt.json';
+          if (fs.statSync(path).size > 32768) throw new Error('unsigned receipt too large');
+          const receipt = JSON.parse(fs.readFileSync(path, 'utf8'));
+          const keys = x => Object.keys(x).sort().join(',');
+          const expected = 'artifactDigest,artifactIdentity,buildIdentityDigest,buildTime,dependencyId,expiresAt,observedAt,origin,provenance,provides,receiptKind,requires,scope,signing,sourceRevision';
+          if (!receipt || Array.isArray(receipt) || keys(receipt) !== expected) throw new Error('closed receipt schema required');
+          if (keys(receipt.provenance) !== 'breakGlass,conclusion,environmentProtected,provider,ref,repository,runAttempt,runId,workflow') throw new Error('closed provenance schema required');
+          if (keys(receipt.signing) !== 'algorithm,keyId,purpose') throw new Error('closed signing schema required');
+          if (receipt.receiptKind !== 'build_artifact' || receipt.scope !== 'global' || receipt.dependencyId !== 'lobu-runtime') throw new Error('invalid receipt identity');
+          if (!/^sha256:[0-9a-f]{64}$/.test(receipt.artifactDigest) || receipt.artifactIdentity !== `ghcr.io/shifu-ai/lobu-app@${receipt.artifactDigest}`) throw new Error('invalid OCI digest binding');
+          if (!/^[0-9a-f]{40}$/.test(receipt.sourceRevision) || receipt.origin !== 'ghcr.io/shifu-ai/lobu-app') throw new Error('invalid source identity');
+          if (receipt.provenance.repository !== 'shifu-ai/lobu' || receipt.provenance.workflow !== '.github/workflows/build-images.yml' || receipt.provenance.ref !== 'refs/heads/main' || receipt.provenance.conclusion !== 'success' || receipt.provenance.environmentProtected !== true || receipt.provenance.breakGlass !== false) throw new Error('invalid provenance');
+          if (receipt.signing.algorithm !== 'Ed25519' || receipt.signing.purpose !== 'lobu_build_artifact_receipt') throw new Error('invalid signing policy');
+          if (!Array.isArray(receipt.provides) || receipt.provides.join(',') !== 'agent-release.readiness.v1' || !Array.isArray(receipt.requires) || receipt.requires.length) throw new Error('invalid capability contract');
+          if (Date.parse(receipt.expiresAt) - Date.parse(receipt.observedAt) !== 172800000) throw new Error('invalid receipt lifetime');
+          const canonical = value => JSON.stringify(value, (_k, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a],[b]) => a.localeCompare(b))) : item);
+          const expectedBuildIdentity = `sha256:${createHash('sha256').update(canonical({sourceRevision:receipt.sourceRevision,buildTime:receipt.buildTime,imageDigest:receipt.artifactDigest,capabilities:receipt.provides})).digest('hex')}`;
+          if (receipt.buildIdentityDigest !== expectedBuildIdentity) throw new Error('invalid build identity digest');
+          const key = createPrivateKey({ key: Buffer.from(process.env.RECEIPT_PRIVATE_KEY_PKCS8, 'base64'), format: 'der', type: 'pkcs8' });
+          receipt.signing.signature = sign(null, Buffer.from(canonical(receipt)), key).toString('base64');
+          const output = canonical(receipt) + '\n';
+          if (Buffer.byteLength(output) > 32768) throw new Error('signed receipt too large');
+          fs.writeFileSync('lobu-app-signed-build-receipt.json', output, { flag: 'wx' });
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lobu-app-signed-build-receipt
+          path: lobu-app-signed-build-receipt.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-lobu-build-receipt:
+    needs: [sign-lobu-build-receipt]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: none
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lobu-app-signed-build-receipt
+      - name: Publish signed receipt without signing key
+        env:
           TOOLBOX_INTERNAL_SECRET: ${{ secrets.TOOLBOX_INTERNAL_SECRET }}
-        run: node scripts/publish-agent-release-build-receipt.mjs > lobu-app-signed-build-receipt.json
+          TOOLBOX_RECEIPT_INGRESS_URL: https://api.shifu-ai.org/agent-workbench/internal/agent-release-deployment-receipts
+        run: |
+          test "$(wc -c < lobu-app-signed-build-receipt.json)" -le 32768
+          jq -e 'has("signing") and (.signing.signature | type == "string")' lobu-app-signed-build-receipt.json >/dev/null
+          body="$(jq -c '{receipt:.}' lobu-app-signed-build-receipt.json)"
+          for attempt in 1 2 3 4 5; do
+            code="$(curl -sS -o /tmp/receipt-response -w '%{http_code}' -X POST "$TOOLBOX_RECEIPT_INGRESS_URL" -H 'content-type: application/json' -H "x-internal-secret: $TOOLBOX_INTERNAL_SECRET" --data-binary "$body")"
+            test "$code" -ge 200 && test "$code" -lt 300 && exit 0
+            sleep "$attempt"
+          done
+          exit 1
 
   build-worker:
     runs-on: ubuntu-latest
@@ -332,7 +412,14 @@ jobs:
   # repo secret; if unset the curl is skipped, never failing the job.
   notify-failure:
     runs-on: ubuntu-latest
-    needs: [generate-tag, connector-parity-smoke, build-worker, build-embeddings-service, build-app]
+    needs:
+      [
+        generate-tag,
+        connector-parity-smoke,
+        build-worker,
+        build-embeddings-service,
+        build-app,
+      ]
     if: failure() && github.ref == 'refs/heads/main'
     permissions:
       contents: read

@@ -2,6 +2,7 @@ import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
 import {
   createExecutionTask,
+  createExecutionTaskIdempotent,
   getExecutionTaskStatus,
   recordExecutionEvent,
   type ExecutionTaskStatus,
@@ -12,6 +13,7 @@ import type { WorkerContext } from "./types.js";
 import { getDb } from "../../../db/client.js";
 import {
   createPostgresEffectiveToolInventoryStore,
+  recordAgentEffectiveToolInventoryTruth,
   type EffectiveToolInventoryStore,
 } from "../../../lobu/release-assurance-readback.js";
 
@@ -34,7 +36,7 @@ function readNonEmptyString(value: unknown): string | null {
 }
 
 function readOptionalRecord(
-  value: unknown
+  value: unknown,
 ): Record<string, unknown> | undefined {
   return value === undefined ? undefined : isRecord(value) ? value : undefined;
 }
@@ -48,7 +50,7 @@ function readOptionalStatus(value: unknown): ExecutionTaskStatus | undefined {
 
 function workerScopeMatches(
   worker: WorkerContext["Variables"]["worker"],
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
 ): boolean {
   const conversationId = readNonEmptyString(body.conversationId);
   const agentId = readNonEmptyString(body.agentId);
@@ -72,7 +74,7 @@ function taskScopeMatchesWorker(
     agentId: string;
     conversationId: string | null;
     userId: string | null;
-  }
+  },
 ): boolean {
   if (worker.agentId && task.agentId !== worker.agentId) {
     return false;
@@ -90,7 +92,8 @@ export function createExecutionEventRoutes(
   options: {
     inventoryStore?: EffectiveToolInventoryStore;
     createTask?: typeof createExecutionTask;
-  } = {}
+    sql?: ReturnType<typeof getDb>;
+  } = {},
 ): Hono<WorkerContext> {
   const router = new Hono<WorkerContext>();
 
@@ -102,14 +105,14 @@ export function createExecutionEventRoutes(
         return errorResponse(
           c,
           "Execution event request must be an object",
-          400
+          400,
         );
       }
       if (!workerScopeMatches(worker, body)) {
         return errorResponse(
           c,
           "Execution event identity does not match worker token",
-          400
+          400,
         );
       }
 
@@ -119,7 +122,7 @@ export function createExecutionEventRoutes(
         return errorResponse(
           c,
           "Execution event request requires action and taskId",
-          400
+          400,
         );
       }
 
@@ -128,7 +131,7 @@ export function createExecutionEventRoutes(
         if (!agentId) {
           return errorResponse(c, "Execution task requires agentId", 400);
         }
-        const task = await (options.createTask ?? createExecutionTask)({
+        const taskInput = {
           id: taskId,
           agentId,
           sessionId: readNonEmptyString(body.sessionId),
@@ -139,32 +142,71 @@ export function createExecutionEventRoutes(
             readNonEmptyString(body.source) ?? worker.platform ?? "worker",
           status: readOptionalStatus(body.status) ?? "running",
           metadata: readOptionalRecord(body.metadata) ?? {},
-        });
+        };
         const inventory = readEffectiveInventory(body.metadata);
         if (inventory) {
-          if (!worker.organizationId || !worker.agentId || worker.releaseState?.status !== "active") {
-            return errorResponse(c, "Effective inventory authority is not active", 403);
+          if (
+            !worker.organizationId ||
+            !worker.agentId ||
+            worker.releaseState?.status !== "active"
+          ) {
+            return errorResponse(
+              c,
+              "Effective inventory authority is not active",
+              403,
+            );
           }
           const claim = worker.releaseState.claim;
+          const inventoryInput = {
+            organizationId: worker.organizationId,
+            agentId: worker.agentId,
+            releaseId: claim.releaseId,
+            releaseSequence: claim.releaseSequence,
+            capabilitySnapshotDigest: claim.snapshotDigest,
+            snapshotAuthority: taskId,
+            toolNames: inventory.names,
+            fingerprint: inventory.fingerprint,
+            expiresAt: new Date(
+              Math.min(Date.parse(claim.expiresAt), Date.now() + 5 * 60_000),
+            ),
+          };
           try {
-            await (options.inventoryStore ?? createPostgresEffectiveToolInventoryStore(getDb())).write({
-              organizationId: worker.organizationId,
-              agentId: worker.agentId,
-              releaseId: claim.releaseId,
-              releaseSequence: claim.releaseSequence,
-              capabilitySnapshotDigest: claim.snapshotDigest,
-              snapshotAuthority: taskId,
-              toolNames: inventory.names,
-              fingerprint: inventory.fingerprint,
-              expiresAt: new Date(
-                Math.min(Date.parse(claim.expiresAt), Date.now() + 5 * 60_000)
-              ),
-            });
+            let task;
+            if (options.createTask || options.inventoryStore) {
+              task = await (options.createTask ?? createExecutionTask)(
+                taskInput,
+              );
+              await (
+                options.inventoryStore ??
+                createPostgresEffectiveToolInventoryStore(getDb())
+              ).write(inventoryInput);
+            } else {
+              const sql = options.sql ?? getDb();
+              task = await sql.begin(async (tx) => {
+                const created = await createExecutionTaskIdempotent(
+                  taskInput,
+                  tx,
+                );
+                await recordAgentEffectiveToolInventoryTruth(
+                  inventoryInput,
+                  tx,
+                );
+                return created;
+              });
+            }
+            return c.json({ success: true, taskId: task.id });
           } catch (error) {
             logger.warn("Rejected effective tool inventory snapshot:", error);
-            return errorResponse(c, "Effective inventory authority is not current", 409);
+            return errorResponse(
+              c,
+              "Effective inventory authority is not current",
+              409,
+            );
           }
         }
+        const task = await (
+          options.createTask ?? createExecutionTaskIdempotent
+        )(taskInput);
         return c.json({ success: true, taskId: task.id });
       }
 
@@ -181,7 +223,7 @@ export function createExecutionEventRoutes(
           return errorResponse(
             c,
             "Execution task does not match worker token",
-            403
+            403,
           );
         }
         const event = await recordExecutionEvent({
@@ -212,7 +254,7 @@ export function createExecutionEventRoutes(
 }
 
 function readEffectiveInventory(
-  metadata: unknown
+  metadata: unknown,
 ): { names: string[]; fingerprint: string } | null {
   if (!isRecord(metadata) || !isRecord(metadata.effectiveToolInventory))
     return null;

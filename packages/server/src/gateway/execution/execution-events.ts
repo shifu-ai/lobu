@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { canonicalize } from "json-canonicalize";
 import { getDb, type DbClient } from "../../db/client.js";
 
 export type ExecutionTaskStatus =
@@ -158,14 +159,14 @@ function boundedJson(value: unknown): unknown {
 }
 
 function boundedPayload(
-  value: Record<string, unknown> | undefined
+  value: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
   return boundedJson(value ?? {}) as Record<string, unknown>;
 }
 
 export async function createExecutionTask(
   input: CreateExecutionTaskInput,
-  sql: DbClient = getDb()
+  sql: DbClient = getDb(),
 ): Promise<ExecutionTask> {
   const id = input.id ?? randomUUID();
   const rows = await sql<ExecutionTaskRow>`
@@ -194,11 +195,49 @@ export async function createExecutionTask(
   return mapTaskRow(rows[0]);
 }
 
+/** Creates once; an exact replay returns the original task and drift fails closed. */
+export async function createExecutionTaskIdempotent(
+  input: CreateExecutionTaskInput,
+  sql: DbClient = getDb(),
+): Promise<ExecutionTask> {
+  if (!input.id) return createExecutionTask(input, sql);
+  const rows = await sql<ExecutionTaskRow>`
+    INSERT INTO public.execution_tasks (
+      id, agent_id, session_id, conversation_id, user_id, source, status, metadata
+    ) VALUES (
+      ${input.id}, ${input.agentId}, ${input.sessionId ?? null},
+      ${input.conversationId ?? null}, ${input.userId ?? null},
+      ${input.source ?? "unknown"}, ${input.status ?? "running"},
+      ${sql.json(input.metadata ?? {})}
+    )
+    ON CONFLICT (id) DO NOTHING
+    RETURNING *
+  `;
+  if (rows[0]) return mapTaskRow(rows[0]);
+  const existing = await sql<ExecutionTaskRow>`
+    SELECT * FROM public.execution_tasks WHERE id=${input.id} LIMIT 1
+  `;
+  const row = existing[0];
+  if (
+    !row ||
+    row.agent_id !== input.agentId ||
+    row.session_id !== (input.sessionId ?? null) ||
+    row.conversation_id !== (input.conversationId ?? null) ||
+    row.user_id !== (input.userId ?? null) ||
+    row.source !== (input.source ?? "unknown") ||
+    row.status !== (input.status ?? "running") ||
+    canonicalize(row.metadata ?? {}) !== canonicalize(input.metadata ?? {})
+  ) {
+    throw new Error("execution task replay conflicts with prior write");
+  }
+  return mapTaskRow(row);
+}
+
 export async function updateExecutionTaskStatus(
   taskId: string,
   status: ExecutionTaskStatus,
   updates: { finalSummary?: unknown; error?: unknown } = {},
-  sql: DbClient = getDb()
+  sql: DbClient = getDb(),
 ): Promise<ExecutionTask> {
   const completedAt = isTerminalStatus(status) ? new Date() : null;
   const statusIsTerminal = isTerminalStatus(status);
@@ -207,7 +246,9 @@ export async function updateExecutionTaskStatus(
       ? undefined
       : boundedJson(updates.finalSummary ?? null);
   const error =
-    updates.error === undefined ? undefined : boundedJson(updates.error ?? null);
+    updates.error === undefined
+      ? undefined
+      : boundedJson(updates.error ?? null);
   const rows = await sql<ExecutionTaskRow>`
     UPDATE public.execution_tasks
     SET
@@ -250,7 +291,7 @@ export async function updateExecutionTaskStatus(
 
 export async function recordExecutionEvent(
   input: RecordExecutionEventInput,
-  sql: DbClient = getDb()
+  sql: DbClient = getDb(),
 ): Promise<ExecutionEvent> {
   return sql.begin(async (tx) => {
     const existing = await tx<{ id: string }>`
@@ -287,7 +328,7 @@ export async function recordExecutionEvent(
           finalSummary: input.finalSummary,
           error: input.error,
         },
-        tx
+        tx,
       );
     } else {
       await tx`
@@ -304,7 +345,7 @@ export async function recordExecutionEvent(
 export async function getExecutionTaskStatus(
   taskId: string,
   options: { afterEventId?: number; limit?: number } = {},
-  sql: DbClient = getDb()
+  sql: DbClient = getDb(),
 ): Promise<ExecutionTaskStatusSnapshot | null> {
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
   const taskRows = await sql<ExecutionTaskRow>`

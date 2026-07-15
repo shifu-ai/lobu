@@ -9,17 +9,17 @@ describe("app image build receipt workflow", () => {
     const workflow = readFileSync(
       path.resolve(
         __dirname,
-        "../../../../../.github/workflows/build-images.yml"
+        "../../../../../.github/workflows/build-images.yml",
       ),
-      "utf8"
+      "utf8",
     );
     expect(workflow).toContain("id: push-app");
     expect(workflow).toContain("APP_GIT_SHA=${{ github.sha }}");
     expect(workflow).toContain(
-      "APP_BUILD_TIME=${{ needs.generate-tag.outputs.build_time }}"
+      "APP_BUILD_TIME=${{ needs.generate-tag.outputs.build_time }}",
     );
     expect(workflow).toContain(
-      `build_time=$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')`
+      `build_time=$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')`,
     );
     expect(workflow).not.toContain("%Y-%m-%dT%H:%M:%SZ");
     expect(workflow).toContain("${{ steps.push-app.outputs.digest }}");
@@ -27,29 +27,43 @@ describe("app image build receipt workflow", () => {
     expect(workflow).toContain("actions/upload-artifact@v4");
     expect(workflow).toContain("Verify immutable app image is pullable");
     expect(workflow).toContain("publish-agent-release-build-receipt.mjs");
-    expect(workflow).toContain(
-      "AGENT_RELEASE_LOBU_BUILD_RECEIPT_PRIVATE_KEY_PKCS8"
+    expect(workflow).toContain("sign-lobu-build-receipt:");
+    expect(workflow).toContain("publish-lobu-build-receipt:");
+    const buildJob = workflow.slice(
+      workflow.indexOf("  build-app:"),
+      workflow.indexOf("  sign-lobu-build-receipt:"),
     );
+    expect(buildJob).not.toContain("RECEIPT_PRIVATE_KEY_PKCS8");
+    const signerJob = workflow.slice(
+      workflow.indexOf("  sign-lobu-build-receipt:"),
+      workflow.indexOf("  publish-lobu-build-receipt:"),
+    );
+    expect(signerJob).not.toContain("actions/checkout");
+    expect(signerJob).not.toContain("publish-agent-release-build-receipt.mjs");
+    expect(signerJob).not.toContain("TOOLBOX_INTERNAL_SECRET");
+    const publisherJob = workflow.slice(
+      workflow.indexOf("  publish-lobu-build-receipt:"),
+      workflow.indexOf("  build-worker:"),
+    );
+    expect(publisherJob).not.toContain("RECEIPT_PRIVATE_KEY_PKCS8");
     const producer = readFileSync(
       path.resolve(
         __dirname,
-        "../../../../../scripts/publish-agent-release-build-receipt.mjs"
+        "../../../../../scripts/publish-agent-release-build-receipt.mjs",
       ),
-      "utf8"
+      "utf8",
     );
     expect(producer).toContain('purpose: "lobu_build_artifact_receipt"');
     expect(producer).toContain('scope: "global"');
     expect(producer).not.toContain('environment: "production"');
     expect(producer).toContain("imageDigest: artifactDigest");
     expect(producer).toContain(
-      'workflow: ".github/workflows/build-images.yml"'
+      'workflow: ".github/workflows/build-images.yml"',
     );
-    expect(producer).toContain(
-      "for (let attempt = 1; attempt <= 5; attempt++)"
-    );
-    expect(producer).toContain('"x-internal-secret": secret');
+    expect(producer).not.toContain("createPrivateKey");
+    expect(producer).not.toContain("TOOLBOX_INTERNAL_SECRET");
     expect(workflow).not.toContain(
-      "APP_DECLARED_IMAGE_DIGEST=${{ steps.push-app.outputs.digest }}"
+      "APP_DECLARED_IMAGE_DIGEST=${{ steps.push-app.outputs.digest }}",
     );
   });
 
@@ -82,7 +96,7 @@ describe("app image build receipt workflow", () => {
         "observedAt",
         "expiresAt",
         "signing",
-      ].sort()
+      ].sort(),
     );
     expect(receipt).not.toHaveProperty("capabilities");
     expect(receipt.provides).toEqual(["agent-release.readiness.v1"]);
@@ -98,7 +112,7 @@ describe("app image build receipt workflow", () => {
         runId: "123",
         runAttempt: "2",
         keyId: "lobu-build-key-v1",
-      })
+      }),
     ).toThrow(/build time identity/);
   });
 });
