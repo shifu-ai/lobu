@@ -265,7 +265,14 @@ export function createProvisioningRoutes(
 
 			let body: Partial<ReconcileSalesBattleReportScheduleInput>;
 			try {
-				body = await c.req.json();
+				const parsed: unknown = await c.req.json();
+				if (!isObject(parsed)) {
+					return c.json(
+						{ error: "invalid_sales_battle_report_schedule" },
+						400,
+					);
+				}
+				body = parsed;
 			} catch {
 				return c.json({ error: "invalid_json" }, 400);
 			}

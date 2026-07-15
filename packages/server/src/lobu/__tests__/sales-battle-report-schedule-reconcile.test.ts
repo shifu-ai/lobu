@@ -114,4 +114,20 @@ describe("sales battle report schedule reconciliation", () => {
 		});
 		expect(body.observerRefs).toEqual([rows[0].id]);
 	});
+
+	test("returns validation error for a JSON null body", async () => {
+		const response = await buildApp().request(
+			"/api/provisioning/sales-battle-report-schedules/sales_battle_report_schedule_001",
+			{
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: "null",
+			},
+		);
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({
+			error: "invalid_sales_battle_report_schedule",
+		});
+	});
 });
