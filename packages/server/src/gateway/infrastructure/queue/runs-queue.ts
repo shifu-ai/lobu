@@ -24,9 +24,9 @@ import * as Sentry from "@sentry/node";
 import { getDb, getDbListener, type DbClient } from "../../../db/client.js";
 import { incrementCounter } from "../../metrics/prometheus.js";
 import {
-  expireQueueConsumerLease,
+  createPostgresQueueConsumerLeaseStore,
   QUEUE_CONSUMER_HEARTBEAT_MS,
-  recordQueueConsumerHeartbeat,
+  type QueueConsumerLeaseStore,
 } from "./queue-consumer-lease.js";
 import type {
   IMessageQueue,
@@ -59,7 +59,7 @@ export const MIN_DISPATCH_RECEIPT_RETENTION_DAYS = 30;
 function queueBreadcrumb(
   category: string,
   message: string,
-  data: Record<string, unknown>,
+  data: Record<string, unknown>
 ): void {
   try {
     Sentry.addBreadcrumb({
@@ -158,13 +158,45 @@ export class RunsQueue implements IMessageQueue {
    */
   private readonly claimedBy: string;
   private readonly consumerStartedAt = new Date();
-  private readonly consumerLeaseTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private readonly consumerLeaseTimers = new Map<
+    string,
+    ReturnType<typeof setInterval>
+  >();
+  private readonly database: () => DbClient;
+  private readonly listener: () => ReturnType<typeof getDbListener>;
+  private readonly leaseStore: QueueConsumerLeaseStore;
+  private readonly leaseClock: {
+    now(): Date;
+    setInterval(
+      callback: () => void,
+      ms: number
+    ): ReturnType<typeof setInterval>;
+    clearInterval(timer: ReturnType<typeof setInterval>): void;
+  };
 
-  constructor() {
-    if (!process.env.DATABASE_URL) {
+  constructor(
+    options: {
+      database?: () => DbClient;
+      listener?: () => ReturnType<typeof getDbListener>;
+      leaseStore?: QueueConsumerLeaseStore;
+      consumerId?: string;
+      leaseClock?: RunsQueue["leaseClock"];
+    } = {}
+  ) {
+    if (!process.env.DATABASE_URL && !options.database) {
       throw new Error("RunsQueue: DATABASE_URL is required");
     }
-    this.claimedBy = `gateway-${randomUUID()}`;
+    this.database = options.database ?? getDb;
+    this.listener = options.listener ?? getDbListener;
+    this.leaseStore =
+      options.leaseStore ??
+      createPostgresQueueConsumerLeaseStore(this.database());
+    this.leaseClock = options.leaseClock ?? {
+      now: () => new Date(),
+      setInterval,
+      clearInterval,
+    };
+    this.claimedBy = options.consumerId ?? `gateway-${randomUUID()}`;
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -185,7 +217,7 @@ export class RunsQueue implements IMessageQueue {
 
   /** At startup, reset rows orphaned by a hard crash. */
   private async recoverStaleClaimedRowsOnStartup(): Promise<void> {
-    const sql = getDb();
+    const sql = this.database();
     try {
       const recoveryWindowMs = CLAIM_VISIBILITY_TIMEOUT_MS * 2;
       const result = await sql`
@@ -202,13 +234,11 @@ export class RunsQueue implements IMessageQueue {
       `;
       if (result.count > 0) {
         logger.warn(
-          `Startup recovery: reclaimed ${result.count} stale runs orphaned by crash`,
+          `Startup recovery: reclaimed ${result.count} stale runs orphaned by crash`
         );
       }
     } catch (err) {
-      logger.warn(
-        `Startup recovery scan failed: ${(err as Error).message}`,
-      );
+      logger.warn(`Startup recovery scan failed: ${(err as Error).message}`);
     }
   }
 
@@ -228,7 +258,7 @@ export class RunsQueue implements IMessageQueue {
     while (Date.now() - drainStart < SHUTDOWN_DRAIN_MS) {
       const inFlight = Array.from(this.workers.values()).reduce(
         (sum, w) => sum + w.active,
-        0,
+        0
       );
       if (inFlight === 0) break;
       await new Promise((r) => setTimeout(r, 50));
@@ -239,7 +269,7 @@ export class RunsQueue implements IMessageQueue {
     // sweeper. Filter by our per-process claim identity so a sibling pod's
     // in-flight claims aren't released out from under it.
     try {
-      const sql = getDb();
+      const sql = this.database();
       const result = await sql`
         UPDATE public.runs
         SET status = 'pending',
@@ -249,25 +279,24 @@ export class RunsQueue implements IMessageQueue {
           AND status = 'claimed'
       `;
       if (result.count > 0) {
-        logger.info(
-          `Released ${result.count} claimed run(s) on shutdown`,
-        );
+        logger.info(`Released ${result.count} claimed run(s) on shutdown`);
       }
     } catch (err) {
       logger.warn(
-        `Failed to release claimed rows on shutdown: ${(err as Error).message}`,
+        `Failed to release claimed rows on shutdown: ${(err as Error).message}`
       );
     }
 
     this.workers.clear();
     this.subscribersByChannel.clear();
 
-    const leaseSql = getDb();
     for (const [queueName, timer] of this.consumerLeaseTimers) {
-      clearInterval(timer);
-      await expireQueueConsumerLease(leaseSql, queueName, this.claimedBy).catch((err) => {
-        logger.warn({ queueName, err }, "queue consumer lease expiry failed");
-      });
+      this.leaseClock.clearInterval(timer);
+      await this.leaseStore
+        .expire(queueName, this.claimedBy, this.leaseClock.now())
+        .catch((err) => {
+          logger.warn({ queueName, err }, "queue consumer lease expiry failed");
+        });
     }
     this.consumerLeaseTimers.clear();
 
@@ -305,7 +334,7 @@ export class RunsQueue implements IMessageQueue {
   async send<T>(
     queueName: string,
     data: T,
-    options?: QueueOptions,
+    options?: QueueOptions
   ): Promise<string> {
     return (await this.sendWithDisposition(queueName, data, options)).jobId;
   }
@@ -313,7 +342,7 @@ export class RunsQueue implements IMessageQueue {
   async sendDurable<T>(
     queueName: string,
     data: T,
-    options: QueueOptions & { singletonKey: string },
+    options: QueueOptions & { singletonKey: string }
   ): Promise<{ jobId: string; deduplicated: boolean }> {
     return this.sendWithDisposition(queueName, data, {
       ...options,
@@ -324,7 +353,7 @@ export class RunsQueue implements IMessageQueue {
   private async sendWithDisposition<T>(
     queueName: string,
     data: T,
-    options?: QueueOptions,
+    options?: QueueOptions
   ): Promise<{ jobId: string; deduplicated: boolean }> {
     if (!this.isConnected) throw new Error("RunsQueue not started");
     if (this.shuttingDown) {
@@ -338,14 +367,16 @@ export class RunsQueue implements IMessageQueue {
     const retryDelaySeconds = options?.retryDelay ?? null;
     const expireInSeconds = options?.expireInSeconds;
     const actionKey = options?.actionKey ?? null;
-    const runAtSql = delayMs > 0
-      ? `now() + ${Number(delayMs) / 1000}::float * interval '1 second'`
-      : "now()";
-    const expiresAtSql = expireInSeconds && expireInSeconds > 0
-      ? `now() + ${Number(expireInSeconds)}::int * interval '1 second'`
-      : "NULL";
+    const runAtSql =
+      delayMs > 0
+        ? `now() + ${Number(delayMs) / 1000}::float * interval '1 second'`
+        : "now()";
+    const expiresAtSql =
+      expireInSeconds && expireInSeconds > 0
+        ? `now() + ${Number(expireInSeconds)}::int * interval '1 second'`
+        : "NULL";
 
-    const sql = getDb();
+    const sql = this.database();
     // Pass the payload object through postgres-js's `sql.json()` helper so
     // the driver sends it as a single-encoded JSONB value. The previous
     // shape — `JSON.stringify(data)` bound to a `$4::jsonb` parameter via
@@ -391,12 +422,21 @@ export class RunsQueue implements IMessageQueue {
           RETURNING idempotency_key
         `;
         if (receipt.length === 0) {
-          const existing = await tx<{ run_id: number | string | null; queue_name:string; organization_id:string|null }>`
+          const existing = await tx<{
+            run_id: number | string | null;
+            queue_name: string;
+            organization_id: string | null;
+          }>`
             SELECT run_id, queue_name, organization_id FROM public.queue_dispatch_receipts
             WHERE idempotency_key = ${idempotencyKey}
             LIMIT 1
           `;
-          if (!existing[0] || existing[0].queue_name !== queueName || existing[0].organization_id !== organizationIdFromPayload) throw new Error("Durable dispatch receipt scope collision");
+          if (
+            !existing[0] ||
+            existing[0].queue_name !== queueName ||
+            existing[0].organization_id !== organizationIdFromPayload
+          )
+            throw new Error("Durable dispatch receipt scope collision");
           return {
             jobId: String(existing[0]?.run_id ?? `receipt:${idempotencyKey}`),
             deduplicated: true,
@@ -444,7 +484,7 @@ export class RunsQueue implements IMessageQueue {
           priority,
           retryDelaySeconds,
           organizationIdFromPayload,
-        ],
+        ]
       );
 
       if (result.length === 0 && idempotencyKey) {
@@ -455,8 +495,9 @@ export class RunsQueue implements IMessageQueue {
           ORDER BY id DESC
           LIMIT 1
         `;
-        const existingId=String(existing[0]?.id??"");
-        if(options?.durableSingleton&&durableReceiptCreated&&existingId)await tx`UPDATE public.queue_dispatch_receipts SET run_id=${Number(existingId)} WHERE idempotency_key=${idempotencyKey} AND queue_name=${queueName} AND organization_id IS NOT DISTINCT FROM ${organizationIdFromPayload}`;
+        const existingId = String(existing[0]?.id ?? "");
+        if (options?.durableSingleton && durableReceiptCreated && existingId)
+          await tx`UPDATE public.queue_dispatch_receipts SET run_id=${Number(existingId)} WHERE idempotency_key=${idempotencyKey} AND queue_name=${queueName} AND organization_id IS NOT DISTINCT FROM ${organizationIdFromPayload}`;
         return { jobId: existingId, deduplicated: true };
       }
       const insertedId = String(result[0]?.id ?? "");
@@ -472,7 +513,7 @@ export class RunsQueue implements IMessageQueue {
       await sql`SELECT pg_notify(${notifyChannelFor(queueName)}, ${queueName})`;
     } catch (err) {
       logger.warn(
-        `pg_notify failed for ${queueName}: ${(err as Error).message}`,
+        `pg_notify failed for ${queueName}: ${(err as Error).message}`
       );
     }
 
@@ -492,7 +533,7 @@ export class RunsQueue implements IMessageQueue {
   async work<T>(
     queueName: string,
     handler: JobHandler<T>,
-    options?: { startPaused?: boolean },
+    options?: { startPaused?: boolean }
   ): Promise<void> {
     if (!this.isConnected) throw new Error("RunsQueue not started");
     if (this.shuttingDown) {
@@ -545,29 +586,44 @@ export class RunsQueue implements IMessageQueue {
     const loop = async () => {
       while (!worker.stopped) {
         if (worker.paused) {
-          await this.sleep(POLL_INTERVAL_MS, worker, () => {
-            resolveWake = null;
-          }, (resolve) => {
-            resolveWake = resolve;
-          });
+          await this.sleep(
+            POLL_INTERVAL_MS,
+            worker,
+            () => {
+              resolveWake = null;
+            },
+            (resolve) => {
+              resolveWake = resolve;
+            }
+          );
           continue;
         }
         if (worker.active >= worker.concurrency) {
-          await this.sleep(50, worker, () => {
-            resolveWake = null;
-          }, (resolve) => {
-            resolveWake = resolve;
-          });
+          await this.sleep(
+            50,
+            worker,
+            () => {
+              resolveWake = null;
+            },
+            (resolve) => {
+              resolveWake = resolve;
+            }
+          );
           continue;
         }
         try {
           const claimed = await this.claimOne(worker);
           if (!claimed) {
-            await this.sleep(POLL_INTERVAL_MS, worker, () => {
-              resolveWake = null;
-            }, (resolve) => {
-              resolveWake = resolve;
-            });
+            await this.sleep(
+              POLL_INTERVAL_MS,
+              worker,
+              () => {
+                resolveWake = null;
+              },
+              (resolve) => {
+                resolveWake = resolve;
+              }
+            );
             continue;
           }
           worker.active += 1;
@@ -576,11 +632,16 @@ export class RunsQueue implements IMessageQueue {
           });
         } catch (err) {
           logger.error(`Poll loop error for ${queueName}:`, err);
-          await this.sleep(POLL_INTERVAL_MS, worker, () => {
-            resolveWake = null;
-          }, (resolve) => {
-            resolveWake = resolve;
-          });
+          await this.sleep(
+            POLL_INTERVAL_MS,
+            worker,
+            () => {
+              resolveWake = null;
+            },
+            (resolve) => {
+              resolveWake = resolve;
+            }
+          );
         }
       }
     };
@@ -589,20 +650,29 @@ export class RunsQueue implements IMessageQueue {
 
   private async startConsumerLeaseHeartbeat(queueName: string): Promise<void> {
     const existing = this.consumerLeaseTimers.get(queueName);
-    if (existing) clearInterval(existing);
+    if (existing) this.leaseClock.clearInterval(existing);
     const heartbeat = async () => {
       const revision = process.env.APP_GIT_SHA?.trim() || "unknown";
       const candidate = process.env.APP_DECLARED_IMAGE_DIGEST?.trim() || "";
-      const declaredImageDigest = /^sha256:[0-9a-f]{64}$/.test(candidate) ? candidate : null;
-      await recordQueueConsumerHeartbeat(getDb(), {
-        queueName, consumerId: this.claimedBy, deploymentRevision: revision,
-        declaredImageDigest, startedAt: this.consumerStartedAt, now: new Date(),
+      const declaredImageDigest = /^sha256:[0-9a-f]{64}$/.test(candidate)
+        ? candidate
+        : null;
+      await this.leaseStore.heartbeat({
+        queueName,
+        consumerId: this.claimedBy,
+        deploymentRevision: revision,
+        declaredImageDigest,
+        startedAt: this.consumerStartedAt,
+        now: this.leaseClock.now(),
       });
     };
     await heartbeat().catch((err) => {
-      logger.warn({ queueName, err }, "queue consumer heartbeat registration failed");
+      logger.warn(
+        { queueName, err },
+        "queue consumer heartbeat registration failed"
+      );
     });
-    const timer = setInterval(() => {
+    const timer = this.leaseClock.setInterval(() => {
       void heartbeat().catch((err) => {
         logger.warn({ queueName, err }, "queue consumer heartbeat failed");
       });
@@ -615,24 +685,29 @@ export class RunsQueue implements IMessageQueue {
     const w = this.workers.get(queueName);
     if (!w) return;
     w.paused = true;
-		const timer = this.consumerLeaseTimers.get(queueName);
-		if (timer) clearInterval(timer);
-		this.consumerLeaseTimers.delete(queueName);
-		await expireQueueConsumerLease(getDb(), queueName, this.claimedBy).catch((err) => {
-			logger.warn({ queueName, err }, "queue consumer lease expiration failed");
-		});
+    const timer = this.consumerLeaseTimers.get(queueName);
+    if (timer) this.leaseClock.clearInterval(timer);
+    this.consumerLeaseTimers.delete(queueName);
+    await this.leaseStore
+      .expire(queueName, this.claimedBy, this.leaseClock.now())
+      .catch((err) => {
+        logger.warn(
+          { queueName, err },
+          "queue consumer lease expiration failed"
+        );
+      });
   }
 
   async resumeWorker(queueName: string): Promise<void> {
     const w = this.workers.get(queueName);
     if (!w) return;
     w.paused = false;
-		await this.startConsumerLeaseHeartbeat(queueName);
+    await this.startConsumerLeaseHeartbeat(queueName);
     w.wakeup();
   }
 
   async getQueueStats(queueName: string): Promise<QueueStats> {
-    const sql = getDb();
+    const sql = this.database();
     const rows = await sql<{
       waiting: number;
       active: number;
@@ -647,12 +722,14 @@ export class RunsQueue implements IMessageQueue {
       FROM public.runs
       WHERE queue_name = ${queueName}
     `;
-    const row = rows[0] ?? {} as Partial<{
-      waiting: number;
-      active: number;
-      completed: number;
-      failed: number;
-    }>;
+    const row =
+      rows[0] ??
+      ({} as Partial<{
+        waiting: number;
+        active: number;
+        completed: number;
+        failed: number;
+      }>);
     return {
       waiting: Number(row.waiting ?? 0),
       active: Number(row.active ?? 0),
@@ -671,7 +748,7 @@ export class RunsQueue implements IMessageQueue {
     maxAttempts: number;
     retryDelaySeconds: number | null;
   } | null> {
-    const sql = getDb();
+    const sql = this.database();
     const claimedBy = this.claimedBy;
     const rows = await sql<{
       id: number | string;
@@ -726,7 +803,7 @@ export class RunsQueue implements IMessageQueue {
       attempts: number;
       maxAttempts: number;
       retryDelaySeconds: number | null;
-    },
+    }
   ): Promise<void> {
     const job: QueueJob<unknown> = {
       id: String(claimed.runId),
@@ -748,7 +825,7 @@ export class RunsQueue implements IMessageQueue {
         await this.scheduleRetry(
           claimed.runId,
           nextAttempt,
-          claimed.retryDelaySeconds,
+          claimed.retryDelaySeconds
         );
       }
     } finally {
@@ -763,7 +840,7 @@ export class RunsQueue implements IMessageQueue {
    *  by ours. */
   private async heartbeatClaim(runId: number): Promise<void> {
     try {
-      const sql = getDb();
+      const sql = this.database();
       await sql`
         UPDATE public.runs
         SET claimed_at = now()
@@ -777,7 +854,7 @@ export class RunsQueue implements IMessageQueue {
   }
 
   private async markCompleted(runId: number): Promise<void> {
-    const sql = getDb();
+    const sql = this.database();
     await sql`
       UPDATE public.runs
       SET status = 'completed',
@@ -790,7 +867,7 @@ export class RunsQueue implements IMessageQueue {
   }
 
   private async markFailed(runId: number, err: unknown): Promise<void> {
-    const sql = getDb();
+    const sql = this.database();
     const message = err instanceof Error ? err.message : String(err);
     const rows = await sql`
       UPDATE public.runs
@@ -827,12 +904,13 @@ export class RunsQueue implements IMessageQueue {
   private async scheduleRetry(
     runId: number,
     attempt: number,
-    retryDelaySeconds: number | null,
+    retryDelaySeconds: number | null
   ): Promise<void> {
-    const sql = getDb();
-    const delay = retryDelaySeconds !== null
-      ? Math.max(0, retryDelaySeconds)
-      : backoffSeconds(attempt);
+    const sql = this.database();
+    const delay =
+      retryDelaySeconds !== null
+        ? Math.max(0, retryDelaySeconds)
+        : backoffSeconds(attempt);
     await sql`
       UPDATE public.runs
       SET status = 'pending',
@@ -868,7 +946,7 @@ export class RunsQueue implements IMessageQueue {
   private async ensureChannelListened(channel: string): Promise<void> {
     if (this.listenSubs.has(channel)) return;
     try {
-      const sub = await getDbListener().listen(channel, () => {
+      const sub = await this.listener().listen(channel, () => {
         const set = this.subscribersByChannel.get(channel);
         if (!set) return;
         for (const w of set) w.wakeup();
@@ -876,9 +954,7 @@ export class RunsQueue implements IMessageQueue {
       this.listenSubs.set(channel, { unlisten: sub.unlisten });
       logger.debug(`LISTEN ${channel}`);
     } catch (err) {
-      logger.warn(
-        `LISTEN ${channel} failed: ${(err as Error).message}`,
-      );
+      logger.warn(`LISTEN ${channel} failed: ${(err as Error).message}`);
     }
   }
 
@@ -887,7 +963,7 @@ export class RunsQueue implements IMessageQueue {
     ms: number,
     worker: QueueWorker,
     onClear: () => void,
-    onCapture: (resolve: () => void) => void,
+    onCapture: (resolve: () => void) => void
   ): Promise<void> {
     if (worker.pendingWakeup) {
       worker.pendingWakeup = false;
@@ -920,7 +996,7 @@ export class RunsQueue implements IMessageQueue {
       if (this.staleSweepInFlight) return;
       this.staleSweepInFlight = true;
       try {
-        const sql = getDb();
+        const sql = this.database();
         // Threshold is a hard-coded constant, so inline it as a SQL literal —
         // no placeholders needed.
         const thresholdMs = CLAIM_VISIBILITY_TIMEOUT_MS;
@@ -933,7 +1009,7 @@ export class RunsQueue implements IMessageQueue {
            WHERE status = 'claimed'
              AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal', 'task')
              AND claimed_at < now() - (${thresholdMs} * interval '1 millisecond')
-           RETURNING id`,
+           RETURNING id`
         );
         if (result.count > 0) {
           // Operational housekeeping, not an incident — log it, but don't
@@ -941,13 +1017,11 @@ export class RunsQueue implements IMessageQueue {
           logger.warn(
             `Reclaimed ${result.count} stale runs (claimed > ${
               CLAIM_VISIBILITY_TIMEOUT_MS / 1000
-            }s ago)`,
+            }s ago)`
           );
         }
       } catch (err) {
-        logger.warn(
-          `Stale-claim sweep failed: ${(err as Error).message}`,
-        );
+        logger.warn(`Stale-claim sweep failed: ${(err as Error).message}`);
       } finally {
         this.staleSweepInFlight = false;
       }
@@ -984,7 +1058,13 @@ export async function sweepCompletedRuns(): Promise<number> {
    * Default 30d and never shorter than ordinary runs retention. */
   const receiptRetentionDays = (() => {
     const raw = Number(process.env.DISPATCH_RECEIPT_RETENTION_DAYS);
-    return Math.max(MIN_DISPATCH_RECEIPT_RETENTION_DAYS, retentionDays, Number.isFinite(raw) && raw > 0 ? raw : MIN_DISPATCH_RECEIPT_RETENTION_DAYS);
+    return Math.max(
+      MIN_DISPATCH_RECEIPT_RETENTION_DAYS,
+      retentionDays,
+      Number.isFinite(raw) && raw > 0
+        ? raw
+        : MIN_DISPATCH_RECEIPT_RETENTION_DAYS
+    );
   })();
 
   let total = 0;
@@ -1027,7 +1107,9 @@ export async function sweepCompletedRuns(): Promise<number> {
     )
     SELECT count(*)::int AS count FROM d
   `;
-  total += Number((agedFailed[0] as { count?: number } | undefined)?.count ?? 0);
+  total += Number(
+    (agedFailed[0] as { count?: number } | undefined)?.count ?? 0
+  );
 
   const agedReceipts = await sql`
     WITH candidates AS (
@@ -1045,7 +1127,9 @@ export async function sweepCompletedRuns(): Promise<number> {
       RETURNING receipt.idempotency_key
     ) SELECT count(*)::int AS count FROM deleted
   `;
-  total += Number((agedReceipts[0] as { count?: number } | undefined)?.count ?? 0);
+  total += Number(
+    (agedReceipts[0] as { count?: number } | undefined)?.count ?? 0
+  );
 
   return total;
 }
