@@ -56,6 +56,17 @@ export function evaluateQueueConsumerReadiness(
   }
   if (active.some((fact) => fact.identityConflict))
     reasons.add("consumer_identity_conflict");
+  const activeIdentityCounts = new Map<string, Set<string>>();
+  for (const fact of active) {
+    const key = `${fact.queueName}\0${fact.consumerId}`;
+    const instances = activeIdentityCounts.get(key) ?? new Set<string>();
+    instances.add(fact.leaseInstanceId);
+    activeIdentityCounts.set(key, instances);
+  }
+  if (
+    [...activeIdentityCounts.values()].some((instances) => instances.size > 1)
+  )
+    reasons.add("consumer_identity_conflict");
   const carriers = new Set(
     active.map(
       (fact) => `${fact.deploymentRevision}\0${fact.declaredImageDigest ?? ""}`
@@ -193,15 +204,22 @@ export async function recordAgentEffectiveToolInventoryTruth(
   const observedAt = input.observedAt ?? new Date();
   const expiresAt =
     input.expiresAt ?? new Date(observedAt.getTime() + 5 * 60_000);
-  await sql`
+  const rows = await sql`
     INSERT INTO public.agent_effective_tool_inventory_snapshots (
       organization_id, agent_id, release_id, release_sequence, capability_snapshot_digest,
       snapshot_authority, tool_names, inventory_fingerprint, observed_at, expires_at
-    ) VALUES (
+    ) SELECT
       ${input.organizationId}, ${input.agentId}, ${input.releaseId}, ${input.releaseSequence},
       ${input.capabilitySnapshotDigest}, ${input.snapshotAuthority}, ${sql.json(inventory.names)},
 		${input.fingerprint}, ${observedAt}, ${expiresAt}
-    )
+    FROM public.agent_release_applies r
+    JOIN public.agent_release_capability_snapshots c
+      ON c.organization_id=r.organization_id AND c.agent_id=r.agent_id
+     AND c.release_id=r.applied_release_id AND c.release_sequence=r.applied_release_sequence
+    WHERE r.organization_id=${input.organizationId} AND r.agent_id=${input.agentId}
+      AND r.status='applied' AND r.applied_release_id=${input.releaseId}
+      AND r.applied_release_sequence=${input.releaseSequence}
+      AND c.snapshot_digest=${input.capabilitySnapshotDigest} AND c.expires_at > ${observedAt}
     ON CONFLICT (organization_id, agent_id, snapshot_authority) DO UPDATE SET
       release_id = EXCLUDED.release_id,
       release_sequence = EXCLUDED.release_sequence,
@@ -210,7 +228,10 @@ export async function recordAgentEffectiveToolInventoryTruth(
       inventory_fingerprint = EXCLUDED.inventory_fingerprint,
       observed_at = EXCLUDED.observed_at,
       expires_at = EXCLUDED.expires_at
+    RETURNING snapshot_authority
   `;
+  if (rows.length !== 1)
+    throw new Error("effective inventory authority is not current");
 }
 
 export async function readRuntimeReleaseAssurance(
@@ -310,6 +331,25 @@ export async function readAgentToolInventoryTruth(
   }
 }
 
+export interface EffectiveToolInventoryStore {
+  write(
+    input: Parameters<typeof recordAgentEffectiveToolInventoryTruth>[0]
+  ): Promise<void>;
+  read(input: {
+    organizationId: string;
+    agentId: string;
+  }): ReturnType<typeof readAgentToolInventoryTruth>;
+}
+
+export function createPostgresEffectiveToolInventoryStore(
+  sql: DbClient
+): EffectiveToolInventoryStore {
+  return {
+    write: (input) => recordAgentEffectiveToolInventoryTruth(input, sql),
+    read: (input) => readAgentToolInventoryTruth(input, sql),
+  };
+}
+
 export async function readAgentCapabilitySnapshotTruth(
   input: { organizationId: string; agentId: string },
   sql: DbClient = getDb()
@@ -352,6 +392,7 @@ export async function readAgentCapabilitySnapshotTruth(
 export function createReleaseAssuranceReadback(input: {
   sql?: DbClient;
   leaseStore?: QueueConsumerLeaseStore;
+  inventoryStore?: EffectiveToolInventoryStore;
   findAgentBase(query: { organizationId: string; agentId: string }): Promise<{
     managedReleaseReceipt: unknown;
     liveManagedSettingsDigest: string | null;
@@ -370,7 +411,8 @@ export function createReleaseAssuranceReadback(input: {
       const base = await input.findAgentBase(query);
       if (!base) return null;
       const [inventory, capabilitySnapshot] = await Promise.all([
-        readAgentToolInventoryTruth(query, sql()),
+        input.inventoryStore?.read(query) ??
+          readAgentToolInventoryTruth(query, sql()),
         readAgentCapabilitySnapshotTruth(query, sql()),
       ]);
       return {

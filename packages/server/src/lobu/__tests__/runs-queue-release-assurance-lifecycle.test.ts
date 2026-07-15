@@ -80,6 +80,42 @@ describe("RunsQueue observable lease lifecycle", () => {
     );
   });
 
+  it.each([
+    "pause",
+    "stop",
+  ] as const)("serializes %s expiry after an in-flight heartbeat", async (action) => {
+    const queue = await queueFor("replica-race");
+    await queue.work("messages", async () => undefined);
+    const release = store.blockNextHeartbeat();
+    clock.advance(30_000);
+    const heartbeat = clock.tickIntervals();
+    await Promise.resolve();
+    const deactivation =
+      action === "pause" ? queue.pauseWorker("messages") : queue.stop();
+    release();
+    await Promise.all([heartbeat, deactivation]);
+    clock.advance(2);
+    expect((await inspect()).queueConsumer.activeConsumerCount).toBe(0);
+  });
+
+  it("expires an active lease when replaced by a startPaused worker", async () => {
+    const queue = await queueFor("replica-replaced");
+    await queue.work("messages", async () => undefined);
+    await queue.work("messages", async () => undefined, { startPaused: true });
+    clock.advance(2);
+    expect((await inspect()).queueConsumer.activeConsumerCount).toBe(0);
+  });
+
+  it("reports duplicate active lease instances under one consumer identity", async () => {
+    const first = await queueFor("replica-duplicate");
+    const second = await queueFor("replica-duplicate");
+    await first.work("messages", async () => undefined);
+    await second.work("messages", async () => undefined);
+    expect((await inspect()).queueConsumer.reasonCodes).toContain(
+      "consumer_identity_conflict"
+    );
+  });
+
   async function queueFor(consumerId: string) {
     const queue = new RunsQueue({
       database: () => emptyDb(),
@@ -113,12 +149,24 @@ describe("RunsQueue observable lease lifecycle", () => {
 
 class MemoryLeaseStore implements QueueConsumerLeaseStore {
   private readonly values = new Map<string, QueueConsumerLeaseFact>();
+  private nextHeartbeatGate: Promise<void> | null = null;
+  blockNextHeartbeat() {
+    let release!: () => void;
+    this.nextHeartbeatGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return release;
+  }
   async heartbeat(input: QueueConsumerHeartbeat) {
-    const key = `${input.queueName}:${input.consumerId}`;
+    const gate = this.nextHeartbeatGate;
+    this.nextHeartbeatGate = null;
+    if (gate) await gate;
+    const key = `${input.queueName}:${input.consumerId}:${input.leaseInstanceId}`;
     const existing = this.values.get(key);
     this.values.set(key, {
       queueName: input.queueName,
       consumerId: input.consumerId,
+      leaseInstanceId: input.leaseInstanceId,
       deploymentRevision: input.deploymentRevision,
       declaredImageDigest: input.declaredImageDigest,
       startedAt: input.startedAt.toISOString(),
@@ -133,10 +181,16 @@ class MemoryLeaseStore implements QueueConsumerLeaseStore {
         ),
     });
   }
-  async expire(queueName: string, consumerId: string, now: Date) {
-    const value = this.values.get(`${queueName}:${consumerId}`);
+  async expire(
+    queueName: string,
+    consumerId: string,
+    leaseInstanceId: string,
+    now: Date
+  ) {
+    const key = `${queueName}:${consumerId}:${leaseInstanceId}`;
+    const value = this.values.get(key);
     if (value)
-      this.values.set(`${queueName}:${consumerId}`, {
+      this.values.set(key, {
         ...value,
         lastSeenAt: now.toISOString(),
         leaseExpiresAt: new Date(now.getTime() + 1).toISOString(),

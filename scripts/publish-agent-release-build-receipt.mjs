@@ -24,17 +24,10 @@ if (
 ) {
   throw new Error("invalid immutable Lobu artifact identity");
 }
-const buildIdentityDigest = `sha256:${createHash("sha256")
-  .update(
-    JSON.stringify({
-      buildSource: "github:shifu-ai/lobu",
-      revision: sourceRevision,
-      buildTime,
-      declaredImageDigest: artifactDigest,
-      capabilities: ["agent-release.readiness.v1"],
-    })
-  )
-  .digest("hex")}`;
+const capabilities = ["agent-release.readiness.v1"];
+const buildIdentityDigest = `sha256:${createHash("sha256").update(canonical({
+  sourceRevision, buildTime, imageDigest: artifactDigest, capabilities,
+})).digest("hex")}`;
 const observedAt = new Date().toISOString();
 const expiresAt = new Date(
   Date.parse(observedAt) + 48 * 60 * 60 * 1000
@@ -46,13 +39,15 @@ const signing = {
 };
 const unsigned = {
   receiptKind: "build_artifact",
-  environment: "production",
+  scope: "global",
   dependencyId: "lobu-runtime",
   sourceRevision,
   artifactIdentity,
   artifactDigest,
+  buildTime,
   origin: "ghcr.io/shifu-ai/lobu-app",
-  provides: ["agent-release.readiness.v1"],
+  provides: capabilities,
+  capabilities,
   requires: [],
   buildIdentityDigest,
   provenance: {

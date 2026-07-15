@@ -112,6 +112,12 @@ interface QueueWorker {
   pendingWakeup: boolean;
 }
 
+interface LeaseLifecycleState {
+  generation: number;
+  active: boolean;
+  writeTail: Promise<void>;
+}
+
 /** Map a queue name to a lobu-queue `run_type`. */
 export function classifyQueue(queueName: string): LobuRunType {
   if (queueName === "task" || queueName.startsWith("task:")) return "task";
@@ -162,6 +168,8 @@ export class RunsQueue implements IMessageQueue {
     string,
     ReturnType<typeof setInterval>
   >();
+  private readonly leaseLifecycle = new Map<string, LeaseLifecycleState>();
+  private readonly leaseInstanceId = randomUUID();
   private readonly database: () => DbClient;
   private readonly listener: () => ReturnType<typeof getDbListener>;
   private readonly leaseStore: QueueConsumerLeaseStore;
@@ -290,13 +298,8 @@ export class RunsQueue implements IMessageQueue {
     this.workers.clear();
     this.subscribersByChannel.clear();
 
-    for (const [queueName, timer] of this.consumerLeaseTimers) {
-      this.leaseClock.clearInterval(timer);
-      await this.leaseStore
-        .expire(queueName, this.claimedBy, this.leaseClock.now())
-        .catch((err) => {
-          logger.warn({ queueName, err }, "queue consumer lease expiry failed");
-        });
+    for (const queueName of this.leaseLifecycle.keys()) {
+      await this.deactivateConsumerLease(queueName);
     }
     this.consumerLeaseTimers.clear();
 
@@ -543,6 +546,7 @@ export class RunsQueue implements IMessageQueue {
     // Replace any existing worker for this queue.
     const existing = this.workers.get(queueName);
     if (existing) {
+      await this.deactivateConsumerLease(queueName);
       existing.stopped = true;
       this.removeFromChannelIndex(existing);
       existing.wakeup();
@@ -649,22 +653,41 @@ export class RunsQueue implements IMessageQueue {
   }
 
   private async startConsumerLeaseHeartbeat(queueName: string): Promise<void> {
-    const existing = this.consumerLeaseTimers.get(queueName);
-    if (existing) this.leaseClock.clearInterval(existing);
+    await this.deactivateConsumerLease(queueName, false);
+    const previous = this.leaseLifecycle.get(queueName);
+    const state: LeaseLifecycleState = {
+      generation: (previous?.generation ?? 0) + 1,
+      active: true,
+      writeTail: previous?.writeTail ?? Promise.resolve(),
+    };
+    this.leaseLifecycle.set(queueName, state);
+    const generation = state.generation;
     const heartbeat = async () => {
       const revision = process.env.APP_GIT_SHA?.trim() || "unknown";
       const candidate = process.env.APP_DECLARED_IMAGE_DIGEST?.trim() || "";
       const declaredImageDigest = /^sha256:[0-9a-f]{64}$/.test(candidate)
         ? candidate
         : null;
-      await this.leaseStore.heartbeat({
-        queueName,
-        consumerId: this.claimedBy,
-        deploymentRevision: revision,
-        declaredImageDigest,
-        startedAt: this.consumerStartedAt,
-        now: this.leaseClock.now(),
-      });
+      const current = this.leaseLifecycle.get(queueName);
+      if (!current || !current.active || current.generation !== generation)
+        return;
+      current.writeTail = current.writeTail
+        .catch(() => undefined)
+        .then(async () => {
+          const latest = this.leaseLifecycle.get(queueName);
+          if (!latest || !latest.active || latest.generation !== generation)
+            return;
+          await this.leaseStore.heartbeat({
+            queueName,
+            consumerId: this.claimedBy,
+            leaseInstanceId: this.leaseInstanceId,
+            deploymentRevision: revision,
+            declaredImageDigest,
+            startedAt: this.consumerStartedAt,
+            now: this.leaseClock.now(),
+          });
+        });
+      await current.writeTail;
     };
     await heartbeat().catch((err) => {
       logger.warn(
@@ -685,17 +708,7 @@ export class RunsQueue implements IMessageQueue {
     const w = this.workers.get(queueName);
     if (!w) return;
     w.paused = true;
-    const timer = this.consumerLeaseTimers.get(queueName);
-    if (timer) this.leaseClock.clearInterval(timer);
-    this.consumerLeaseTimers.delete(queueName);
-    await this.leaseStore
-      .expire(queueName, this.claimedBy, this.leaseClock.now())
-      .catch((err) => {
-        logger.warn(
-          { queueName, err },
-          "queue consumer lease expiration failed"
-        );
-      });
+    await this.deactivateConsumerLease(queueName);
   }
 
   async resumeWorker(queueName: string): Promise<void> {
@@ -704,6 +717,35 @@ export class RunsQueue implements IMessageQueue {
     w.paused = false;
     await this.startConsumerLeaseHeartbeat(queueName);
     w.wakeup();
+  }
+
+  private async deactivateConsumerLease(
+    queueName: string,
+    expire = true
+  ): Promise<void> {
+    const state = this.leaseLifecycle.get(queueName);
+    if (state) {
+      state.active = false;
+      state.generation += 1;
+    }
+    const timer = this.consumerLeaseTimers.get(queueName);
+    if (timer) this.leaseClock.clearInterval(timer);
+    this.consumerLeaseTimers.delete(queueName);
+    if (!expire || !state) return;
+    await state.writeTail.catch(() => undefined);
+    await this.leaseStore
+      .expire(
+        queueName,
+        this.claimedBy,
+        this.leaseInstanceId,
+        this.leaseClock.now()
+      )
+      .catch((err) => {
+        logger.warn(
+          { queueName, err },
+          "queue consumer lease expiration failed"
+        );
+      });
   }
 
   async getQueueStats(queueName: string): Promise<QueueStats> {
