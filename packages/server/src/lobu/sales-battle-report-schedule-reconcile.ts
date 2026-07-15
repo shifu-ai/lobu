@@ -27,6 +27,12 @@ export interface ReconcileSalesBattleReportScheduleResult {
 	observerRefs: string[];
 }
 
+export interface StaleSalesBattleReportScheduleResult {
+	ok: false;
+	error: "stale_revision";
+	acceptedRevision: number;
+}
+
 const OBSERVER_ACTION_TYPE = "sales_battle_report_observer";
 const OBSERVER_CRON = "0 16 * * *";
 
@@ -63,6 +69,7 @@ function sameObserver(
 				weekday,
 			}) &&
 		row.action_type === OBSERVER_ACTION_TYPE &&
+		Number(row.schedule_revision) === input.scheduleRevision &&
 		row.cron === OBSERVER_CRON &&
 		row.created_by_user === input.createdByUser &&
 		args.toolboxScheduleId === input.toolboxScheduleId &&
@@ -73,9 +80,31 @@ function sameObserver(
 	);
 }
 
+function observerWeekday(row: ScheduledJobRow): number {
+	return Number(row.action_args.salesTalkWeekday);
+}
+
+function preferredObserver(
+	left: ScheduledJobRow,
+	right: ScheduledJobRow,
+): number {
+	if (left.paused !== right.paused) return left.paused ? 1 : -1;
+	const revisionDelta =
+		Number(right.action_args.scheduleRevision ?? right.schedule_revision) -
+		Number(left.action_args.scheduleRevision ?? left.schedule_revision);
+	if (revisionDelta !== 0) return revisionDelta;
+	const createdDelta =
+		new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
+	if (createdDelta !== 0) return createdDelta;
+	return right.id.localeCompare(left.id);
+}
+
 export async function reconcileSalesBattleReportSchedule(
 	input: ReconcileSalesBattleReportScheduleInput,
-): Promise<ReconcileSalesBattleReportScheduleResult> {
+): Promise<
+	| ReconcileSalesBattleReportScheduleResult
+	| StaleSalesBattleReportScheduleResult
+> {
 	const sql = getDb();
 	return sql.begin(async (tx) => {
 		await tx`
@@ -84,6 +113,27 @@ export async function reconcileSalesBattleReportSchedule(
 				hashtext(${input.toolboxScheduleId})
 			)
 		`;
+
+		const syncRows = await tx<
+			Array<{ last_accepted_revision: number; desired_state: string }>
+		>`
+			SELECT last_accepted_revision, desired_state
+			FROM toolbox_sales_battle_report_schedule_sync
+			WHERE organization_id = ${input.organizationId}
+			  AND toolbox_schedule_id = ${input.toolboxScheduleId}
+			FOR UPDATE
+		`;
+		const acceptedRevision = syncRows[0]?.last_accepted_revision;
+		if (
+			acceptedRevision !== undefined &&
+			input.scheduleRevision < acceptedRevision
+		) {
+			return {
+				ok: false,
+				error: "stale_revision",
+				acceptedRevision,
+			};
+		}
 
 		const existing = (await tx`
 			SELECT *
@@ -100,30 +150,61 @@ export async function reconcileSalesBattleReportSchedule(
 		const paused: string[] = [];
 		const deletedDuplicates: string[] = [];
 		const observerRefs: string[] = [];
-		const desiredWeekdays = new Set(input.salesTalkWeekdays);
+		const normalizedWeekdays = [...new Set(input.salesTalkWeekdays)].sort(
+			(left, right) => left - right,
+		);
+		const desiredWeekdays = new Set(normalizedWeekdays);
+
+		if (acceptedRevision === input.scheduleRevision) {
+			return {
+				ok: true,
+				acceptedRevision,
+				reconciled: { created, updated, paused, deletedDuplicates },
+				observerRefs: existing
+					.filter((row) => !row.paused)
+					.sort((left, right) => {
+						const weekdayDelta = observerWeekday(left) - observerWeekday(right);
+						return weekdayDelta || left.id.localeCompare(right.id);
+					})
+					.map((row) => row.id),
+			};
+		}
+
+		const candidatesByWeekday = new Map<number, ScheduledJobRow[]>();
+		for (const row of existing) {
+			const weekday = observerWeekday(row);
+			const candidates = candidatesByWeekday.get(weekday) ?? [];
+			candidates.push(row);
+			candidatesByWeekday.set(weekday, candidates);
+		}
+
+		const survivors = new Map<number, ScheduledJobRow>();
+		for (const [weekday, candidates] of candidatesByWeekday) {
+			const [survivor, ...duplicates] = candidates.sort(preferredObserver);
+			survivors.set(weekday, survivor);
+			for (const duplicate of duplicates) {
+				await tx`DELETE FROM scheduled_jobs WHERE id = ${duplicate.id}`;
+				deletedDuplicates.push(duplicate.id);
+			}
+		}
 
 		if (input.desiredState === "active") {
-			for (const weekday of input.salesTalkWeekdays) {
+			for (const weekday of normalizedWeekdays) {
 				const externalKey = observerExternalKey({
 					toolboxScheduleId: input.toolboxScheduleId,
 					weekday,
 				});
-				const candidates = existing.filter(
-					(row) => Number(row.action_args.salesTalkWeekday) === weekday,
-				);
-				const canonical =
-					candidates.find((row) => row.external_key === externalKey) ??
-					candidates[0];
-
-				if (!canonical) {
+				const survivor = survivors.get(weekday);
+				if (!survivor) {
 					const rows = (await tx`
 						INSERT INTO scheduled_jobs (
-							external_key, organization_id, action_type, action_args, cron,
-							next_run_at, description, created_by_user, created_by_agent
+							external_key, schedule_revision, organization_id, action_type,
+							action_args, cron, next_run_at, description,
+							created_by_user, created_by_agent
 						) VALUES (
-							${externalKey}, ${input.organizationId}, ${OBSERVER_ACTION_TYPE},
-							${tx.json(observerArgs(input, weekday))}, ${OBSERVER_CRON},
-							${nextRunAt(OBSERVER_CRON)},
+							${externalKey}, ${input.scheduleRevision}, ${input.organizationId},
+							${OBSERVER_ACTION_TYPE}, ${tx.json(observerArgs(input, weekday))},
+							${OBSERVER_CRON}, ${nextRunAt(OBSERVER_CRON)},
 							${`Sales battle report observer: ${input.courseName} (weekday ${weekday})`},
 							${input.createdByUser}, NULL
 						)
@@ -134,48 +215,54 @@ export async function reconcileSalesBattleReportSchedule(
 					continue;
 				}
 
-				let active = canonical;
-				if (canonical.paused || !sameObserver(canonical, input, weekday)) {
+				let active = survivor;
+				if (survivor.paused || !sameObserver(survivor, input, weekday)) {
 					const rows = (await tx`
 						UPDATE scheduled_jobs
 						SET external_key = ${externalKey},
+							schedule_revision = ${input.scheduleRevision},
 							action_type = ${OBSERVER_ACTION_TYPE},
 							action_args = ${tx.json(observerArgs(input, weekday))},
 							cron = ${OBSERVER_CRON},
 							next_run_at = ${nextRunAt(OBSERVER_CRON)},
 							description = ${`Sales battle report observer: ${input.courseName} (weekday ${weekday})`},
 							created_by_user = ${input.createdByUser}, created_by_agent = NULL,
-							paused = false, state = 'active', updated_at = now()
-						WHERE id = ${canonical.id}
+							paused = false, updated_at = now()
+						WHERE id = ${survivor.id}
 						RETURNING *
 					`) as unknown as ScheduledJobRow[];
 					active = rows[0];
 					updated.push(active.id);
 				}
 				observerRefs.push(active.id);
-
-				for (const duplicate of candidates.filter(
-					(row) => row.id !== active.id,
-				)) {
-					await tx`DELETE FROM scheduled_jobs WHERE id = ${duplicate.id}`;
-					deletedDuplicates.push(duplicate.id);
-				}
 			}
 		}
 
-		for (const row of existing) {
-			const weekday = Number(row.action_args.salesTalkWeekday);
+		for (const [weekday, survivor] of survivors) {
 			const shouldPause =
 				input.desiredState !== "active" || !desiredWeekdays.has(weekday);
-			if (shouldPause && !row.paused && !deletedDuplicates.includes(row.id)) {
+			if (shouldPause && !survivor.paused) {
 				await tx`
 					UPDATE scheduled_jobs
 					SET paused = true, updated_at = now()
-					WHERE id = ${row.id}
+					WHERE id = ${survivor.id}
 				`;
-				paused.push(row.id);
+				paused.push(survivor.id);
 			}
 		}
+
+		await tx`
+			INSERT INTO toolbox_sales_battle_report_schedule_sync (
+				organization_id, toolbox_schedule_id, last_accepted_revision, desired_state
+			) VALUES (
+				${input.organizationId}, ${input.toolboxScheduleId},
+				${input.scheduleRevision}, ${input.desiredState}
+			)
+			ON CONFLICT (organization_id, toolbox_schedule_id) DO UPDATE
+			SET last_accepted_revision = EXCLUDED.last_accepted_revision,
+				desired_state = EXCLUDED.desired_state,
+				updated_at = now()
+		`;
 
 		return {
 			ok: true,

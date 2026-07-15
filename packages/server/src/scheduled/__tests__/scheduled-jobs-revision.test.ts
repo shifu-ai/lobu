@@ -66,7 +66,7 @@ describe("scheduled job revision guard", () => {
 			  AND external_key = ${externalKey}
 		`;
 
-		const futureAt = "2026-07-14T09:00:00.000Z";
+		const futureAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 		await upsertScheduledJobByExternalKey({
 			externalKey,
 			organizationId: ORGANIZATION_ID,

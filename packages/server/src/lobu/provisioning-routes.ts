@@ -267,10 +267,7 @@ export function createProvisioningRoutes(
 			try {
 				const parsed: unknown = await c.req.json();
 				if (!isObject(parsed)) {
-					return c.json(
-						{ error: "invalid_sales_battle_report_schedule" },
-						400,
-					);
+					return c.json({ error: "invalid_sales_battle_report_schedule" }, 400);
 				}
 				body = parsed;
 			} catch {
@@ -328,6 +325,15 @@ export function createProvisioningRoutes(
 				salesTalkWeekdays: weekdays as number[],
 				desiredState: desiredState as "active" | "paused" | "deleted",
 			});
+			if (!result.ok) {
+				return c.json(
+					{
+						error: result.error,
+						acceptedRevision: result.acceptedRevision,
+					},
+					409,
+				);
+			}
 			return c.json(result, 200);
 		},
 	);
@@ -402,10 +408,7 @@ export function createProvisioningRoutes(
 				ownerUserId,
 				patUserId: user.id,
 				membershipId: deterministicMembershipId(organizationId, ownerUserId),
-				ownerEmail: deterministicToolboxOwnerEmail(
-					organizationId,
-					ownerUserId,
-				),
+				ownerEmail: deterministicToolboxOwnerEmail(organizationId, ownerUserId),
 				settings,
 				transactionHooks: options.legacyProvisioningHooks,
 			});
