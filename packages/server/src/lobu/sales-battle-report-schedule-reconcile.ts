@@ -39,6 +39,12 @@ export interface ConflictingSalesBattleReportObserverKeyResult {
 	conflictingJobIds: string[];
 }
 
+export interface ConflictingSalesBattleReportRevisionPayloadResult {
+	ok: false;
+	error: "revision_payload_conflict";
+	acceptedRevision: number;
+}
+
 const OBSERVER_ACTION_TYPE = "sales_battle_report_observer";
 const OBSERVER_CRON = "0 16 * * *";
 
@@ -60,6 +66,19 @@ function observerArgs(
 		courseName: input.courseName,
 		agentId: input.agentId,
 	};
+}
+
+function acceptedRequestFingerprint(
+	input: ReconcileSalesBattleReportScheduleInput,
+	normalizedWeekdays: number[],
+): string {
+	return JSON.stringify({
+		createdByUser: input.createdByUser,
+		agentId: input.agentId,
+		courseName: input.courseName,
+		salesTalkWeekdays: normalizedWeekdays,
+		desiredState: input.desiredState,
+	});
 }
 
 function sameObserver(
@@ -154,8 +173,16 @@ export async function reconcileSalesBattleReportSchedule(
 	| ReconcileSalesBattleReportScheduleResult
 	| StaleSalesBattleReportScheduleResult
 	| ConflictingSalesBattleReportObserverKeyResult
+	| ConflictingSalesBattleReportRevisionPayloadResult
 > {
 	const sql = getDb();
+	const normalizedWeekdays = [...new Set(input.salesTalkWeekdays)].sort(
+		(left, right) => left - right,
+	);
+	const requestFingerprint = acceptedRequestFingerprint(
+		input,
+		normalizedWeekdays,
+	);
 	return sql.begin(async (tx) => {
 		await tx`
 			SELECT pg_advisory_xact_lock(
@@ -165,9 +192,13 @@ export async function reconcileSalesBattleReportSchedule(
 		`;
 
 		const syncRows = await tx<
-			Array<{ last_accepted_revision: number; desired_state: string }>
+			Array<{
+				last_accepted_revision: number;
+				desired_state: string;
+				accepted_request_fingerprint: string | null;
+			}>
 		>`
-			SELECT last_accepted_revision, desired_state
+			SELECT last_accepted_revision, desired_state, accepted_request_fingerprint
 			FROM toolbox_sales_battle_report_schedule_sync
 			WHERE organization_id = ${input.organizationId}
 			  AND toolbox_schedule_id = ${input.toolboxScheduleId}
@@ -181,6 +212,16 @@ export async function reconcileSalesBattleReportSchedule(
 			return {
 				ok: false,
 				error: "stale_revision",
+				acceptedRevision,
+			};
+		}
+		if (
+			acceptedRevision === input.scheduleRevision &&
+			syncRows[0]?.accepted_request_fingerprint !== requestFingerprint
+		) {
+			return {
+				ok: false,
+				error: "revision_payload_conflict",
 				acceptedRevision,
 			};
 		}
@@ -212,25 +253,7 @@ export async function reconcileSalesBattleReportSchedule(
 		const paused: string[] = [];
 		const deletedDuplicates: string[] = [];
 		const observerRefs: string[] = [];
-		const normalizedWeekdays = [...new Set(input.salesTalkWeekdays)].sort(
-			(left, right) => left - right,
-		);
 		const desiredWeekdays = new Set(normalizedWeekdays);
-
-		if (acceptedRevision === input.scheduleRevision) {
-			return {
-				ok: true,
-				acceptedRevision,
-				reconciled: { created, updated, paused, deletedDuplicates },
-				observerRefs: existing
-					.filter((row) => !row.paused)
-					.sort((left, right) => {
-						const weekdayDelta = observerWeekday(left) - observerWeekday(right);
-						return weekdayDelta || left.id.localeCompare(right.id);
-					})
-					.map((row) => row.id),
-			};
-		}
 		const matchingIds = new Set(existing.map((row) => row.id));
 		const conflictingJobIds = lockedRows
 			.filter((row) => !matchingIds.has(row.id))
@@ -247,14 +270,29 @@ export async function reconcileSalesBattleReportSchedule(
 		const originalExternalKeys = new Map(
 			existing.map((row) => [row.id, row.external_key]),
 		);
-		for (const row of existing) {
-			if (row.external_key === null) continue;
-			await tx`
-				UPDATE scheduled_jobs
-				SET external_key = NULL, updated_at = now()
-				WHERE id = ${row.id}
-			`;
-			row.external_key = null;
+		const hasExternalKeyDrift = existing.some((row) => {
+			const weekday = observerWeekday(row);
+			if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) {
+				return row.external_key !== null;
+			}
+			return (
+				row.external_key !==
+				observerExternalKey({
+					toolboxScheduleId: input.toolboxScheduleId,
+					weekday,
+				})
+			);
+		});
+		if (hasExternalKeyDrift) {
+			for (const row of existing) {
+				if (row.external_key === null) continue;
+				await tx`
+					UPDATE scheduled_jobs
+					SET external_key = NULL, updated_at = now()
+					WHERE id = ${row.id}
+				`;
+				row.external_key = null;
+			}
 		}
 
 		const candidatesByWeekday = new Map<number, ScheduledJobRow[]>();
@@ -282,14 +320,16 @@ export async function reconcileSalesBattleReportSchedule(
 				toolboxScheduleId: input.toolboxScheduleId,
 				weekday,
 			});
-			await tx`
-				UPDATE scheduled_jobs
-				SET external_key = ${externalKey}, updated_at = now()
-				WHERE id = ${survivor.id}
-			`;
-			survivor.external_key = externalKey;
-			if (originalExternalKeys.get(survivor.id) !== externalKey) {
-				repairedExternalKeys.add(survivor.id);
+			if (survivor.external_key !== externalKey) {
+				await tx`
+					UPDATE scheduled_jobs
+					SET external_key = ${externalKey}, updated_at = now()
+					WHERE id = ${survivor.id}
+				`;
+				survivor.external_key = externalKey;
+				if (originalExternalKeys.get(survivor.id) !== externalKey) {
+					repairedExternalKeys.add(survivor.id);
+				}
 			}
 		}
 
@@ -359,18 +399,22 @@ export async function reconcileSalesBattleReportSchedule(
 			if (!updated.includes(id)) updated.push(id);
 		}
 
-		await tx`
-			INSERT INTO toolbox_sales_battle_report_schedule_sync (
-				organization_id, toolbox_schedule_id, last_accepted_revision, desired_state
-			) VALUES (
-				${input.organizationId}, ${input.toolboxScheduleId},
-				${input.scheduleRevision}, ${input.desiredState}
-			)
-			ON CONFLICT (organization_id, toolbox_schedule_id) DO UPDATE
-			SET last_accepted_revision = EXCLUDED.last_accepted_revision,
-				desired_state = EXCLUDED.desired_state,
-				updated_at = now()
-		`;
+		if (acceptedRevision !== input.scheduleRevision) {
+			await tx`
+				INSERT INTO toolbox_sales_battle_report_schedule_sync (
+					organization_id, toolbox_schedule_id, last_accepted_revision,
+					desired_state, accepted_request_fingerprint
+				) VALUES (
+					${input.organizationId}, ${input.toolboxScheduleId},
+					${input.scheduleRevision}, ${input.desiredState}, ${requestFingerprint}
+				)
+				ON CONFLICT (organization_id, toolbox_schedule_id) DO UPDATE
+				SET last_accepted_revision = EXCLUDED.last_accepted_revision,
+					desired_state = EXCLUDED.desired_state,
+					accepted_request_fingerprint = EXCLUDED.accepted_request_fingerprint,
+					updated_at = now()
+			`;
+		}
 
 		return {
 			ok: true,

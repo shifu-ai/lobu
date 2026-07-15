@@ -279,16 +279,58 @@ describe("sales battle report schedule reconciliation", () => {
 		});
 	});
 
-	test("returns an equal revision idempotently without mutating observers", async () => {
+	test("rejects equal revisions whose canonical payload differs", async () => {
 		const first = await reconcileRequest(5);
-		const firstBody = (await first.json()) as { observerRefs: string[] };
-		const before = await getDb()<Array<{ id: string; updated_at: string }>>`
-			SELECT id, updated_at FROM scheduled_jobs
+		expect(first.status).toBe(200);
+		const before = await getDb()<
+			Array<{ id: string; updated_at: string; action_args: unknown }>
+		>`
+			SELECT id, updated_at, action_args FROM scheduled_jobs
 			WHERE organization_id = ${ORGANIZATION_ID}
 			  AND action_args->>'toolboxScheduleId' = 'sales_battle_report_schedule_001'
 		`;
+		const mismatches = [
+			{ createdByUser: "toolbox-user-2" },
+			{ agentId: "shifu-u-other" },
+			{ courseName: "不得覆寫" },
+			{ salesTalkWeekdays: [0, 3] },
+			{ desiredState: "paused" },
+		];
 
-		const equal = await reconcileRequest(5, { courseName: "不得覆寫" });
+		for (const mismatch of mismatches) {
+			const equal = await reconcileRequest(5, mismatch);
+			expect(equal.status).toBe(409);
+			expect(await equal.json()).toEqual({
+				error: "revision_payload_conflict",
+				acceptedRevision: 5,
+			});
+		}
+		const after = await getDb()<typeof before>`
+			SELECT id, updated_at, action_args FROM scheduled_jobs
+			WHERE organization_id = ${ORGANIZATION_ID}
+			  AND action_args->>'toolboxScheduleId' = 'sales_battle_report_schedule_001'
+		`;
+		expect(after).toEqual(before);
+	});
+
+	test("returns an exact healthy equal revision as a no-op", async () => {
+		const first = await reconcileRequest(5);
+		const firstBody = (await first.json()) as { observerRefs: string[] };
+		const before = await observerRows();
+		const syncBefore = await getDb()<
+			Array<{
+				last_accepted_revision: number;
+				accepted_request_fingerprint: string;
+				updated_at: string;
+			}>
+		>`
+			SELECT last_accepted_revision, accepted_request_fingerprint, updated_at
+			FROM toolbox_sales_battle_report_schedule_sync
+			WHERE organization_id = ${ORGANIZATION_ID}
+			  AND toolbox_schedule_id = 'sales_battle_report_schedule_001'
+		`;
+
+		const equal = await reconcileRequest(5);
 
 		expect(equal.status).toBe(200);
 		expect(await equal.json()).toEqual({
@@ -302,23 +344,108 @@ describe("sales battle report schedule reconciliation", () => {
 			},
 			observerRefs: firstBody.observerRefs,
 		});
-		const after = await getDb()<
-			Array<{
-				id: string;
-				updated_at: string;
-				action_args: Record<string, unknown>;
-			}>
-		>`
-			SELECT id, updated_at, action_args FROM scheduled_jobs
+		expect(await observerRows()).toEqual(before);
+		const syncAfter = await getDb()<typeof syncBefore>`
+			SELECT last_accepted_revision, accepted_request_fingerprint, updated_at
+			FROM toolbox_sales_battle_report_schedule_sync
 			WHERE organization_id = ${ORGANIZATION_ID}
-			  AND action_args->>'toolboxScheduleId' = 'sales_battle_report_schedule_001'
+			  AND toolbox_schedule_id = 'sales_battle_report_schedule_001'
 		`;
-		expect(after).toHaveLength(1);
-		expect(after[0]).toMatchObject({
-			id: before[0].id,
-			updated_at: before[0].updated_at,
-			action_args: { courseName: "技術分析全攻略" },
+		expect(syncAfter).toEqual(syncBefore);
+	});
+
+	test("repairs a missing observer on an exact equal revision", async () => {
+		await reconcileRequest(5, { salesTalkWeekdays: [0, 3] });
+		const before = await observerRows();
+		const missing = before.find(
+			(row) => row.action_args.salesTalkWeekday === 3,
+		);
+		expect(missing).toBeDefined();
+		await getDb()`DELETE FROM scheduled_jobs WHERE id = ${missing?.id}`;
+
+		const equal = await reconcileRequest(5, { salesTalkWeekdays: [3, 0, 3] });
+		const body = (await equal.json()) as {
+			reconciled: { created: string[] };
+		};
+
+		expect(equal.status).toBe(200);
+		expect(body.reconciled.created).toHaveLength(1);
+		const repaired = await observerRows();
+		expect(
+			repaired.map((row) => row.action_args.salesTalkWeekday).sort(),
+		).toEqual([0, 3]);
+	});
+
+	test("repairs duplicate extra paused and key drift on an exact equal revision", async () => {
+		await reconcileRequest(5, { salesTalkWeekdays: [0, 3] });
+		const initial = await observerRows();
+		const weekday0 = initial.find(
+			(row) => row.action_args.salesTalkWeekday === 0,
+		);
+		const weekday3 = initial.find(
+			(row) => row.action_args.salesTalkWeekday === 3,
+		);
+		expect(weekday0).toBeDefined();
+		expect(weekday3).toBeDefined();
+		await getDb()`
+			UPDATE scheduled_jobs SET paused = true, external_key = NULL
+			WHERE id = ${weekday0?.id}
+		`;
+		const preferredWeekday3 = await insertLegacyObserver({
+			weekday: 3,
+			revision: 9,
 		});
+		const extra = await insertLegacyObserver({
+			weekday: 5,
+			revision: 5,
+			externalKey:
+				"toolbox:sales-battle-report:sales_battle_report_schedule_001:weekday:5:observer",
+		});
+
+		const equal = await reconcileRequest(5, { salesTalkWeekdays: [0, 3] });
+		const body = (await equal.json()) as {
+			reconciled: {
+				updated: string[];
+				paused: string[];
+				deletedDuplicates: string[];
+			};
+		};
+
+		expect(equal.status).toBe(200);
+		expect(body.reconciled.deletedDuplicates).toEqual([weekday3?.id]);
+		expect(body.reconciled.paused).toContain(extra);
+		expect(body.reconciled.updated).toEqual(
+			expect.arrayContaining([weekday0?.id, preferredWeekday3]),
+		);
+		const repaired = await observerRows();
+		expect(
+			repaired.map((row) => [row.action_args.salesTalkWeekday, row.paused]),
+		).toEqual([
+			[0, false],
+			[3, false],
+			[5, true],
+		]);
+	});
+
+	test("serializes concurrent exact equal repairs to one observer per weekday", async () => {
+		await reconcileRequest(5, { salesTalkWeekdays: [0, 3] });
+		const missing = (await observerRows()).find(
+			(row) => row.action_args.salesTalkWeekday === 3,
+		);
+		await getDb()`DELETE FROM scheduled_jobs WHERE id = ${missing?.id}`;
+
+		const responses = await Promise.all(
+			Array.from({ length: 6 }, () =>
+				reconcileRequest(5, { salesTalkWeekdays: [0, 3] }),
+			),
+		);
+
+		expect(responses.every((response) => response.status === 200)).toBe(true);
+		const rows = await observerRows();
+		expect(rows).toHaveLength(2);
+		expect(rows.map((row) => row.action_args.salesTalkWeekday).sort()).toEqual([
+			0, 3,
+		]);
 	});
 
 	test("repairs missing, extra, and duplicate weekdays deterministically", async () => {
@@ -511,7 +638,16 @@ describe("sales battle report schedule reconciliation", () => {
 			}),
 		]);
 
-		expect(responses.every((response) => response.status === 200)).toBe(true);
+		expect(responses.map((response) => response.status).sort()).toEqual([
+			200, 409,
+		]);
+		const conflictResponse = responses.find(
+			(response) => response.status === 409,
+		);
+		expect(await conflictResponse?.json()).toMatchObject({
+			error: "revision_payload_conflict",
+			acceptedRevision: 10,
+		});
 		const rows = await observerRows();
 		expect(rows).toHaveLength(2);
 		expect(rows.filter((row) => !row.paused)).toHaveLength(2);

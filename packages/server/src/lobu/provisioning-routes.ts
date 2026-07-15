@@ -327,7 +327,10 @@ export function createProvisioningRoutes(
 				desiredState: desiredState as "active" | "paused" | "deleted",
 			});
 			if (!result.ok) {
-				if (result.error === "stale_revision") {
+				if (
+					result.error === "stale_revision" ||
+					result.error === "revision_payload_conflict"
+				) {
 					return c.json(
 						{
 							error: result.error,
