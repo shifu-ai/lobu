@@ -66,13 +66,13 @@ jobs:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Build worker image (amd64, load, no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           platforms: linux/amd64
@@ -110,7 +110,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - id: submodule
         uses: ./.github/actions/setup-submodule
@@ -118,13 +118,13 @@ jobs:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -132,7 +132,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_APP }}
           tags: |
@@ -141,14 +141,19 @@ jobs:
 
       - name: Build and push App image
         id: push-app
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           platforms: ${{ env.BUILD_PLATFORMS }}
           file: ./docker/app/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ needs.generate-tag.outputs.build_time }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            io.shifu.release.workflow=.github/workflows/build-images.yml
           build-args: |
             CACHEBUST=${{ github.sha }}
             APP_GIT_SHA=${{ github.sha }}
@@ -234,7 +239,7 @@ jobs:
           node <<'NODE'
           const fs = require('node:fs');
           const { createHash, createPrivateKey, sign } = require('node:crypto');
-          const { execFileSync } = require('node:child_process');
+          void (async () => {
           const path = 'lobu-app-unsigned-build-receipt.json';
           if (fs.statSync(path).size > 32768) throw new Error('unsigned receipt too large');
           if (fs.statSync('lobu-app-image-receipt.json').size > 32768) throw new Error('image receipt too large');
@@ -255,7 +260,13 @@ jobs:
           if (receipt.signing.algorithm !== 'Ed25519' || receipt.signing.purpose !== 'lobu_build_artifact_receipt') throw new Error('invalid signing policy');
           if (receipt.signing.keyId !== 'pending-protected-signer' || !process.env.RECEIPT_KEY_ID || !/^[A-Za-z0-9._:-]{1,128}$/.test(process.env.RECEIPT_KEY_ID)) throw new Error('invalid protected signing key id');
           if (image.sourceRepository !== process.env.GITHUB_REPOSITORY || image.gitRevision !== receipt.sourceRevision || image.buildTime !== receipt.buildTime || image.imageDigest !== receipt.artifactDigest || image.image !== `ghcr.io/shifu-ai/lobu-app:${image.image.split(':').at(-1)}`) throw new Error('independent build output mismatch');
-          execFileSync('docker', ['manifest', 'inspect', '--verbose', receipt.artifactIdentity], { timeout: 20000, maxBuffer: 65536, stdio: ['ignore', 'pipe', 'pipe'] });
+          const labels = await registryLabels(receipt.artifactDigest);
+          if (labels['org.opencontainers.image.revision'] !== process.env.GITHUB_SHA ||
+            labels['org.opencontainers.image.created'] !== receipt.buildTime ||
+            labels['org.opencontainers.image.source'] !== 'https://github.com/shifu-ai/lobu' ||
+            labels['io.shifu.release.workflow'] !== '.github/workflows/build-images.yml') {
+            throw new Error('registry label mismatch');
+          }
           if (!Array.isArray(receipt.provides) || receipt.provides.join(',') !== 'agent-release.readiness.v1' || !Array.isArray(receipt.requires) || receipt.requires.length) throw new Error('invalid capability contract');
           if (Date.parse(receipt.expiresAt) - Date.parse(receipt.observedAt) !== 172800000) throw new Error('invalid receipt lifetime');
           const canonical = value => JSON.stringify(value, (_k, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a],[b]) => a.localeCompare(b))) : item);
@@ -267,6 +278,71 @@ jobs:
           const output = canonical(receipt) + '\n';
           if (Buffer.byteLength(output) > 32768) throw new Error('signed receipt too large');
           fs.writeFileSync('lobu-app-signed-build-receipt.json', output, { flag: 'wx' });
+          })().catch((error) => { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); });
+
+          async function registryLabels(expectedDigest) {
+            const manifest = await fetchRegistryJson(`manifests/${expectedDigest}`, 131072,
+              'application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json', expectedDigest);
+            let manifests = [manifest.value];
+            if (Array.isArray(manifest.value.manifests)) {
+              const descriptors = manifest.value.manifests.filter((item) => item?.platform?.architecture !== 'unknown' &&
+                item?.annotations?.['vnd.docker.reference.type'] !== 'attestation-manifest');
+              if (descriptors.length < 1 || descriptors.length > 4) throw new Error('registry platform set invalid');
+              manifests = [];
+              for (const descriptor of descriptors) {
+                if (!digest(descriptor.digest)) throw new Error('registry descriptor invalid');
+                manifests.push((await fetchRegistryJson(`manifests/${descriptor.digest}`, 131072,
+                  'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json', descriptor.digest)).value);
+              }
+            }
+            let trusted = null;
+            for (const item of manifests) {
+              if (item?.schemaVersion !== 2 || !digest(item?.config?.digest) || !Array.isArray(item.layers) || item.layers.length > 256) throw new Error('registry manifest invalid');
+              const config = (await fetchRegistryJson(`blobs/${item.config.digest}`, 262144,
+                'application/vnd.oci.image.config.v1+json, application/vnd.docker.container.image.v1+json')).value;
+              const labels = config?.config?.Labels;
+              if (!plain(labels) || Object.keys(labels).length > 128 || Object.entries(labels).some(([key, value]) =>
+                key.length > 256 || typeof value !== 'string' || value.length > 2048)) throw new Error('registry labels invalid');
+              const selected = Object.fromEntries(['org.opencontainers.image.revision','org.opencontainers.image.created',
+                'org.opencontainers.image.source','io.shifu.release.workflow'].map((key) => [key, labels[key]]));
+              if (trusted && JSON.stringify(selected) !== JSON.stringify(trusted)) throw new Error('registry platform labels disagree');
+              trusted = selected;
+            }
+            if (!trusted) throw new Error('registry labels missing');
+            return trusted;
+          }
+
+          async function fetchRegistryJson(path, maxBytes, accept, expectedDigest) {
+            const url = `https://ghcr.io/v2/shifu-ai/lobu-app/${path}`;
+            let response = await fetch(url, { headers: { accept }, signal: AbortSignal.timeout(15000) });
+            if (response.status === 401) {
+              const challenge = response.headers.get('www-authenticate') ?? '';
+              await response.body?.cancel();
+              const match = challenge.match(/^Bearer realm="(https:\/\/ghcr\.io\/token)",service="(ghcr\.io)",scope="(repository:shifu-ai\/lobu-app:pull)"$/);
+              if (!match) throw new Error('registry auth challenge invalid');
+              const tokenResponse = await fetch(`${match[1]}?service=${encodeURIComponent(match[2])}&scope=${encodeURIComponent(match[3])}`,
+                { signal: AbortSignal.timeout(15000) });
+              const tokenBody = await boundedJson(tokenResponse, 16384);
+              if (!plain(tokenBody) || typeof tokenBody.token !== 'string' || tokenBody.token.length > 8192) throw new Error('registry token invalid');
+              response = await fetch(url, { headers: { accept, authorization: `Bearer ${tokenBody.token}` }, signal: AbortSignal.timeout(15000) });
+            }
+            if (expectedDigest && response.headers.get('docker-content-digest') !== expectedDigest) throw new Error('registry digest mismatch');
+            return { value: await boundedJson(response, maxBytes) };
+          }
+
+          async function boundedJson(response, maxBytes) {
+            if (!response.ok || !response.body) throw new Error('registry response unavailable');
+            const declared = response.headers.get('content-length');
+            if (declared && (!/^\d+$/.test(declared) || Number(declared) > maxBytes)) { await response.body.cancel(); throw new Error('registry response too large'); }
+            const reader = response.body.getReader(); const chunks = []; let total = 0;
+            while (true) { const item = await reader.read(); if (item.done) break; total += item.value.byteLength;
+              if (total > maxBytes) { await reader.cancel(); throw new Error('registry response too large'); } chunks.push(item.value); }
+            const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            if (!plain(value)) throw new Error('registry response invalid');
+            return value;
+          }
+          function plain(value) { return typeof value === 'object' && value !== null && !Array.isArray(value); }
+          function digest(value) { return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value); }
           NODE
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -311,16 +387,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -328,7 +404,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_WORKER }}
           tags: |
@@ -336,7 +412,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Worker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           platforms: ${{ env.BUILD_PLATFORMS }}
@@ -367,16 +443,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -384,7 +460,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_EMBEDDINGS }}
           tags: |
@@ -392,7 +468,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Embeddings Service image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           platforms: ${{ env.BUILD_PLATFORMS }}

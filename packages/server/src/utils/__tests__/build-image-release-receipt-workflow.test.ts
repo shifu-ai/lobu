@@ -25,6 +25,7 @@ describe("app image build receipt workflow", () => {
     expect(workflow).toContain("${{ steps.push-app.outputs.digest }}");
     expect(workflow).toContain("name: lobu-app-image-receipt");
     expect(workflow).not.toMatch(/actions\/(?:upload|download)-artifact@v4(?:\s|$)/);
+    expect(workflow).not.toMatch(/uses:\s+(?:actions|docker)\/[^@\s]+@v\d+/);
     expect(workflow).toContain("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02");
     expect(workflow).toContain("Verify immutable app image is pullable");
     expect(workflow).toContain("publish-agent-release-build-receipt.mjs");
@@ -49,8 +50,18 @@ describe("app image build receipt workflow", () => {
     expect(signerJob).toContain("receipt.provenance.runAttempt !== process.env.GITHUB_RUN_ATTEMPT");
     expect(signerJob).toContain("receipt.signing.keyId !== 'pending-protected-signer'");
     expect(signerJob).toContain("receipt.signing.keyId = process.env.RECEIPT_KEY_ID");
-    expect(signerJob).toContain("['manifest', 'inspect', '--verbose', receipt.artifactIdentity]");
+    expect(signerJob).toContain("fetchRegistryJson(`manifests/${expectedDigest}`");
     expect(signerJob).toContain("receipt.artifactIdentity");
+    expect(workflow).toContain("org.opencontainers.image.revision=${{ github.sha }}");
+    expect(workflow).toContain("org.opencontainers.image.created=${{ needs.generate-tag.outputs.build_time }}");
+    expect(workflow).toContain("org.opencontainers.image.source=https://github.com/${{ github.repository }}");
+    expect(workflow).toContain("io.shifu.release.workflow=.github/workflows/build-images.yml");
+    expect(signerJob).toContain("fetchRegistryJson");
+    expect(signerJob).toContain("registryLabels");
+    expect(signerJob).toContain("labels['org.opencontainers.image.revision'] !== process.env.GITHUB_SHA");
+    expect(signerJob).toContain("labels['org.opencontainers.image.created'] !== receipt.buildTime");
+    expect(signerJob).toContain("labels['org.opencontainers.image.source'] !== 'https://github.com/shifu-ai/lobu'");
+    expect(signerJob).toContain("labels['io.shifu.release.workflow'] !== '.github/workflows/build-images.yml'");
     const publisherJob = workflow.slice(
       workflow.indexOf("  publish-lobu-build-receipt:"),
       workflow.indexOf("  build-worker:"),
@@ -75,6 +86,17 @@ describe("app image build receipt workflow", () => {
     expect(workflow).not.toContain(
       "APP_DECLARED_IMAGE_DIGEST=${{ steps.push-app.outputs.digest }}",
     );
+  });
+
+  it("rejects substitution of an old existing registry digest before protected signing", () => {
+    const workflow = readFileSync(path.resolve(__dirname,
+      "../../../../../.github/workflows/build-images.yml"), "utf8");
+    const signer = workflow.slice(workflow.indexOf("  sign-lobu-build-receipt:"),
+      workflow.indexOf("  publish-lobu-build-receipt:"));
+    expect(signer).toContain("receipt.sourceRevision !== process.env.GITHUB_SHA");
+    expect(signer).toContain("labels['org.opencontainers.image.revision'] !== process.env.GITHUB_SHA");
+    expect(signer.indexOf("registry label mismatch")).toBeLessThan(signer.indexOf("const key = createPrivateKey"));
+    expect(signer.indexOf("registry label mismatch")).toBeLessThan(signer.indexOf("receipt.signing.signature"));
   });
 
   it("emits the exact v1 build-artifact payload without a second capability field", () => {
