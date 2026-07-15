@@ -49,10 +49,12 @@ describe("session context release provenance", () => {
 
   test("uses the per-run token and never reuses context across release provenance", async () => {
     const seenAuthorizations: string[] = [];
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
-      async (_input, init) => {
-        const authorization = (init?.headers as Record<string, string> | undefined)
-          ?.Authorization;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input, init) => {
+        const authorization = (
+          init?.headers as Record<string, string> | undefined
+        )?.Authorization;
         if (authorization?.includes("Bearer ")) {
           seenAuthorizations.push(authorization);
         }
@@ -68,8 +70,7 @@ describe("session context release provenance", () => {
             mcpTools: {},
           })
         );
-      }
-    );
+      });
     const first = token("r1");
     const firstAuthorization = `Bearer ${first}`;
     const active = await getOpenClawSessionContext({ workerToken: first });
