@@ -82,6 +82,30 @@ async function insertLegacyObserver(input: {
 	return rows[0].id;
 }
 
+async function insertCanonicalKeyConflict(input: {
+	actionType: string;
+	toolboxScheduleId: string;
+	weekday: number;
+}) {
+	const externalKey =
+		"toolbox:sales-battle-report:sales_battle_report_schedule_001:weekday:0:observer";
+	const rows = await getDb()<Array<{ id: string }>>`
+		INSERT INTO scheduled_jobs (
+			external_key, organization_id, action_type, action_args, cron,
+			next_run_at, description, created_by_user
+		) VALUES (
+			${externalKey}, ${ORGANIZATION_ID}, ${input.actionType},
+			${getDb().json({
+				toolboxScheduleId: input.toolboxScheduleId,
+				salesTalkWeekday: input.weekday,
+			})},
+			NULL, now(), 'unrelated canonical key holder', 'toolbox-user-2'
+		)
+		RETURNING id
+	`;
+	return { id: rows[0].id, externalKey };
+}
+
 function buildApp() {
 	const app = new Hono();
 	app.use("*", async (c, next) => {
@@ -200,6 +224,33 @@ describe("sales battle report schedule reconciliation", () => {
 		expect(await response.json()).toEqual({
 			error: "invalid_sales_battle_report_schedule",
 		});
+	});
+
+	test("accepts the largest PostgreSQL integer schedule revision", async () => {
+		const response = await reconcileRequest(2_147_483_647);
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({
+			ok: true,
+			acceptedRevision: 2_147_483_647,
+		});
+	});
+
+	test("rejects schedule revisions above the PostgreSQL integer maximum", async () => {
+		const response = await reconcileRequest(2_147_483_648);
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({
+			error: "invalid_sales_battle_report_schedule",
+		});
+		expect(await observerRows()).toEqual([]);
+	});
+
+	test("rejects unsafe integer schedule revisions before database access", async () => {
+		const response = await reconcileRequest(Number.MAX_SAFE_INTEGER + 1);
+
+		expect(response.status).toBe(400);
+		expect(await observerRows()).toEqual([]);
 	});
 
 	test("rejects a stale revision without changing observer jobs", async () => {
@@ -467,5 +518,95 @@ describe("sales battle report schedule reconciliation", () => {
 		expect(rows.map((row) => row.action_args.salesTalkWeekday).sort()).toEqual([
 			0, 3,
 		]);
+	});
+
+	test("rejects an unrelated action holding a canonical observer key without mutation", async () => {
+		await reconcileRequest(1, { salesTalkWeekdays: [0] });
+		const conflict = await insertCanonicalKeyConflict({
+			actionType: "wake_agent",
+			toolboxScheduleId: "unrelated_schedule",
+			weekday: 0,
+		});
+		const before = await getDb()<
+			Array<{
+				id: string;
+				external_key: string;
+				action_type: string;
+				action_args: unknown;
+			}>
+		>`
+			SELECT id, external_key, action_type, action_args
+			FROM scheduled_jobs ORDER BY id
+		`;
+
+		const response = await reconcileRequest(2, { salesTalkWeekdays: [0] });
+
+		expect(response.status).toBe(409);
+		expect(await response.json()).toEqual({
+			error: "observer_external_key_conflict",
+			conflictingJobIds: [conflict.id],
+		});
+		const after = await getDb()<typeof before>`
+			SELECT id, external_key, action_type, action_args
+			FROM scheduled_jobs ORDER BY id
+		`;
+		expect(after).toEqual(before);
+		const sync = await getDb()<Array<{ last_accepted_revision: number }>>`
+			SELECT last_accepted_revision
+			FROM toolbox_sales_battle_report_schedule_sync
+			WHERE organization_id = ${ORGANIZATION_ID}
+			  AND toolbox_schedule_id = 'sales_battle_report_schedule_001'
+		`;
+		expect(sync).toEqual([{ last_accepted_revision: 1 }]);
+	});
+
+	test("rejects a different observer schedule holding this schedule's canonical key", async () => {
+		await reconcileRequest(1, { salesTalkWeekdays: [0] });
+		const conflict = await insertCanonicalKeyConflict({
+			actionType: "sales_battle_report_observer",
+			toolboxScheduleId: "sales_battle_report_schedule_other",
+			weekday: 0,
+		});
+
+		const response = await reconcileRequest(2, { salesTalkWeekdays: [0] });
+
+		expect(response.status).toBe(409);
+		expect(await response.json()).toEqual({
+			error: "observer_external_key_conflict",
+			conflictingJobIds: [conflict.id],
+		});
+		const holder = await getDb()<
+			Array<{ external_key: string; action_args: Record<string, unknown> }>
+		>`
+			SELECT external_key, action_args FROM scheduled_jobs WHERE id = ${conflict.id}
+		`;
+		expect(holder).toEqual([
+			{
+				external_key: conflict.externalKey,
+				action_args: {
+					toolboxScheduleId: "sales_battle_report_schedule_other",
+					salesTalkWeekday: 0,
+				},
+			},
+		]);
+	});
+
+	test("uses the typed row revision when legacy action args revision is malformed", async () => {
+		await reconcileRequest(1, { salesTalkWeekdays: [0] });
+		const legacyId = await insertLegacyObserver({ weekday: 0, revision: 9 });
+		await getDb()`
+			UPDATE scheduled_jobs
+			SET action_args = jsonb_set(action_args, '{scheduleRevision}', '"broken"'),
+				created_at = '2100-01-01T00:00:00Z'
+			WHERE id = ${legacyId}
+		`;
+
+		const response = await reconcileRequest(2, { salesTalkWeekdays: [0] });
+
+		expect(response.status).toBe(200);
+		const rows = await observerRows();
+		expect(rows).toHaveLength(1);
+		expect(rows[0].id).toBe(legacyId);
+		expect(rows[0].action_args.scheduleRevision).toBe(2);
 	});
 });

@@ -33,6 +33,12 @@ export interface StaleSalesBattleReportScheduleResult {
 	acceptedRevision: number;
 }
 
+export interface ConflictingSalesBattleReportObserverKeyResult {
+	ok: false;
+	error: "observer_external_key_conflict";
+	conflictingJobIds: string[];
+}
+
 const OBSERVER_ACTION_TYPE = "sales_battle_report_observer";
 const OBSERVER_CRON = "0 16 * * *";
 
@@ -89,14 +95,23 @@ function preferredObserver(
 	right: ScheduledJobRow,
 ): number {
 	if (left.paused !== right.paused) return left.paused ? 1 : -1;
-	const revisionDelta =
-		Number(right.action_args.scheduleRevision ?? right.schedule_revision) -
-		Number(left.action_args.scheduleRevision ?? left.schedule_revision);
+	const revisionDelta = observerRevision(right) - observerRevision(left);
 	if (revisionDelta !== 0) return revisionDelta;
+	const leftCreatedAt = new Date(left.created_at).getTime();
+	const rightCreatedAt = new Date(right.created_at).getTime();
 	const createdDelta =
-		new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
+		(Number.isFinite(rightCreatedAt) ? rightCreatedAt : 0) -
+		(Number.isFinite(leftCreatedAt) ? leftCreatedAt : 0);
 	if (createdDelta !== 0) return createdDelta;
 	return right.id.localeCompare(left.id);
+}
+
+function observerRevision(row: ScheduledJobRow): number {
+	const actionRevision = Number(row.action_args.scheduleRevision);
+	if (Number.isSafeInteger(actionRevision)) return actionRevision;
+	const storedRevision = Number(row.schedule_revision);
+	if (Number.isSafeInteger(storedRevision)) return storedRevision;
+	return 0;
 }
 
 export async function reconcileSalesBattleReportSchedule(
@@ -104,6 +119,7 @@ export async function reconcileSalesBattleReportSchedule(
 ): Promise<
 	| ReconcileSalesBattleReportScheduleResult
 	| StaleSalesBattleReportScheduleResult
+	| ConflictingSalesBattleReportObserverKeyResult
 > {
 	const sql = getDb();
 	return sql.begin(async (tx) => {
@@ -183,11 +199,23 @@ export async function reconcileSalesBattleReportSchedule(
 					.map((row) => row.id),
 			};
 		}
+		const matchingIds = new Set(existing.map((row) => row.id));
+		const conflictingJobIds = lockedRows
+			.filter((row) => !matchingIds.has(row.id))
+			.map((row) => row.id)
+			.sort();
+		if (conflictingJobIds.length > 0) {
+			return {
+				ok: false,
+				error: "observer_external_key_conflict",
+				conflictingJobIds,
+			};
+		}
 
 		const originalExternalKeys = new Map(
 			existing.map((row) => [row.id, row.external_key]),
 		);
-		for (const row of lockedRows) {
+		for (const row of existing) {
 			if (row.external_key === null) continue;
 			await tx`
 				UPDATE scheduled_jobs

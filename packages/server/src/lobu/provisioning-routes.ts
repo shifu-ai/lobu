@@ -295,8 +295,9 @@ export function createProvisioningRoutes(
 				!createdByUser ||
 				!agentId ||
 				!courseName ||
-				!Number.isInteger(body.scheduleRevision) ||
+				!Number.isSafeInteger(body.scheduleRevision) ||
 				Number(body.scheduleRevision) < 1 ||
+				Number(body.scheduleRevision) > 2_147_483_647 ||
 				!weekdays.length ||
 				!weekdays.every(
 					(weekday) =>
@@ -326,10 +327,19 @@ export function createProvisioningRoutes(
 				desiredState: desiredState as "active" | "paused" | "deleted",
 			});
 			if (!result.ok) {
+				if (result.error === "stale_revision") {
+					return c.json(
+						{
+							error: result.error,
+							acceptedRevision: result.acceptedRevision,
+						},
+						409,
+					);
+				}
 				return c.json(
 					{
 						error: result.error,
-						acceptedRevision: result.acceptedRevision,
+						conflictingJobIds: result.conflictingJobIds,
 					},
 					409,
 				);
