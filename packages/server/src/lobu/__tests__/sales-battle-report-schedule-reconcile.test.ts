@@ -136,8 +136,10 @@ describe("sales battle report schedule reconciliation", () => {
 
 	test("rejects an oversized reconciliation body before database mutation", async () => {
 		const app = buildApp();
+		const path =
+			"/api/provisioning/sales-battle-report-schedules/sales_battle_report_schedule_001";
 		const declared = await app.request(
-			"/api/provisioning/sales-battle-report-schedules/sales_battle_report_schedule_001",
+			path,
 			{
 				method: "PUT",
 				headers: {
@@ -149,6 +151,18 @@ describe("sales battle report schedule reconciliation", () => {
 		);
 		expect(declared.status).toBe(413);
 		expect(await declared.json()).toEqual({
+			error: "sales_battle_report_schedule_body_too_large",
+		});
+
+		const actualRequest = new Request(`http://localhost${path}`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ padding: "x".repeat(65 * 1024) }),
+		});
+		expect(actualRequest.headers.has("content-length")).toBe(false);
+		const actual = await app.request(actualRequest);
+		expect(actual.status).toBe(413);
+		expect(await actual.json()).toEqual({
 			error: "sales_battle_report_schedule_body_too_large",
 		});
 		expect(await observerRows()).toEqual([]);
