@@ -179,6 +179,8 @@ export interface AgentReleaseEvidence {
 	status: "applied" | "drifted";
 	revisionRef: string;
 	settingsHash: string;
+	baselineVersionId?: string;
+	effectiveSettingsDigest?: string;
 	liveSettingsHash?: string;
 	appliedAt: string;
 }
@@ -199,6 +201,8 @@ export interface AgentReleasePostApplyEvidence {
 	manifestDigest: string;
 	revisionRef: string | null;
 	settingsHash: string;
+	baselineVersionId?: string;
+	effectiveSettingsDigest?: string;
 	drifted: boolean;
 	postApplySmoke: { passed: boolean; digest: string };
 	observedAt: string;
@@ -516,8 +520,8 @@ async function applyInTransaction(
 		       applied_release_id, applied_release_sequence, applied_feed_sequence,
 		       applied_channel, applied_feed_digest, environment,
 		       rollback_to_release_id, rollback_to_sequence,
-		       manifest_digest, status, revision_ref, settings_hash, applied_at
-		       , personal_baseline_version_id,
+		       manifest_digest, status, revision_ref, settings_hash, applied_at,
+		       personal_baseline_version_id,
 		       personal_baseline_effective_settings_digest, personal_baseline_settings
 		FROM agent_release_applies
 		WHERE organization_id = ${input.organizationId}
@@ -627,7 +631,10 @@ async function applyInTransaction(
 				          applied_release_id, applied_release_sequence, applied_feed_sequence,
 				          applied_channel, applied_feed_digest, environment,
 				          rollback_to_release_id, rollback_to_sequence,
-				          manifest_digest, status, revision_ref, settings_hash, applied_at
+				          manifest_digest, status, revision_ref, settings_hash, applied_at,
+				          personal_baseline_version_id,
+				          personal_baseline_effective_settings_digest,
+				          personal_baseline_settings
 			`;
 			return {
 				...evidenceFromReceipt(input.agentId, advancedRows[0]),
@@ -760,7 +767,10 @@ async function applyInTransaction(
 		          applied_release_id, applied_release_sequence, applied_feed_sequence,
 		          applied_channel, applied_feed_digest, environment,
 		          rollback_to_release_id, rollback_to_sequence,
-		          manifest_digest, status, revision_ref, settings_hash, applied_at
+		          manifest_digest, status, revision_ref, settings_hash, applied_at,
+		          personal_baseline_version_id,
+		          personal_baseline_effective_settings_digest,
+		          personal_baseline_settings
 	`;
 	return {
 		...evidenceFromReceipt(input.agentId, receipt[0]),
@@ -950,6 +960,7 @@ function evidenceFromReceipt(
 	agentId: string,
 	row: ReceiptRow,
 ): AgentReleaseEvidence {
+	const personalIdentity = personalBaselineIdentityFromReceipt(row);
 	return {
 		ok: true,
 		agentId,
@@ -959,13 +970,54 @@ function evidenceFromReceipt(
 		channel: row.applied_channel,
 		feedDigest: row.applied_feed_digest,
 		manifestDigest: row.manifest_digest,
-		status: "applied",
+		status:
+			personalIdentity.effectiveSettingsDigest !== undefined &&
+			!safeDigestEqual(
+				personalIdentity.effectiveSettingsDigest,
+				row.settings_hash,
+			)
+				? "drifted"
+				: "applied",
 		revisionRef: row.revision_ref,
 		settingsHash: row.settings_hash,
+		...personalIdentity,
 		appliedAt:
 			row.applied_at instanceof Date
 				? row.applied_at.toISOString()
 				: new Date(row.applied_at).toISOString(),
+	};
+}
+
+function personalBaselineIdentityFromReceipt(row: ReceiptRow): {
+	baselineVersionId?: string;
+	effectiveSettingsDigest?: string;
+} {
+	const hasVersionId = row.personal_baseline_version_id != null;
+	const hasEffectiveDigest =
+		row.personal_baseline_effective_settings_digest != null;
+	const hasSettings = row.personal_baseline_settings != null;
+	if (!hasVersionId && !hasEffectiveDigest && !hasSettings) return {};
+	if (
+		!hasVersionId ||
+		!hasEffectiveDigest ||
+		!hasSettings ||
+		!PERSONAL_BASELINE_VERSION_PATTERN.test(
+			row.personal_baseline_version_id as string,
+		) ||
+		!SHA256_PATTERN.test(
+			row.personal_baseline_effective_settings_digest as string,
+		)
+	) {
+		throw releaseError(
+			"agent_release_personal_baseline_receipt_identity_invalid",
+			409,
+			"Personal baseline receipt identity must be present as a closed pair",
+		);
+	}
+	return {
+		baselineVersionId: row.personal_baseline_version_id as string,
+		effectiveSettingsDigest:
+			row.personal_baseline_effective_settings_digest as string,
 	};
 }
 
@@ -2367,6 +2419,12 @@ function signPostApplyEvidence(input: {
 		contract: "lobu-managed-settings-readback-v1",
 		passed: true,
 		settingsHash: input.result.settingsHash,
+		...(input.result.baselineVersionId === undefined
+			? {}
+			: {
+					baselineVersionId: input.result.baselineVersionId,
+					effectiveSettingsDigest: input.result.effectiveSettingsDigest,
+				}),
 		revisionRef: input.result.revisionRef,
 	});
 	const unsigned = {
@@ -2385,7 +2443,14 @@ function signPostApplyEvidence(input: {
 		manifestDigest: input.result.manifestDigest,
 		revisionRef: input.result.revisionRef,
 		settingsHash: input.result.settingsHash,
-		drifted: false,
+		...(input.result.baselineVersionId === undefined
+			? {}
+			: {
+					baselineVersionId: input.result.baselineVersionId,
+					effectiveSettingsDigest: input.result
+						.effectiveSettingsDigest as string,
+				}),
+		drifted: input.result.status === "drifted",
 		postApplySmoke: { passed: true, digest: smokeDigest },
 		observedAt,
 		expiresAt,

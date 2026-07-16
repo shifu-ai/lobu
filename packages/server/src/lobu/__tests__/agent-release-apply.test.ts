@@ -256,6 +256,8 @@ describe("signed managed agent release apply", () => {
 				signature: expect.any(String),
 			},
 		});
+		expect(evidence).not.toHaveProperty("baselineVersionId");
+		expect(evidence).not.toHaveProperty("effectiveSettingsDigest");
 		const { signature, ...evidenceSigning } = evidence.evidenceSigning;
 		expect(
 			verifySignature(
@@ -279,6 +281,8 @@ describe("signed managed agent release apply", () => {
 		const response = await putApply(app, request);
 		expect(response.status).toBe(200);
 		await expect(response.json()).resolves.toMatchObject({
+			baselineVersionId: request.baselineVersionId,
+			effectiveSettingsDigest: request.effectiveSettingsDigest,
 			settingsHash: request.effectiveSettingsDigest,
 			drifted: false,
 		});
@@ -309,6 +313,8 @@ describe("signed managed agent release apply", () => {
 		expect(status.status).toBe(200);
 		await expect(status.json()).resolves.toMatchObject({
 			status: "applied",
+			baselineVersionId: request.baselineVersionId,
+			effectiveSettingsDigest: request.effectiveSettingsDigest,
 			settingsHash: request.effectiveSettingsDigest,
 		});
 		const grants = await app.request(
@@ -326,6 +332,84 @@ describe("signed managed agent release apply", () => {
 		);
 		expect(grants.status).toBe(200);
 		await expect(grants.json()).resolves.toMatchObject({ ok: true });
+	});
+
+	test("returns the persisted personal baseline identity instead of echoing the retry command", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		expect((await putApply(app, request)).status).toBe(200);
+		const persistedBaselineVersionId = `personal-agent-baseline-v1-${"d".repeat(64)}`;
+		const sql = await db();
+		await sql`
+			UPDATE agent_release_applies
+			SET personal_baseline_version_id = ${persistedBaselineVersionId}
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
+		`;
+
+		request.expectedCurrentReleaseSequence =
+			request.signedManifest.releaseSequence;
+		request.commandDigest = commandDigest(request);
+		const retry = await putApply(app, request);
+		expect(retry.status).toBe(200);
+		await expect(retry.json()).resolves.toMatchObject({
+			baselineVersionId: persistedBaselineVersionId,
+			effectiveSettingsDigest: request.effectiveSettingsDigest,
+		});
+
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(status.status).toBe(200);
+		await expect(status.json()).resolves.toMatchObject({
+			baselineVersionId: persistedBaselineVersionId,
+			effectiveSettingsDigest: request.effectiveSettingsDigest,
+		});
+	});
+
+	test("fails closed when a persisted personal baseline identity pair is incomplete", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		expect((await putApply(app, request)).status).toBe(200);
+		const sql = await db();
+		await sql`
+			UPDATE agent_release_applies
+			SET personal_baseline_effective_settings_digest = NULL
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
+		`;
+
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(status.status).toBe(409);
+		await expect(status.json()).resolves.toEqual({
+			error: "agent_release_personal_baseline_receipt_identity_invalid",
+			error_description:
+				"Personal baseline receipt identity must be present as a closed pair",
+		});
+	});
+
+	test("reports drift when the persisted personal baseline digest no longer matches settings", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		expect((await putApply(app, request)).status).toBe(200);
+		const persistedDigest = `sha256:${"e".repeat(64)}`;
+		const sql = await db();
+		await sql`
+			UPDATE agent_release_applies
+			SET personal_baseline_effective_settings_digest = ${persistedDigest}
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
+		`;
+
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(status.status).toBe(200);
+		await expect(status.json()).resolves.toMatchObject({
+			status: "drifted",
+			baselineVersionId: request.baselineVersionId,
+			effectiveSettingsDigest: persistedDigest,
+			settingsHash: request.effectiveSettingsDigest,
+		});
 	});
 
 	for (const family of ["instructions", "skills", "mcp", "tool policy", "runtime"] as const) {
@@ -687,6 +771,8 @@ describe("signed managed agent release apply", () => {
 			settingsHash: applied.settingsHash,
 			appliedAt: expect.any(String),
 		});
+		expect(evidence).not.toHaveProperty("baselineVersionId");
+		expect(evidence).not.toHaveProperty("effectiveSettingsDigest");
 		expect(JSON.stringify(evidence)).not.toContain("release identity");
 		expect(evidence).not.toHaveProperty("settings");
 	});
