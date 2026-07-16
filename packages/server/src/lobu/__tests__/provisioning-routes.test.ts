@@ -1290,6 +1290,80 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 		await expect(verification.json()).resolves.toMatchObject({ ok: true });
 	});
 
+	for (const existingState of ["denied", "expired"] as const) {
+		test(`reactivates an unowned ${existingState} desired grant without later claiming or deleting it`, async () => {
+			const app = await buildApp();
+			const agentId = `shifu-u-fenced-${existingState}-grant`;
+			const wildcard = "/mcp/notion/tools/*";
+			const expectedTool = "/mcp/notion/tools/notion_search";
+			const legacy = await app.request("/api/provisioning/agents", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					agentId,
+					name: "Existing agent",
+					ownerUserId: "toolbox-user-fenced",
+					settings: { preApprovedTools: [wildcard] },
+				}),
+			});
+			expect(legacy.status).toBe(201);
+
+			const { GrantStore } = await import(
+				"../../gateway/permissions/grant-store.js"
+			);
+			await new GrantStore().grant(
+				agentId,
+				wildcard,
+				existingState === "expired" ? Date.now() - 1_000 : null,
+				existingState === "denied",
+				ORG_ID,
+			);
+
+			const verify = (revisionId: string) =>
+				app.request(
+					`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+					{
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({
+							revisionId,
+							expectedGrantPatterns: [expectedTool],
+						}),
+					},
+				);
+			await expect((await verify("before-fenced-apply")).json()).resolves.toMatchObject({
+				ok: false,
+				errorCode: "runtime_grants_missing",
+			});
+
+			const apply = await putFencedAgent(
+				app,
+				agentId,
+				fencedProvisioningBody({
+					settings: { preApprovedTools: [wildcard] },
+				}),
+			);
+			expect(apply.status).toBe(200);
+			await expect((await verify("after-fenced-apply")).json()).resolves.toMatchObject({
+				ok: true,
+			});
+
+			const removeFromBaseline = await putFencedAgent(
+				app,
+				agentId,
+				fencedProvisioningBody({
+					claimGeneration: 2,
+					claimToken: FENCE_TOKEN_B,
+					settings: { userMd: "no fenced grants" },
+				}),
+			);
+			expect(removeFromBaseline.status).toBe(200);
+			await expect(
+				(await verify("after-fenced-removal")).json(),
+			).resolves.toMatchObject({ ok: true });
+		});
+	}
+
 	test("rejects malformed and unbounded fence fields before creating an agent", async () => {
 		const app = await buildApp();
 		const invalidBodies = [

@@ -125,10 +125,16 @@ async function syncProvisioningGrantsInTransaction(
 	}
 
 	const owned = await tx<{ kind: string; pattern: string }>`
-		SELECT kind, pattern
-		FROM agent_fenced_provisioning_grants
-		WHERE organization_id = ${organizationId}
-		  AND agent_id = ${agentId}
+		SELECT owned.kind, owned.pattern
+		FROM agent_fenced_provisioning_grants owned
+		JOIN grants grant_row
+		  ON grant_row.organization_id = owned.organization_id
+		 AND grant_row.agent_id = owned.agent_id
+		 AND grant_row.kind = owned.kind
+		 AND grant_row.pattern = owned.pattern
+		WHERE owned.organization_id = ${organizationId}
+		  AND owned.agent_id = ${agentId}
+		FOR UPDATE OF owned, grant_row
 	`;
 	const ownedKeys = new Set(
 		owned.map((row) => `${row.kind}\u0000${row.pattern}`),
@@ -156,13 +162,17 @@ async function syncProvisioningGrantsInTransaction(
 
 	for (const [key, grant] of desired) {
 		if (ownedKeys.has(key)) {
-			await tx`
+			const reactivated = await tx`
 				UPDATE grants SET expires_at = NULL, granted_at = NOW(), denied = false
 				WHERE organization_id = ${organizationId}
 				  AND agent_id = ${agentId}
 				  AND kind = ${grant.kind}
 				  AND pattern = ${grant.pattern}
+				RETURNING 1
 			`;
+			if (reactivated.length === 0) {
+				throw new Error("Required unowned grant changed during fenced apply");
+			}
 			continue;
 		}
 
@@ -176,7 +186,19 @@ async function syncProvisioningGrantsInTransaction(
 			ON CONFLICT (organization_id, agent_id, kind, pattern) DO NOTHING
 			RETURNING 1
 		`;
-		if (inserted.length === 0) continue;
+		if (inserted.length === 0) {
+			// A manual/legacy grant already owns this row. Make the required
+			// capability usable for this winning settings generation, but do not
+			// claim fenced ownership; a later baseline removal must preserve it.
+			await tx`
+				UPDATE grants SET expires_at = NULL, granted_at = NOW(), denied = false
+				WHERE organization_id = ${organizationId}
+				  AND agent_id = ${agentId}
+				  AND kind = ${grant.kind}
+				  AND pattern = ${grant.pattern}
+			`;
+			continue;
+		}
 		await tx`
 			INSERT INTO agent_fenced_provisioning_grants (
 				organization_id, agent_id, kind, pattern
