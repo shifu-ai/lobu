@@ -84,6 +84,65 @@ describe('migration invariants', () => {
       );
     });
 
+    it('serves completed receipt lookup by organization and memory event from its partial index', async () => {
+      const indexes = await getTestDb()`
+        SELECT indexdef
+        FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname = 'course_memory_apply_receipts_org_memory_event_completed'
+      `;
+      expect(indexes).toHaveLength(1);
+      expect(String(indexes[0]?.indexdef)).toContain('(organization_id, memory_event_id)');
+      expect(String(indexes[0]?.indexdef)).toContain("WHERE (outcome = 'completed'::text)");
+      const plan = await getTestDb().begin(async (tx) => {
+        await tx`
+          INSERT INTO organization (id, name, slug)
+          VALUES ('org-plan', 'Receipt plan', 'org-plan')
+          ON CONFLICT (id) DO NOTHING
+        `;
+        await tx`
+          WITH inserted AS (
+            INSERT INTO events (organization_id, origin_id, title)
+            SELECT 'org-plan', 'receipt-plan-' || value, 'Receipt plan ' || value
+            FROM generate_series(1, 2000) AS value
+            RETURNING id
+          ), numbered AS (
+            SELECT id, row_number() OVER (ORDER BY id) AS revision
+            FROM inserted
+          )
+          INSERT INTO course_memory_apply_receipts (
+            id, receipt_ref, organization_id, owner_user_id, agent_id,
+            course_entity_id, idempotency_key, requested_revision,
+            accepted_revision, applied_revision, content_digest,
+            request_fingerprint, memory_event_id, index_status, outcome, trace_id
+          )
+          SELECT 'receipt-plan-' || id, 'receipt:plan:' || id, 'org-plan',
+                 'owner-plan', 'agent-plan', 'course-plan', 'key-plan-' || id,
+                 revision, revision, revision, ${`sha256:${'a'.repeat(64)}`},
+                 ${`sha256:${'b'.repeat(64)}`}, id, 'pending', 'completed',
+                 'trace-plan-' || id
+          FROM numbered
+        `;
+        await tx.unsafe('ANALYZE course_memory_apply_receipts');
+        const target = await tx`
+          SELECT min(memory_event_id) AS id
+          FROM course_memory_apply_receipts
+          WHERE organization_id = 'org-plan'
+        `;
+        return tx.unsafe(`
+          EXPLAIN SELECT id
+          FROM course_memory_apply_receipts
+          WHERE organization_id = 'org-plan'
+            AND memory_event_id = $1
+            AND outcome = 'completed'
+        `, [target[0]?.id]);
+      });
+
+      expect(plan.map((row) => String(row['QUERY PLAN'])).join('\n')).toContain(
+        'course_memory_apply_receipts_org_memory_event_completed'
+      );
+    });
+
     it('has an append-only, idempotent course memory index observation log', async () => {
       const sql = getTestDb();
       const columns = await sql`

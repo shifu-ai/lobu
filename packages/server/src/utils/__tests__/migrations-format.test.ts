@@ -56,4 +56,15 @@ describe('migration files (dbmate format)', () => {
     expect(sql).toContain('trg_course_memory_index_observations_append_only');
     expect(sql).toContain('BEFORE UPDATE OR DELETE ON public.course_memory_index_observations');
   });
+
+  it('pins the completed receipt lookup used by embedding observation batches', () => {
+    const sql = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, '20260716030000_course_memory_receipt_event_lookup.sql'),
+      'utf-8'
+    );
+    expect(sql).toContain('CREATE INDEX IF NOT EXISTS course_memory_apply_receipts_org_memory_event_completed');
+    expect(sql).toContain('(organization_id, memory_event_id)');
+    expect(sql).toContain("WHERE outcome = 'completed'");
+    expect(sql).toContain('DROP INDEX IF EXISTS public.course_memory_apply_receipts_org_memory_event_completed');
+  });
 });
