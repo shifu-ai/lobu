@@ -9,6 +9,8 @@ import { recordLifecycleEvent } from "../utils/insert-event.js";
 
 export const AGENT_SETTINGS_MANAGED_BY_RELEASE =
 	"agent_settings_managed_by_release";
+export const AGENT_SETTINGS_MANAGED_BY_FENCED_PROVISIONING =
+	"agent_settings_managed_by_fenced_provisioning";
 
 const RELEASE_OWNED_SETTINGS = [
 	"identityMd",
@@ -26,6 +28,15 @@ export class AgentSettingsManagedByReleaseError extends Error {
 			"Agent release-owned settings must be changed through managed release apply",
 		);
 		this.name = "AgentSettingsManagedByReleaseError";
+	}
+}
+
+export class AgentSettingsManagedByFencedProvisioningError extends Error {
+	readonly code = AGENT_SETTINGS_MANAGED_BY_FENCED_PROVISIONING;
+
+	constructor() {
+		super("Agent settings must be changed through fenced provisioning");
+		this.name = "AgentSettingsManagedByFencedProvisioningError";
 	}
 }
 
@@ -55,6 +66,7 @@ async function lockAgentAndAssertReleaseFence(
 	organizationId: string,
 	agentId: string,
 	writesManagedSettings: boolean,
+	rejectFencedProvisioning = false,
 ): Promise<boolean> {
 	const agents = await tx`
     SELECT 1
@@ -63,6 +75,18 @@ async function lockAgentAndAssertReleaseFence(
     FOR UPDATE
   `;
 	if (agents.length === 0) return false;
+	if (rejectFencedProvisioning) {
+		const provisioningFences = await tx`
+			SELECT 1
+			FROM agent_provisioning_fences
+			WHERE organization_id = ${organizationId}
+			  AND agent_id = ${agentId}
+			LIMIT 1
+		`;
+		if (provisioningFences.length > 0) {
+			throw new AgentSettingsManagedByFencedProvisioningError();
+		}
+	}
 	if (!writesManagedSettings) return true;
 
 	const receipts = await tx`
@@ -447,6 +471,7 @@ export async function provisionLegacyAgent(input: {
 				tx,
 				input.organizationId,
 				input.agentId,
+				true,
 				true,
 			))
 		) {

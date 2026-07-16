@@ -26,6 +26,7 @@ import {
   createAgentReleaseService,
 } from "./agent-release-service.js";
 import {
+  AgentSettingsManagedByFencedProvisioningError,
   AgentSettingsManagedByReleaseError,
   ProvisioningFenceError,
   provisionFencedAgent,
@@ -566,6 +567,9 @@ export function createProvisioningRoutes(
         transactionHooks: options.legacyProvisioningHooks,
       });
     } catch (error) {
+      if (error instanceof AgentSettingsManagedByFencedProvisioningError) {
+        return c.json({ error: error.code }, 409);
+      }
       if (error instanceof AgentSettingsManagedByReleaseError) {
         return c.json(
           { error: error.code, error_description: error.message },

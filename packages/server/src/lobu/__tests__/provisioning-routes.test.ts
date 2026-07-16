@@ -1223,6 +1223,71 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 		await expect(winningGrantCheck.json()).resolves.toMatchObject({ ok: true });
 	});
 
+	test("rejects a delayed legacy provisioning write after fenced generation wins", async () => {
+		const app = await buildApp();
+		const agentId = "shifu-u-fenced-legacy-late";
+		const winningGrant = "/mcp/shifu-toolbox/tools/get_project_profile";
+		const rejectedGrant = "/mcp/google_workspace/tools/gws_docs_read";
+		const generationTwo = fencedProvisioningBody({
+			claimGeneration: 2,
+			claimToken: FENCE_TOKEN_B,
+			settings: {
+				userMd: "generation two wins",
+				preApprovedTools: ["/mcp/shifu-toolbox/tools/*"],
+			},
+		});
+
+		expect((await putFencedAgent(app, agentId, generationTwo)).status).toBe(201);
+
+		const delayedLegacy = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId,
+				name: "Delayed legacy agent",
+				ownerUserId: "toolbox-user-legacy",
+				settings: {
+					userMd: "legacy must not win",
+					preApprovedTools: ["/mcp/google_workspace/tools/*"],
+				},
+			}),
+		});
+		expect(delayedLegacy.status).toBe(409);
+		await expect(delayedLegacy.json()).resolves.toEqual({
+			error: "agent_settings_managed_by_fenced_provisioning",
+		});
+
+		const settings = await app.request(
+			`/api/provisioning/agents/${agentId}/settings`,
+		);
+		await expect(settings.json()).resolves.toMatchObject({
+			settings: { userMd: "generation two wins" },
+		});
+		for (const [pattern, ok] of [
+			[winningGrant, true],
+			[rejectedGrant, false],
+		] as const) {
+			const verification = await app.request(
+				`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+				{
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						revisionId: "legacy-after-fenced-generation",
+						expectedGrantPatterns: [pattern],
+					}),
+				},
+			);
+			await expect(verification.json()).resolves.toMatchObject({ ok });
+		}
+
+		const exactReplay = await putFencedAgent(app, agentId, generationTwo);
+		expect(exactReplay.status).toBe(200);
+		await expect(exactReplay.json()).resolves.toMatchObject({
+			provisioningFence: { claimGeneration: 2, claimToken: FENCE_TOKEN_B },
+		});
+	});
+
 	test("serializes concurrent requests from separate app replicas so the highest generation wins", async () => {
 		const replicaA = await buildApp();
 		const replicaB = await buildApp();
