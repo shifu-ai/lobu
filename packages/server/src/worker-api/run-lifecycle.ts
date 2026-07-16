@@ -32,88 +32,11 @@ import {
   materializeInlineAttachments,
   triggerAudioTranscriptions,
 } from '../utils/inline-attachments';
-import { configuredEmbeddingModelSqlLiteral, getConfiguredEmbeddingModel } from '../utils/embeddings';
+import { configuredEmbeddingModelSqlLiteral } from '../utils/embeddings';
 import { insertEvent, recordLifecycleEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
 import { authorizeRunForWorker } from './shared';
-import { createCourseMemoryRuntimeService } from '../lobu/course-memory-runtime-service';
-
-interface EmbeddingRunObservationScope {
-  organizationId: string;
-  eventIds: Set<number>;
-}
-
-async function loadEmbeddingRunObservationScope(
-  sql: ReturnType<typeof getDb>,
-  runId: number
-): Promise<EmbeddingRunObservationScope | null> {
-  const rows = await sql<{ organization_id: string; action_input: unknown }>`
-    SELECT organization_id, action_input
-    FROM runs
-    WHERE id = ${runId} AND run_type = 'embed_backfill'
-    LIMIT 1
-  `;
-  const row = rows[0];
-  if (!row) return null;
-  const actionInput = typeof row.action_input === 'string'
-    ? JSON.parse(row.action_input) as Record<string, unknown>
-    : row.action_input as Record<string, unknown> | null;
-  const ids = Array.isArray(actionInput?.event_ids)
-    ? actionInput.event_ids.filter((id): id is number => Number.isSafeInteger(id) && id > 0)
-    : [];
-  return { organizationId: row.organization_id, eventIds: new Set(ids) };
-}
-
-async function hasCurrentEmbedding(sql: ReturnType<typeof getDb>, eventId: number): Promise<boolean> {
-  const rows = await sql`
-    SELECT 1
-    FROM event_embeddings
-    WHERE event_id = ${eventId}
-      AND embedding_model = ${getConfiguredEmbeddingModel()}
-    LIMIT 1
-  `;
-  return rows.length === 1;
-}
-
-async function observeCourseMemoryIndex(
-  sql: ReturnType<typeof getDb>,
-  scope: EmbeddingRunObservationScope | null,
-  producerRunId: number,
-  memoryEventId: number,
-  indexStatus: 'ready' | 'failed'
-): Promise<void> {
-  if (!scope?.eventIds.has(memoryEventId)) return;
-  const rows = await sql<{
-    owner_user_id: string;
-    agent_id: string;
-    course_entity_id: string;
-    requested_revision: number;
-    content_digest: `sha256:${string}`;
-    idempotency_key: string;
-  }>`
-    SELECT owner_user_id, agent_id, course_entity_id, requested_revision,
-           content_digest, idempotency_key
-    FROM course_memory_apply_receipts
-    WHERE organization_id = ${scope.organizationId}
-      AND memory_event_id = ${memoryEventId}
-      AND outcome = 'completed'
-    LIMIT 1
-  `;
-  const receipt = rows[0];
-  if (!receipt) return;
-  await createCourseMemoryRuntimeService({ sql }).recordIndexObservation({
-    organizationId: scope.organizationId,
-    ownerUserId: receipt.owner_user_id,
-    agentId: receipt.agent_id,
-    courseEntityId: receipt.course_entity_id,
-    requestedCourseRevision: Number(receipt.requested_revision),
-    contentDigest: receipt.content_digest,
-    idempotencyKey: receipt.idempotency_key,
-    memoryEventId,
-    producerRunId,
-    indexStatus,
-  });
-}
+import { completeCourseMemoryEmbeddingRun } from '../lobu/course-memory-index-producer';
 
 /**
  * POST /api/workers/heartbeat
@@ -1051,147 +974,36 @@ export async function completeEmbeddings(c: Context<{ Bindings: Env }>) {
     }>();
 
     const denied = await authorizeRunForWorker(c, req.run_id, req.worker_id);
-    if (denied) return denied;
-
-    const sql = getDb();
-    const observationScope = await loadEmbeddingRunObservationScope(sql, req.run_id);
-
-    if (!req.embeddings || req.embeddings.length === 0) {
-      const missingEventIds: number[] = [];
-      for (const eventId of observationScope?.eventIds ?? []) {
-        const current = await hasCurrentEmbedding(sql, eventId);
-        await observeCourseMemoryIndex(
-          sql,
-          observationScope,
-          req.run_id,
-          eventId,
-          current ? 'ready' : 'failed'
-        );
-        if (!current) missingEventIds.push(eventId);
+    if (denied) {
+      if (denied.status === 409) {
+        return c.json({ success: false, reason: 'already_finalized' });
       }
-      if (req.error_message) {
-        await sql`
-          UPDATE runs
-          SET status = 'failed',
-              completed_at = current_timestamp,
-              error_message = ${req.error_message}
-          WHERE id = ${req.run_id}
-        `;
-        return c.json({ success: false, error: req.error_message }, 400);
-      }
-      if (missingEventIds.length > 0) {
-        const error = 'Embedding producer returned no current embeddings';
-        await sql`
-          UPDATE runs
-          SET status = 'failed', completed_at = current_timestamp, error_message = ${error}
-          WHERE id = ${req.run_id}
-        `;
-        return c.json({ success: false, error }, 400);
-      }
-      // Empty batch is successful only when every requested event already has
-      // a current-model embedding. This prevents a batch-generation outage
-      // from being mistaken for a ready index.
-      await sql`
-        UPDATE runs
-        SET status = 'completed',
-            completed_at = current_timestamp
-        WHERE id = ${req.run_id}
-      `;
-      return c.json({ success: true, updated: 0 });
+      return denied;
     }
 
-    let updated = 0;
-    const failedEventIds = new Set<number>();
-    const submittedEventIds = new Set<number>();
-    for (const item of req.embeddings) {
-      submittedEventIds.add(item.event_id);
-      try {
-        // pgvector expects '[0.1,0.2,...]' format
-        const vectorStr = `[${item.embedding.join(',')}]`;
-        // On conflict, REPLACE a stale-model row (a model swap left its vector in
-        // an incompatible space) with the freshly-embedded vector + stamp. The
-        // WHERE makes a same-model re-submit a no-op (idempotent), so we never
-        // churn rows that are already current.
-        const result = await sql.unsafe(
-          `INSERT INTO event_embeddings (event_id, embedding, embedding_model)
-           VALUES ($1, $2::vector, $3)
-           ON CONFLICT (event_id) DO UPDATE
-             SET embedding = EXCLUDED.embedding,
-                 embedding_model = EXCLUDED.embedding_model,
-                 created_at = now()
-             WHERE event_embeddings.embedding_model IS DISTINCT FROM EXCLUDED.embedding_model`,
-          [item.event_id, vectorStr, item.embedding_model ?? null]
-        );
-        if (result.count > 0) updated++;
-        if (!observationScope) continue;
-        const current = await hasCurrentEmbedding(sql, item.event_id);
-        if (current) {
-          await observeCourseMemoryIndex(
-            sql,
-            observationScope,
-            req.run_id,
-            item.event_id,
-            'ready'
-          );
-        } else {
-          failedEventIds.add(item.event_id);
-          await observeCourseMemoryIndex(
-            sql,
-            observationScope,
-            req.run_id,
-            item.event_id,
-            'failed'
-          );
-        }
-      } catch (err) {
-        if (observationScope?.eventIds.has(item.event_id)) {
-          // The vector write and observation append are separate durable
-          // operations. A retry may fail after a current-model embedding was
-          // already committed by this or an earlier run. Re-read searchable
-          // truth before classifying; only absence is a real index failure.
-          const current = await hasCurrentEmbedding(sql, item.event_id);
-          if (!current) failedEventIds.add(item.event_id);
-          await observeCourseMemoryIndex(
-            sql,
-            observationScope,
-            req.run_id,
-            item.event_id,
-            current ? 'ready' : 'failed'
-          );
-        }
-        logger.error(
-          { event_id: item.event_id, error: err },
-          '[completeEmbeddings] Failed to update event'
-        );
-      }
+    const result = await completeCourseMemoryEmbeddingRun({
+      sql: getDb(),
+      runId: req.run_id,
+      workerId: req.worker_id,
+      requireClaimedWorker: c.var?.workerAuthMode === 'user',
+      embeddings: (req.embeddings ?? []).map((item) => ({
+        eventId: item.event_id,
+        embedding: item.embedding,
+        embeddingModel: item.embedding_model ?? '',
+      })),
+      errorMessage: req.error_message,
+    });
+    if (result.kind === 'already_finalized') {
+      return c.json({ success: false, reason: 'already_finalized' });
     }
-
-    for (const eventId of observationScope?.eventIds ?? []) {
-      if (submittedEventIds.has(eventId)) continue;
-      if (await hasCurrentEmbedding(sql, eventId)) {
-        await observeCourseMemoryIndex(sql, observationScope, req.run_id, eventId, 'ready');
-      } else {
-        failedEventIds.add(eventId);
-        await observeCourseMemoryIndex(sql, observationScope, req.run_id, eventId, 'failed');
-      }
-    }
-
-    const runFailed = failedEventIds.size > 0;
-    await sql`
-      UPDATE runs
-      SET status = ${runFailed ? 'failed' : 'completed'},
-          completed_at = current_timestamp,
-          items_collected = ${updated},
-          error_message = ${runFailed ? 'One or more embeddings failed durable persistence' : null}
-      WHERE id = ${req.run_id}
-    `;
-
     logger.info(
-      { run_id: req.run_id, total: req.embeddings.length, updated },
+      { run_id: req.run_id, total: req.embeddings?.length ?? 0, updated: result.updated },
       'Embedding backfill completed'
     );
-
-    return c.json({ success: !runFailed, updated }, runFailed ? 400 : 200);
+    return c.json(
+      { success: result.success, updated: result.updated, ...(result.error ? { error: result.error } : {}) },
+      result.success ? 200 : 400
+    );
   } catch (err: unknown) {
     logger.error({ error: errorMessage(err) }, '[completeEmbeddings] Error');
     return c.json({ error: errorMessage(err) }, 500);

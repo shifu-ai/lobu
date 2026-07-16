@@ -346,6 +346,69 @@ describe('course memory runtime service', () => {
     }))?.indexStatus).toBe('pending');
   });
 
+  test('does not resurrect a finalized embedding run or append observations', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const runId = await createEmbeddingRun(applied.memoryEventId!);
+    await getDb()`
+      UPDATE runs
+      SET status = 'timeout', completed_at = current_timestamp, error_message = 'reaped'
+      WHERE id = ${runId}
+    `;
+    const completion = mockEmbeddingsContext({
+      run_id: runId,
+      worker_id: 'late-worker',
+      embeddings: [{
+        event_id: applied.memoryEventId,
+        embedding: embedding(),
+        embedding_model: getConfiguredEmbeddingModel(),
+      }],
+    });
+
+    await completeEmbeddings(completion.ctx);
+
+    expect(completion.result().body).toEqual({ success: false, reason: 'already_finalized' });
+    expect(await getDb()`SELECT 1 FROM event_embeddings WHERE event_id = ${applied.memoryEventId}`).toHaveLength(0);
+    expect(await getDb()`SELECT 1 FROM course_memory_index_observations`).toHaveLength(0);
+    expect(await getDb()`SELECT status, error_message FROM runs WHERE id = ${runId}`).toEqual([
+      { status: 'timeout', error_message: 'reaped' },
+    ]);
+  });
+
+  test('serializes concurrent conflicting embedding completions into one terminal verdict', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const runId = await createEmbeddingRun(applied.memoryEventId!);
+    const success = mockEmbeddingsContext({
+      run_id: runId,
+      worker_id: 'worker-a',
+      embeddings: [{
+        event_id: applied.memoryEventId,
+        embedding: embedding(),
+        embedding_model: getConfiguredEmbeddingModel(),
+      }],
+    });
+    const failure = mockEmbeddingsContext({
+      run_id: runId,
+      worker_id: 'worker-a',
+      embeddings: [],
+      error_message: 'concurrent failure',
+    });
+
+    await Promise.all([completeEmbeddings(success.ctx), completeEmbeddings(failure.ctx)]);
+
+    const results = [success.result().body, failure.result().body];
+    expect(results).toContainEqual({ success: false, reason: 'already_finalized' });
+    const run = await getDb()`SELECT status FROM runs WHERE id = ${runId}`;
+    const observations = await getDb()`
+      SELECT index_status
+      FROM course_memory_index_observations
+      WHERE producer_run_id = ${runId}
+    `;
+    expect(observations).toHaveLength(1);
+    expect(observations[0]?.index_status).toBe(run[0]?.status === 'completed' ? 'ready' : 'failed');
+  });
+
   test('records producer failure and lets only a newer durable run supersede it with ready', async () => {
     const service = createTestService();
     const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
