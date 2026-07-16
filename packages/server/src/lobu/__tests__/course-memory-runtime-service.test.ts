@@ -69,7 +69,10 @@ function mockEmbeddingsContext(
   return { ctx, result: () => captured };
 }
 
-async function createEmbeddingRun(eventId: number): Promise<number> {
+async function createEmbeddingRun(
+  eventId: number,
+  claimedBy = 'trusted-embedding-worker'
+): Promise<number> {
   await getDb()`
     UPDATE runs
     SET status = 'completed', completed_at = current_timestamp
@@ -78,9 +81,11 @@ async function createEmbeddingRun(eventId: number): Promise<number> {
       AND status IN ('pending', 'running')
   `;
   const rows = await getDb()`
-    INSERT INTO runs (organization_id, run_type, status, approval_status, action_input, created_at)
+    INSERT INTO runs (
+      organization_id, run_type, status, claimed_by, approval_status, action_input, created_at
+    )
     VALUES (
-      ${ORGANIZATION_ID}, 'embed_backfill', 'running', 'auto',
+      ${ORGANIZATION_ID}, 'embed_backfill', 'running', ${claimedBy}, 'auto',
       ${getDb().json({ event_ids: [eventId] })}, current_timestamp
     )
     RETURNING id
@@ -346,10 +351,34 @@ describe('course memory runtime service', () => {
     }))?.indexStatus).toBe('pending');
   });
 
+  test('does not let a trusted worker complete a run claimed by another worker', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const runId = await createEmbeddingRun(applied.memoryEventId!, 'worker-b');
+    const completion = mockEmbeddingsContext({
+      run_id: runId,
+      worker_id: 'worker-a',
+      embeddings: [{
+        event_id: applied.memoryEventId,
+        embedding: embedding(),
+        embedding_model: getConfiguredEmbeddingModel(),
+      }],
+    });
+
+    await completeEmbeddings(completion.ctx);
+
+    expect(completion.result().body).toEqual({ success: false, reason: 'already_finalized' });
+    expect(await getDb()`SELECT status, claimed_by FROM runs WHERE id = ${runId}`).toEqual([
+      { status: 'running', claimed_by: 'worker-b' },
+    ]);
+    expect(await getDb()`SELECT 1 FROM event_embeddings WHERE event_id = ${applied.memoryEventId}`).toHaveLength(0);
+    expect(await getDb()`SELECT 1 FROM course_memory_index_observations`).toHaveLength(0);
+  });
+
   test('does not resurrect a finalized embedding run or append observations', async () => {
     const service = createTestService();
     const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
-    const runId = await createEmbeddingRun(applied.memoryEventId!);
+    const runId = await createEmbeddingRun(applied.memoryEventId!, 'worker-a');
     await getDb()`
       UPDATE runs
       SET status = 'timeout', completed_at = current_timestamp, error_message = 'reaped'
@@ -378,7 +407,7 @@ describe('course memory runtime service', () => {
   test('serializes concurrent conflicting embedding completions into one terminal verdict', async () => {
     const service = createTestService();
     const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
-    const runId = await createEmbeddingRun(applied.memoryEventId!);
+    const runId = await createEmbeddingRun(applied.memoryEventId!, 'worker-a');
     const success = mockEmbeddingsContext({
       run_id: runId,
       worker_id: 'worker-a',
@@ -407,6 +436,41 @@ describe('course memory runtime service', () => {
     `;
     expect(observations).toHaveLength(1);
     expect(observations[0]?.index_status).toBe(run[0]?.status === 'completed' ? 'ready' : 'failed');
+  });
+
+  test('does not replace a current embedding with a worker response from the wrong model', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const firstRunId = await createEmbeddingRun(applied.memoryEventId!);
+    const first = mockEmbeddingsContext({
+      run_id: firstRunId,
+      worker_id: 'trusted-embedding-worker',
+      embeddings: [{
+        event_id: applied.memoryEventId,
+        embedding: embedding(),
+        embedding_model: getConfiguredEmbeddingModel(),
+      }],
+    });
+    await completeEmbeddings(first.ctx);
+
+    const wrongModelRunId = await createEmbeddingRun(applied.memoryEventId!);
+    const wrongModel = mockEmbeddingsContext({
+      run_id: wrongModelRunId,
+      worker_id: 'trusted-embedding-worker',
+      embeddings: [{
+        event_id: applied.memoryEventId,
+        embedding: embedding(),
+        embedding_model: 'wrong-model',
+      }],
+    });
+    await completeEmbeddings(wrongModel.ctx);
+
+    expect(wrongModel.result().body).toEqual({ success: true, updated: 0 });
+    expect(await getDb()`
+      SELECT embedding_model
+      FROM event_embeddings
+      WHERE event_id = ${applied.memoryEventId}
+    `).toEqual([{ embedding_model: getConfiguredEmbeddingModel() }]);
   });
 
   test('records producer failure and lets only a newer durable run supersede it with ready', async () => {

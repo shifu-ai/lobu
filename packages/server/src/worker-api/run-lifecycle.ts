@@ -985,7 +985,6 @@ export async function completeEmbeddings(c: Context<{ Bindings: Env }>) {
       sql: getDb(),
       runId: req.run_id,
       workerId: req.worker_id,
-      requireClaimedWorker: c.var?.workerAuthMode === 'user',
       embeddings: (req.embeddings ?? []).map((item) => ({
         eventId: item.event_id,
         embedding: item.embedding,

@@ -15,7 +15,6 @@ export interface CompleteCourseMemoryEmbeddingRunInput {
   sql: DbClient;
   runId: number;
   workerId: string;
-  requireClaimedWorker: boolean;
   embeddings: CourseMemoryEmbeddingInput[];
   errorMessage?: string;
 }
@@ -57,8 +56,7 @@ export async function completeCourseMemoryEmbeddingRun(
       FOR UPDATE
     `;
     const run = runRows[0];
-    if (!run || run.status !== 'running'
-      || (input.requireClaimedWorker && run.claimed_by !== input.workerId)) {
+    if (!run || run.status !== 'running' || run.claimed_by !== input.workerId) {
       return { kind: 'already_finalized' };
     }
 
@@ -67,7 +65,9 @@ export async function completeCourseMemoryEmbeddingRun(
     const currentModel = getConfiguredEmbeddingModel();
     const submittedByEventId = new Map<number, CourseMemoryEmbeddingInput>();
     for (const item of input.embeddings) {
-      if (eventIdSet.has(item.eventId) && isValidEmbedding(item.embedding)) {
+      if (eventIdSet.has(item.eventId)
+        && item.embeddingModel === currentModel
+        && isValidEmbedding(item.embedding)) {
         submittedByEventId.set(item.eventId, item);
       }
     }
@@ -163,7 +163,7 @@ export async function completeCourseMemoryEmbeddingRun(
           error_message = ${error ?? null}
       WHERE id = ${input.runId}
         AND status = 'running'
-        AND (${!input.requireClaimedWorker} OR claimed_by = ${input.workerId})
+        AND claimed_by = ${input.workerId}
       RETURNING id
     `;
     if (updatedRuns.length === 0) {

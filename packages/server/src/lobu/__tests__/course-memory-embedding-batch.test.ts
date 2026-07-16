@@ -127,7 +127,6 @@ describe('course memory embedding batch producer', () => {
       sql: counted.sql,
       runId,
       workerId: 'batch-worker',
-      requireClaimedWorker: true,
       embeddings: [
         ...eventIds.map((eventId, index) => ({
           eventId,
