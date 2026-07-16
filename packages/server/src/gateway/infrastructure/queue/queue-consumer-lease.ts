@@ -1,4 +1,4 @@
-import type { DbClient } from "../../../db/client";
+import { pgTextArray, type DbClient } from "../../../db/client";
 
 export const QUEUE_CONSUMER_LEASE_TTL_MS = 90_000;
 export const QUEUE_CONSUMER_HEARTBEAT_MS = 30_000;
@@ -56,7 +56,7 @@ export function createPostgresQueueConsumerLeaseStore(
                  started_at, last_seen_at, lease_expires_at, identity_conflict,
                  row_number() OVER (PARTITION BY queue_name ORDER BY lease_expires_at DESC) AS queue_rank
           FROM public.queue_consumer_leases
-          WHERE queue_name = ANY(${requiredQueues as unknown as string[]}::text[])
+          WHERE queue_name = ANY(${pgTextArray([...requiredQueues])}::text[])
         )
         SELECT queue_name, consumer_id, lease_instance_id, deployment_revision, declared_image_digest,
                started_at, last_seen_at, lease_expires_at, identity_conflict
