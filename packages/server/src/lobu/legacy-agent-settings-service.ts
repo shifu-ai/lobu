@@ -114,23 +114,75 @@ async function syncProvisioningGrantsInTransaction(
 	agentId: string,
 	settings: Omit<AgentSettings, "updatedAt">,
 ): Promise<void> {
-	const patterns = new Set([
+	const desired = new Map<string, { kind: string; pattern: string }>();
+	for (const rawPattern of [
 		...(settings.networkConfig?.allowedDomains ?? []),
 		...(settings.preApprovedTools ?? []),
-	]);
-	for (const rawPattern of patterns) {
+	]) {
 		const pattern = normalizeDomainPattern(rawPattern);
 		const kind = inferGrantKind(pattern);
+		desired.set(`${kind}\u0000${pattern}`, { kind, pattern });
+	}
+
+	const owned = await tx<{ kind: string; pattern: string }>`
+		SELECT kind, pattern
+		FROM agent_fenced_provisioning_grants
+		WHERE organization_id = ${organizationId}
+		  AND agent_id = ${agentId}
+	`;
+	const ownedKeys = new Set(
+		owned.map((row) => `${row.kind}\u0000${row.pattern}`),
+	);
+
+	for (const row of owned) {
+		if (desired.has(`${row.kind}\u0000${row.pattern}`)) continue;
+		// The ownership row proves this grant came from fenced provisioning.
+		// The FK cascades its provenance row when the grant is removed.
 		await tx`
+			DELETE FROM grants
+			WHERE organization_id = ${organizationId}
+			  AND agent_id = ${agentId}
+			  AND kind = ${row.kind}
+			  AND pattern = ${row.pattern}
+			  AND EXISTS (
+				SELECT 1 FROM agent_fenced_provisioning_grants owned
+				WHERE owned.organization_id = ${organizationId}
+				  AND owned.agent_id = ${agentId}
+				  AND owned.kind = ${row.kind}
+				  AND owned.pattern = ${row.pattern}
+			  )
+		`;
+	}
+
+	for (const [key, grant] of desired) {
+		if (ownedKeys.has(key)) {
+			await tx`
+				UPDATE grants SET expires_at = NULL, granted_at = NOW(), denied = false
+				WHERE organization_id = ${organizationId}
+				  AND agent_id = ${agentId}
+				  AND kind = ${grant.kind}
+				  AND pattern = ${grant.pattern}
+			`;
+			continue;
+		}
+
+		const inserted = await tx`
 			INSERT INTO grants (
 				organization_id, agent_id, kind, pattern, expires_at, granted_at, denied
 			) VALUES (
-				${organizationId}, ${agentId}, ${kind}, ${pattern}, NULL, NOW(), false
+				${organizationId}, ${agentId}, ${grant.kind}, ${grant.pattern},
+				NULL, NOW(), false
 			)
-			ON CONFLICT (organization_id, agent_id, kind, pattern) DO UPDATE SET
-				expires_at = NULL,
-				granted_at = EXCLUDED.granted_at,
-				denied = false
+			ON CONFLICT (organization_id, agent_id, kind, pattern) DO NOTHING
+			RETURNING 1
+		`;
+		if (inserted.length === 0) continue;
+		await tx`
+			INSERT INTO agent_fenced_provisioning_grants (
+				organization_id, agent_id, kind, pattern
+			) VALUES (
+				${organizationId}, ${agentId}, ${grant.kind}, ${grant.pattern}
+			)
 		`;
 	}
 }

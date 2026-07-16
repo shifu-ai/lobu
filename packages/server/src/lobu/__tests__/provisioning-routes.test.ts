@@ -1071,15 +1071,31 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 	test("rejects same-generation conflicts without changing observable settings", async () => {
 		const app = await buildApp();
 		const agentId = "shifu-u-fenced-conflict";
+		const retainedGrant = "/mcp/google_workspace/tools/gws_docs_read";
+		const rejectedGrant = "/mcp/shifu-toolbox/tools/get_project_profile";
 		expect(
-			(await putFencedAgent(app, agentId, fencedProvisioningBody())).status,
+			(
+				await putFencedAgent(
+					app,
+					agentId,
+					fencedProvisioningBody({
+						settings: {
+							userMd: "generation one",
+							preApprovedTools: ["/mcp/google_workspace/tools/*"],
+						},
+					}),
+				)
+			).status,
 		).toBe(201);
 
 		const conflict = await putFencedAgent(
 			app,
 			agentId,
 			fencedProvisioningBody({
-				settings: { userMd: "must not win" },
+				settings: {
+					userMd: "must not win",
+					preApprovedTools: ["/mcp/shifu-toolbox/tools/*"],
+				},
 			}),
 		);
 		expect(conflict.status).toBe(409);
@@ -1102,14 +1118,52 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 		await expect(settings.json()).resolves.toMatchObject({
 			settings: { userMd: "generation one" },
 		});
+		for (const [pattern, ok] of [
+			[retainedGrant, true],
+			[rejectedGrant, false],
+		] as const) {
+			const verification = await app.request(
+				`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+				{
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						revisionId: "same-generation-conflict",
+						expectedGrantPatterns: [pattern],
+					}),
+				},
+			);
+			await expect(verification.json()).resolves.toMatchObject({ ok });
+		}
 	});
 
 	test("lets a newer generation take over and rejects the late old owner", async () => {
 		const app = await buildApp();
 		const agentId = "shifu-u-fenced-takeover";
+		const retiredGrant = "/mcp/google_workspace/tools/gws_docs_read";
+		const winningGrant = "/mcp/shifu-toolbox/tools/get_project_profile";
+		const generationOne = fencedProvisioningBody({
+			settings: {
+				userMd: "generation one",
+				networkConfig: { allowedDomains: ["*"] },
+				preApprovedTools: ["/mcp/google_workspace/tools/*"],
+			},
+		});
 		expect(
-			(await putFencedAgent(app, agentId, fencedProvisioningBody())).status,
+			(await putFencedAgent(app, agentId, generationOne)).status,
 		).toBe(201);
+		const beforeTakeover = await app.request(
+			`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					revisionId: "generation-one",
+					expectedGrantPatterns: [retiredGrant],
+				}),
+			},
+		);
+		await expect(beforeTakeover.json()).resolves.toMatchObject({ ok: true });
 
 		const takeover = await putFencedAgent(
 			app,
@@ -1117,7 +1171,10 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 			fencedProvisioningBody({
 				claimGeneration: 2,
 				claimToken: FENCE_TOKEN_B,
-				settings: { userMd: "generation two" },
+				settings: {
+					userMd: "generation two",
+					preApprovedTools: ["/mcp/shifu-toolbox/tools/*"],
+				},
 			}),
 		);
 		expect(takeover.status).toBe(200);
@@ -1125,7 +1182,7 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 			provisioningFence: { claimGeneration: 2, claimToken: FENCE_TOKEN_B },
 		});
 
-		const late = await putFencedAgent(app, agentId, fencedProvisioningBody());
+		const late = await putFencedAgent(app, agentId, generationOne);
 		expect(late.status).toBe(409);
 		await expect(late.json()).resolves.toEqual({
 			error: "provisioning_fence_stale",
@@ -1136,6 +1193,34 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 		await expect(settings.json()).resolves.toMatchObject({
 			settings: { userMd: "generation two" },
 		});
+		const afterTakeover = await app.request(
+			`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					revisionId: "generation-two",
+					expectedGrantPatterns: [retiredGrant],
+				}),
+			},
+		);
+		await expect(afterTakeover.json()).resolves.toMatchObject({
+			ok: false,
+			errorCode: "runtime_grants_missing",
+			missingGrantPatterns: [retiredGrant],
+		});
+		const winningGrantCheck = await app.request(
+			`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					revisionId: "generation-two-winning-grant",
+					expectedGrantPatterns: [winningGrant],
+				}),
+			},
+		);
+		await expect(winningGrantCheck.json()).resolves.toMatchObject({ ok: true });
 	});
 
 	test("serializes concurrent requests from separate app replicas so the highest generation wins", async () => {
@@ -1164,6 +1249,45 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 		await expect(settings.json()).resolves.toMatchObject({
 			settings: { userMd: "generation two" },
 		});
+	});
+
+	test("does not revoke a pre-existing grant that fenced provisioning does not own", async () => {
+		const app = await buildApp();
+		const agentId = "shifu-u-fenced-unrelated-grant";
+		const unrelatedGrant = "/mcp/notion/tools/notion_search";
+		const legacy = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId,
+				name: "Existing agent",
+				ownerUserId: "toolbox-user-fenced",
+				settings: { preApprovedTools: ["/mcp/notion/tools/*"] },
+			}),
+		});
+		expect(legacy.status).toBe(201);
+
+		const fenced = await putFencedAgent(
+			app,
+			agentId,
+			fencedProvisioningBody({
+				settings: { userMd: "authoritative fenced settings" },
+			}),
+		);
+		expect(fenced.status).toBe(200);
+
+		const verification = await app.request(
+			`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					revisionId: "unrelated-grant",
+					expectedGrantPatterns: [unrelatedGrant],
+				}),
+			},
+		);
+		await expect(verification.json()).resolves.toMatchObject({ ok: true });
 	});
 
 	test("rejects malformed and unbounded fence fields before creating an agent", async () => {
