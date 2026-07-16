@@ -19,6 +19,8 @@ const RESERVED_METADATA_KEYS = new Set([
   'agent_id',
   'courseEntityId',
   'course_entity_id',
+  'courseEntityIds',
+  'course_entity_ids',
   'courseRevision',
   'course_revision',
   'contextPackId',
@@ -349,6 +351,9 @@ export function createCourseMemoryRuntimeService(
         && metadata?.owner_user_id === input.ownerUserId
         && metadata?.agent_id === input.agentId
         && metadata?.course_entity_id === input.courseEntityId
+        && Array.isArray(metadata?.course_entity_ids)
+        && metadata.course_entity_ids.length === 1
+        && metadata.course_entity_ids[0] === input.courseEntityId
         && Number(metadata?.course_revision) === Number(row.requested_revision)
         && metadata?.content_digest === row.content_digest;
       if (!exact) {
@@ -501,6 +506,7 @@ export function createCourseMemoryRuntimeService(
           owner_user_id: command.ownerUserId,
           agent_id: command.agentId,
           course_entity_id: command.courseEntityId,
+          course_entity_ids: [command.courseEntityId],
           course_revision: command.courseRevision,
           context_pack_id: command.contextPackId,
           content_digest: command.contentDigest,

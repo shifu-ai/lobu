@@ -4,6 +4,8 @@ import {
   ensureDbForGatewayTests,
   resetTestDatabase,
 } from '../../gateway/__tests__/helpers/db-setup.js';
+import { retrieveCourseMemory } from '../../gateway/orchestration/course-memory-retriever.js';
+import { insertEvent } from '../../utils/insert-event.js';
 import { initWorkspaceProvider } from '../../workspace/index.js';
 import {
   CourseMemoryRuntimeError,
@@ -246,9 +248,45 @@ describe('course memory runtime service', () => {
       owner_user_id: OWNER_USER_ID,
       agent_id: AGENT_ID,
       course_entity_id: COURSE_ENTITY_ID,
+      course_entity_ids: [COURSE_ENTITY_ID],
       course_revision: 8,
       supersedes_event_id: first.memoryEventId,
     });
+  });
+
+  test('makes a freshly applied v2 event retrievable only for its exact course', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const search = async (input: { entityIds: string[] }) => {
+      const [courseEntityId] = input.entityIds;
+      return getDb()`
+        SELECT id, payload_text, title, source_url, organization_id, metadata,
+               connection_id, connector_key, origin_id, origin_type, semantic_type
+        FROM current_event_records
+        WHERE id = ${applied.memoryEventId}
+          AND jsonb_typeof(metadata->'course_entity_ids') = 'array'
+          AND jsonb_array_length(metadata->'course_entity_ids') = 1
+          AND metadata->'course_entity_ids'->>0 = ${courseEntityId}
+      `;
+    };
+
+    const exact = await retrieveCourseMemory({
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      task: 'AI Course',
+    }, { search });
+    const other = await retrieveCourseMemory({
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: 'course:owner-course-memory-v2:other',
+      task: 'AI Course',
+    }, { search });
+
+    expect(exact).toMatchObject({ status: 'loaded', eventIds: [applied.memoryEventId] });
+    expect(other).toMatchObject({ status: 'empty', eventIds: [] });
   });
 
   test('rejects an agent that is not owned by the requested owner', async () => {
@@ -263,16 +301,35 @@ describe('course memory runtime service', () => {
     })).rejects.toMatchObject({ code: 'memory.owner_agent_mismatch', status: 403 });
   });
 
-  test('rejects reserved metadata even when the service is called without HTTP', async () => {
+  test.each([
+    ['courseEntityId', 'course:caller-override'],
+    ['course_entity_id', 'course:caller-override'],
+    ['courseEntityIds', ['course:caller-override']],
+    ['course_entity_ids', ['course:caller-override']],
+  ])('rejects reserved metadata key %s even when the service is called without HTTP', async (key, value) => {
     const service = createTestService();
     await expect(service.apply({
       organizationId: ORGANIZATION_ID,
       command: command({
         payload: {
           ...command().payload,
-          metadata: { course_entity_id: 'course:caller-override' },
+          metadata: { [key]: value },
         },
       }),
     })).rejects.toMatchObject({ code: 'memory.reserved_metadata_override', status: 400 });
+  });
+
+  test('fails completed receipt readback when exact course metadata was not durably stored', async () => {
+    const service = createCourseMemoryRuntimeService({
+      enqueueEmbeddingBackfill: async () => true,
+      insertEventImpl: async (input, options) => {
+        const metadata = { ...input.metadata };
+        delete metadata.course_entity_ids;
+        return insertEvent({ ...input, metadata }, options);
+      },
+    });
+
+    await expect(service.apply({ organizationId: ORGANIZATION_ID, command: command() }))
+      .rejects.toThrow('Course memory completed receipt failed exact durable readback');
   });
 });
