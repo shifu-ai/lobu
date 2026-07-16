@@ -43,4 +43,17 @@ describe('migration files (dbmate format)', () => {
     expect(receiptTable).not.toContain('REFERENCES public.agents');
     expect(receiptTable).not.toContain('ON DELETE CASCADE');
   });
+
+  it('pins append-only course memory index observations and producer ordering', () => {
+    const sql = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, '20260716020000_course_memory_index_observations.sql'),
+      'utf-8'
+    );
+    expect(sql).toContain('CREATE TABLE public.course_memory_index_observations');
+    expect(sql).toContain('observation_sequence bigint GENERATED ALWAYS AS IDENTITY');
+    expect(sql).toContain('producer_run_id bigint NOT NULL');
+    expect(sql).toContain('(organization_id, producer_run_id, memory_event_id, index_status)');
+    expect(sql).toContain('trg_course_memory_index_observations_append_only');
+    expect(sql).toContain('BEFORE UPDATE OR DELETE ON public.course_memory_index_observations');
+  });
 });

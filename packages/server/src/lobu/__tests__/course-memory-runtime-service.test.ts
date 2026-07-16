@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import type { Context } from 'hono';
 import { getDb } from '../../db/client.js';
 import {
   ensureDbForGatewayTests,
@@ -6,6 +7,9 @@ import {
 } from '../../gateway/__tests__/helpers/db-setup.js';
 import { retrieveCourseMemory } from '../../gateway/orchestration/course-memory-retriever.js';
 import { insertEvent } from '../../utils/insert-event.js';
+import { getConfiguredEmbeddingModel } from '../../utils/embeddings.js';
+import { completeEmbeddings } from '../../worker-api/run-lifecycle.js';
+import type { Env } from '../../index.js';
 import { initWorkspaceProvider } from '../../workspace/index.js';
 import {
   CourseMemoryRuntimeError,
@@ -44,6 +48,50 @@ function createTestService() {
   return createCourseMemoryRuntimeService({
     enqueueEmbeddingBackfill: async () => true,
   });
+}
+
+function mockEmbeddingsContext(
+  body: unknown,
+  workerVar: Record<string, unknown> = { workerAuthMode: 'trusted' }
+): {
+  ctx: Context<{ Bindings: Env }>;
+  result: () => { body: unknown; status: number };
+} {
+  let captured: { body: unknown; status: number } = { body: undefined, status: 200 };
+  const ctx = {
+    req: { json: async () => body },
+    json: (responseBody: unknown, status?: number) => {
+      captured = { body: responseBody, status: status ?? 200 };
+      return captured as unknown as Response;
+    },
+    var: workerVar,
+  } as unknown as Context<{ Bindings: Env }>;
+  return { ctx, result: () => captured };
+}
+
+async function createEmbeddingRun(eventId: number): Promise<number> {
+  await getDb()`
+    UPDATE runs
+    SET status = 'completed', completed_at = current_timestamp
+    WHERE organization_id = ${ORGANIZATION_ID}
+      AND run_type = 'embed_backfill'
+      AND status IN ('pending', 'running')
+  `;
+  const rows = await getDb()`
+    INSERT INTO runs (organization_id, run_type, status, approval_status, action_input, created_at)
+    VALUES (
+      ${ORGANIZATION_ID}, 'embed_backfill', 'running', 'auto',
+      ${getDb().json({ event_ids: [eventId] })}, current_timestamp
+    )
+    RETURNING id
+  `;
+  return Number(rows[0]!.id);
+}
+
+function embedding(): number[] {
+  const value = new Array(768).fill(0);
+  value[0] = 1;
+  return value;
 }
 
 async function seedOwnerAndAgent() {
@@ -126,6 +174,317 @@ describe('course memory runtime service', () => {
     });
     expect(enqueueCalls).toEqual([ORGANIZATION_ID]);
     expect(committedRowsSeenByEnqueue).toEqual([1]);
+  });
+
+  test('derives index status from idempotent append-only producer observations', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const identity = {
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      requestedCourseRevision: 7,
+      contentDigest: command().contentDigest,
+      idempotencyKey: command().idempotencyKey,
+      memoryEventId: applied.memoryEventId!,
+    };
+
+    const failedRunId = await createEmbeddingRun(applied.memoryEventId!);
+    await Promise.all([
+      service.recordIndexObservation({ ...identity, producerRunId: failedRunId, indexStatus: 'failed' }),
+      service.recordIndexObservation({ ...identity, producerRunId: failedRunId, indexStatus: 'failed' }),
+    ]);
+    expect((await service.inspect({ ...identity }))?.indexStatus).toBe('failed');
+
+    const readyRunId = await createEmbeddingRun(applied.memoryEventId!);
+    await service.recordIndexObservation({ ...identity, producerRunId: readyRunId, indexStatus: 'ready' });
+    await service.recordIndexObservation({ ...identity, producerRunId: failedRunId, indexStatus: 'failed' });
+    expect((await service.inspect({ ...identity }))?.indexStatus).toBe('ready');
+
+    const rows = await getDb()`
+      SELECT producer_run_id, index_status
+      FROM course_memory_index_observations
+      ORDER BY observation_sequence
+    `;
+    expect(rows).toEqual([
+      { producer_run_id: failedRunId, index_status: 'failed' },
+      { producer_run_id: readyRunId, index_status: 'ready' },
+    ]);
+    expect(await getDb()`SELECT index_status FROM course_memory_apply_receipts`).toEqual([
+      { index_status: 'pending' },
+    ]);
+  });
+
+  test('makes ready terminal within one producer run under concurrent contradictory delivery', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const identity = {
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      requestedCourseRevision: 7,
+      contentDigest: command().contentDigest,
+      idempotencyKey: command().idempotencyKey,
+      memoryEventId: applied.memoryEventId!,
+      producerRunId: await createEmbeddingRun(applied.memoryEventId!),
+    };
+
+    await service.recordIndexObservation({ ...identity, indexStatus: 'ready' });
+    await Promise.all([
+      service.recordIndexObservation({ ...identity, indexStatus: 'failed' }),
+      service.recordIndexObservation({ ...identity, indexStatus: 'ready' }),
+    ]);
+
+    expect(await getDb()`
+      SELECT index_status
+      FROM course_memory_index_observations
+      WHERE producer_run_id = ${identity.producerRunId}
+      ORDER BY observation_sequence
+    `).toEqual([{ index_status: 'ready' }]);
+  });
+
+  test('moves pending to ready only after the real embedding producer durably writes the event', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    expect(applied.indexStatus).toBe('pending');
+    const runId = await createEmbeddingRun(applied.memoryEventId!);
+
+    const completion = mockEmbeddingsContext({
+      run_id: runId,
+      worker_id: 'trusted-embedding-worker',
+      embeddings: [{
+        event_id: applied.memoryEventId,
+        embedding: embedding(),
+        embedding_model: getConfiguredEmbeddingModel(),
+      }],
+    });
+    await completeEmbeddings(completion.ctx);
+
+    expect(completion.result()).toMatchObject({ body: { success: true, updated: 1 } });
+    const inspected = await service.inspect({
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      idempotencyKey: command().idempotencyKey,
+    });
+    expect(inspected).toMatchObject({
+      receiptRef: applied.receiptRef,
+      memoryEventId: applied.memoryEventId,
+      contentDigest: applied.contentDigest,
+      indexStatus: 'ready',
+    });
+
+    const transportFailureRunId = await createEmbeddingRun(applied.memoryEventId!);
+    const transportFailure = mockEmbeddingsContext({
+      run_id: transportFailureRunId,
+      worker_id: 'trusted-embedding-worker',
+      embeddings: [],
+      error_message: 'response lost after durable embedding write',
+    });
+    await completeEmbeddings(transportFailure.ctx);
+    expect((await service.inspect({
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      idempotencyKey: command().idempotencyKey,
+    }))?.indexStatus).toBe('ready');
+  });
+
+  test('treats an empty batch without a current embedding as failed, never ready', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const runId = await createEmbeddingRun(applied.memoryEventId!);
+    const completion = mockEmbeddingsContext({
+      run_id: runId,
+      worker_id: 'trusted-embedding-worker',
+      embeddings: [],
+    });
+
+    await completeEmbeddings(completion.ctx);
+
+    expect(completion.result().status).toBe(400);
+    expect((await service.inspect({
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      idempotencyKey: command().idempotencyKey,
+    }))?.indexStatus).toBe('failed');
+  });
+
+  test('does not accept an index observation from a worker outside the run scope', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const runId = await createEmbeddingRun(applied.memoryEventId!);
+    const completion = mockEmbeddingsContext({
+      run_id: runId,
+      worker_id: 'unclaimed-worker',
+      embeddings: [{
+        event_id: applied.memoryEventId,
+        embedding: embedding(),
+        embedding_model: getConfiguredEmbeddingModel(),
+      }],
+    }, {
+      workerAuthMode: 'user',
+      workerUserId: 'other-user',
+      workerOrgIds: [],
+    });
+
+    await completeEmbeddings(completion.ctx);
+
+    expect(completion.result().status).toBe(403);
+    expect((await service.inspect({
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      idempotencyKey: command().idempotencyKey,
+    }))?.indexStatus).toBe('pending');
+  });
+
+  test('records producer failure and lets only a newer durable run supersede it with ready', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const failedRunId = await createEmbeddingRun(applied.memoryEventId!);
+    const failure = mockEmbeddingsContext({
+      run_id: failedRunId,
+      worker_id: 'trusted-embedding-worker',
+      embeddings: [],
+      error_message: 'embedding service unavailable',
+    });
+    await completeEmbeddings(failure.ctx);
+    expect((await service.inspect({
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      idempotencyKey: command().idempotencyKey,
+    }))?.indexStatus).toBe('failed');
+
+    const readyRunId = await createEmbeddingRun(applied.memoryEventId!);
+    const success = mockEmbeddingsContext({
+      run_id: readyRunId,
+      worker_id: 'trusted-embedding-worker',
+      embeddings: [{
+        event_id: applied.memoryEventId,
+        embedding: embedding(),
+        embedding_model: getConfiguredEmbeddingModel(),
+      }],
+    });
+    await completeEmbeddings(success.ctx);
+    await completeEmbeddings(failure.ctx);
+    expect((await service.inspect({
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      idempotencyKey: command().idempotencyKey,
+    }))?.indexStatus).toBe('ready');
+  });
+
+  test('records a failed observation when an individual embedding write is rejected', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const runId = await createEmbeddingRun(applied.memoryEventId!);
+    const completion = mockEmbeddingsContext({
+      run_id: runId,
+      worker_id: 'trusted-embedding-worker',
+      embeddings: [{
+        event_id: applied.memoryEventId,
+        embedding: [1, 2],
+        embedding_model: getConfiguredEmbeddingModel(),
+      }],
+    });
+
+    await completeEmbeddings(completion.ctx);
+
+    expect((await service.inspect({
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      idempotencyKey: command().idempotencyKey,
+    }))?.indexStatus).toBe('failed');
+  });
+
+  test('rejects an index observation whose immutable receipt identity does not match', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const exact = {
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      requestedCourseRevision: 7,
+      contentDigest: command().contentDigest,
+      idempotencyKey: command().idempotencyKey,
+      memoryEventId: applied.memoryEventId!,
+      producerRunId: await createEmbeddingRun(applied.memoryEventId!),
+      indexStatus: 'ready' as const,
+    };
+
+    for (const mismatch of [
+      { ownerUserId: 'other-owner' },
+      { agentId: 'shifu-u-other-agent' },
+      { courseEntityId: 'course:other' },
+      { contentDigest: `sha256:${'8'.repeat(64)}` as `sha256:${string}` },
+    ]) {
+      await expect(service.recordIndexObservation({ ...exact, ...mismatch }))
+        .rejects.toMatchObject({ code: 'memory.index_observation_mismatch', status: 409 });
+    }
+    expect(await getDb()`SELECT 1 FROM course_memory_index_observations`).toHaveLength(0);
+  });
+
+  test('rejects observations from a nonexistent or non-authoritative producer run', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const exact = {
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      requestedCourseRevision: 7,
+      contentDigest: command().contentDigest,
+      idempotencyKey: command().idempotencyKey,
+      memoryEventId: applied.memoryEventId!,
+      indexStatus: 'ready' as const,
+    };
+    const wrongEventRun = await createEmbeddingRun(applied.memoryEventId! + 999);
+    const wrongTypeRows = await getDb()`
+      INSERT INTO runs (organization_id, run_type, status, approval_status, action_input, created_at)
+      VALUES (
+        ${ORGANIZATION_ID}, 'action', 'running', 'auto',
+        ${getDb().json({ event_ids: [applied.memoryEventId] })}, current_timestamp
+      )
+      RETURNING id
+    `;
+    await getDb()`
+      INSERT INTO organization (id, name, slug)
+      VALUES ('org-course-memory-other', 'Other org', 'org-course-memory-other')
+    `;
+    const crossOrgRows = await getDb()`
+      INSERT INTO runs (organization_id, run_type, status, approval_status, action_input, created_at)
+      VALUES (
+        'org-course-memory-other', 'embed_backfill', 'running', 'auto',
+        ${getDb().json({ event_ids: [applied.memoryEventId] })}, current_timestamp
+      )
+      RETURNING id
+    `;
+
+    for (const producerRunId of [
+      Number.MAX_SAFE_INTEGER,
+      wrongEventRun,
+      Number(wrongTypeRows[0]!.id),
+      Number(crossOrgRows[0]!.id),
+    ]) {
+      await expect(service.recordIndexObservation({ ...exact, producerRunId }))
+        .rejects.toMatchObject({ code: 'memory.index_observation_mismatch', status: 409 });
+    }
+    expect(await getDb()`SELECT 1 FROM course_memory_index_observations`).toHaveLength(0);
   });
 
   test('rejects a same idempotency key with a different digest', async () => {

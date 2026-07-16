@@ -43,6 +43,19 @@ const RESERVED_METADATA_KEYS = new Set([
 export type CourseMemoryOutcome = 'completed' | 'pending' | 'rejected' | 'indeterminate';
 export type CourseMemoryIndexStatus = 'ready' | 'pending' | 'failed' | null;
 
+export interface CourseMemoryIndexObservation {
+  organizationId: string;
+  ownerUserId: string;
+  agentId: string;
+  courseEntityId: string;
+  requestedCourseRevision: number;
+  contentDigest: `sha256:${string}`;
+  idempotencyKey: string;
+  memoryEventId: number;
+  producerRunId: number;
+  indexStatus: 'ready' | 'failed';
+}
+
 export interface CourseContextProjectionPayload {
   title: string;
   summary: string;
@@ -83,6 +96,7 @@ export type CourseMemoryRuntimeErrorCode =
   | 'memory.invalid_request'
   | 'memory.reserved_metadata_override'
   | 'memory.owner_agent_mismatch'
+  | 'memory.index_observation_mismatch'
   | 'memory.idempotency_conflict'
   | 'memory.stale_revision'
   | 'memory.revision_conflict';
@@ -349,6 +363,7 @@ export function createCourseMemoryRuntimeService(
   }): Promise<CourseMemoryReceipt | null> {
     const rows = await sql<ReceiptReadbackRow>`
       SELECT r.*,
+             COALESCE(index_observation.index_status, r.index_status) AS index_status,
              h.applied_revision AS head_applied_revision,
              h.content_digest AS head_content_digest,
              h.memory_event_id AS head_memory_event_id,
@@ -365,6 +380,23 @@ export function createCourseMemoryRuntimeService(
        AND h.agent_id = r.agent_id
        AND h.course_entity_id = r.course_entity_id
       LEFT JOIN events e ON e.id = r.memory_event_id
+      LEFT JOIN LATERAL (
+        SELECT observation.index_status
+        FROM course_memory_index_observations observation
+        WHERE observation.receipt_id = r.id
+          AND observation.organization_id = r.organization_id
+          AND observation.owner_user_id = r.owner_user_id
+          AND observation.agent_id = r.agent_id
+          AND observation.course_entity_id = r.course_entity_id
+          AND observation.requested_revision = r.requested_revision
+          AND observation.content_digest = r.content_digest
+          AND observation.idempotency_key = r.idempotency_key
+          AND observation.memory_event_id = r.memory_event_id
+        ORDER BY observation.producer_run_id DESC,
+                 CASE observation.index_status WHEN 'ready' THEN 1 ELSE 0 END DESC,
+                 observation.observation_sequence DESC
+        LIMIT 1
+      ) index_observation ON true
       WHERE r.organization_id = ${input.organizationId}
         AND r.owner_user_id = ${input.ownerUserId}
         AND r.agent_id = ${input.agentId}
@@ -456,6 +488,83 @@ export function createCourseMemoryRuntimeService(
       ...input,
       ownerUserId: identity.owner_user_id,
       agentId: identity.agent_id,
+    });
+  }
+
+  async function recordIndexObservation(input: CourseMemoryIndexObservation): Promise<void> {
+    if (!Number.isSafeInteger(input.producerRunId) || input.producerRunId <= 0
+      || !Number.isSafeInteger(input.memoryEventId) || input.memoryEventId <= 0
+      || !Number.isSafeInteger(input.requestedCourseRevision)
+      || input.requestedCourseRevision <= 0
+      || !SHA256_PATTERN.test(input.contentDigest)
+      || !['ready', 'failed'].includes(input.indexStatus)) {
+      throw new CourseMemoryRuntimeError(
+        'memory.invalid_request',
+        'Index observation is invalid',
+        400
+      );
+    }
+
+    await sql.begin(async (tx) => {
+      const producerScope = [
+        input.organizationId,
+        input.producerRunId,
+        input.memoryEventId,
+      ].join('\u001f');
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${producerScope}, 0))`;
+      const receipts = await tx<{ id: string }>`
+        SELECT receipt.id
+        FROM course_memory_apply_receipts receipt
+        JOIN runs producer
+          ON producer.id = ${input.producerRunId}
+         AND producer.organization_id = receipt.organization_id
+         AND producer.run_type = 'embed_backfill'
+         AND producer.action_input @> ${tx.json({ event_ids: [input.memoryEventId] })}
+        WHERE receipt.organization_id = ${input.organizationId}
+          AND receipt.idempotency_key = ${input.idempotencyKey}
+          AND receipt.owner_user_id = ${input.ownerUserId}
+          AND receipt.agent_id = ${input.agentId}
+          AND receipt.course_entity_id = ${input.courseEntityId}
+          AND receipt.requested_revision = ${input.requestedCourseRevision}
+          AND receipt.content_digest = ${input.contentDigest}
+          AND receipt.memory_event_id = ${input.memoryEventId}
+          AND receipt.outcome = 'completed'
+        LIMIT 1
+      `;
+      const receipt = receipts[0];
+      if (!receipt) {
+        throw new CourseMemoryRuntimeError(
+          'memory.index_observation_mismatch',
+          'Index observation does not match an immutable completed receipt',
+          409
+        );
+      }
+      const existing = await tx<{ index_status: 'ready' | 'failed' }>`
+        SELECT index_status
+        FROM course_memory_index_observations
+        WHERE organization_id = ${input.organizationId}
+          AND receipt_id = ${receipt.id}
+          AND producer_run_id = ${input.producerRunId}
+          AND memory_event_id = ${input.memoryEventId}
+        ORDER BY observation_sequence DESC
+      `;
+      if (existing.some((row) => row.index_status === 'ready')) return;
+      if (input.indexStatus === 'failed'
+        && existing.some((row) => row.index_status === 'failed')) return;
+      await tx`
+        INSERT INTO course_memory_index_observations (
+          organization_id, receipt_id, owner_user_id, agent_id, course_entity_id,
+          requested_revision, content_digest, idempotency_key, memory_event_id,
+          index_status, producer_run_id
+        ) VALUES (
+          ${input.organizationId}, ${receipt.id}, ${input.ownerUserId}, ${input.agentId},
+          ${input.courseEntityId}, ${input.requestedCourseRevision}, ${input.contentDigest},
+          ${input.idempotencyKey}, ${input.memoryEventId}, ${input.indexStatus},
+          ${input.producerRunId}
+        )
+        ON CONFLICT (organization_id, producer_run_id, memory_event_id, index_status)
+        DO NOTHING
+      `;
     });
   }
 
@@ -704,5 +813,6 @@ export function createCourseMemoryRuntimeService(
 
     inspect,
     inspectByIdempotencyKey,
+    recordIndexObservation,
   };
 }

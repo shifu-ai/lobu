@@ -84,6 +84,36 @@ describe('migration invariants', () => {
       );
     });
 
+    it('has an append-only, idempotent course memory index observation log', async () => {
+      const sql = getTestDb();
+      const columns = await sql`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'course_memory_index_observations'
+      `;
+      expect(columns.map((row) => row.column_name)).toContain('observation_sequence');
+      const indexes = await sql`
+        SELECT indexdef
+        FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname = 'course_memory_index_observations_producer_event_unique'
+      `;
+      expect(indexes).toHaveLength(1);
+      expect(String(indexes[0]?.indexdef)).toContain(
+        '(organization_id, producer_run_id, memory_event_id, index_status)'
+      );
+      const triggers = await sql`
+        SELECT tgname
+        FROM pg_trigger
+        WHERE tgrelid = 'course_memory_index_observations'::regclass
+          AND NOT tgisinternal
+      `;
+      expect(triggers.map((row) => row.tgname)).toContain(
+        'trg_course_memory_index_observations_append_only'
+      );
+    });
+
     it('retains immutable receipts while cascading the mutable head when an agent is deleted', async () => {
       const foreignKeys = await getTestDb()`
         SELECT conname, confdeltype
