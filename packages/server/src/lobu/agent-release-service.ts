@@ -6,15 +6,15 @@ import {
 	sign as signBytes,
 	verify as verifySignature,
 } from "node:crypto";
+import type { AgentSettings, ReleaseCapabilityClaim } from "@lobu/core";
 import { canonicalize } from "json-canonicalize";
 import { type DbClient, getDb } from "../db/client.js";
-import { parseStrictJsonBytes } from "./strict-json-parser.js";
-import type { AgentSettings, ReleaseCapabilityClaim } from "@lobu/core";
 import type { RuntimeCapabilitySnapshot } from "../gateway/services/runtime-capability-snapshot.js";
 import {
 	replaceAgentSettings,
 	syncProvisioningGrantsInTransaction,
 } from "./legacy-agent-settings-service.js";
+import { parseStrictJsonBytes } from "./strict-json-parser.js";
 
 const MANAGED_SETTING_KEYS = [
 	"identityMd",
@@ -27,13 +27,27 @@ const MANAGED_SETTING_KEYS = [
 // personal baseline fields are signed, immutable source metadata only; they
 // may seed live digest reconstruction but can never mask a mutable field.
 const PERSONAL_BASELINE_LOBU_OWNED_KEYS = [
-	"identityMd", "soulMd", "userMd", "mcpServers", "skillsConfig",
-	"preApprovedTools", "modelSelection", "providerModelPreferences",
-	"networkConfig", "egressConfig", "nixConfig", "toolsConfig",
-	"pluginsConfig", "guardrails", "installedProviders",
+	"identityMd",
+	"soulMd",
+	"userMd",
+	"mcpServers",
+	"skillsConfig",
+	"preApprovedTools",
+	"modelSelection",
+	"providerModelPreferences",
+	"networkConfig",
+	"egressConfig",
+	"nixConfig",
+	"toolsConfig",
+	"pluginsConfig",
+	"guardrails",
+	"installedProviders",
 ] as const;
 const PERSONAL_BASELINE_IMMUTABLE_METADATA_KEYS = [
-	"templateKey", "scope", "baselinePrompt", "runtimeConfig",
+	"templateKey",
+	"scope",
+	"baselinePrompt",
+	"runtimeConfig",
 ] as const;
 const PERSONAL_BASELINE_SETTING_KEYS = [
 	...PERSONAL_BASELINE_IMMUTABLE_METADATA_KEYS,
@@ -152,6 +166,27 @@ interface ReleaseAssignment {
 	agentId: string;
 }
 
+export interface BaselineOverrideProvenance {
+	kind: "break_glass";
+	recordId: string;
+	incidentReference: string;
+	operatorUserId: string;
+	reason: string;
+	approvedAt: string;
+	expiresAt: string;
+	anchoredReleaseId: string;
+	anchoredReleaseSequence: number;
+	anchoredFeedSequence: number;
+	anchoredFeedDigest: string;
+	anchoredManifestDigest: string;
+	anchoredBaselineVersionId: string;
+	anchoredBaselineVersion: number;
+	anchoredEffectiveSettingsDigest: string;
+	overrideBaselineVersionId: string;
+	overrideBaselineVersion: number;
+	overrideEffectiveSettingsDigest: string;
+}
+
 export interface AgentReleaseApplyCommand {
 	signedManifest: SignedManifest;
 	signedFeed: SignedFeed;
@@ -163,7 +198,9 @@ export interface AgentReleaseApplyCommand {
 	stepLeaseToken?: string;
 	settings?: Record<string, unknown>;
 	baselineVersionId?: string;
+	baselineVersion?: number;
 	effectiveSettingsDigest?: string;
+	baselineOverride?: BaselineOverrideProvenance;
 	commandDigest: string;
 }
 
@@ -181,6 +218,7 @@ export interface AgentReleaseEvidence {
 	settingsHash: string;
 	baselineVersionId?: string;
 	effectiveSettingsDigest?: string;
+	baselineOverride?: BaselineOverrideProvenance;
 	liveSettingsHash?: string;
 	appliedAt: string;
 }
@@ -203,6 +241,7 @@ export interface AgentReleasePostApplyEvidence {
 	settingsHash: string;
 	baselineVersionId?: string;
 	effectiveSettingsDigest?: string;
+	baselineOverride?: BaselineOverrideProvenance;
 	drifted: boolean;
 	postApplySmoke: { passed: boolean; digest: string };
 	observedAt: string;
@@ -397,7 +436,10 @@ export function createAgentReleaseService(options: {
 					"Agent release command digest does not match its canonical payload",
 				);
 			}
-			validatePersonalBaselineCommand(command);
+			validatePersonalBaselineCommand(
+				command,
+				(options.now ?? (() => new Date()))(),
+			);
 			if (isCurrentApplyCommand(command) && evidenceSigner.error) {
 				throw evidenceSigner.error;
 			}
@@ -438,6 +480,8 @@ export function createAgentReleaseService(options: {
 				       r.personal_baseline_version_id,
 				       r.personal_baseline_effective_settings_digest,
 				       r.personal_baseline_settings,
+				       r.baseline_override,
+				       r.baseline_override_digest,
 				       a.owner_user_id, a.identity_md, a.soul_md, a.user_md,
 				       a.model, a.model_selection, a.provider_model_preferences,
 				       a.network_config, a.egress_config, a.nix_config, a.mcp_servers,
@@ -522,7 +566,8 @@ async function applyInTransaction(
 		       rollback_to_release_id, rollback_to_sequence,
 		       manifest_digest, status, revision_ref, settings_hash, applied_at,
 		       personal_baseline_version_id,
-		       personal_baseline_effective_settings_digest, personal_baseline_settings
+		       personal_baseline_effective_settings_digest, personal_baseline_settings,
+		       baseline_override, baseline_override_digest
 		FROM agent_release_applies
 		WHERE organization_id = ${input.organizationId}
 		  AND agent_id = ${input.agentId}
@@ -591,6 +636,7 @@ async function applyInTransaction(
 				"Agent release sequence was already applied with another manifest",
 			);
 		}
+		assertRetryMatchesReceipt(current, input.command);
 		const liveSettingsHash = settingsHashFromAgent(
 			agent,
 			current.personal_baseline_settings,
@@ -602,7 +648,7 @@ async function applyInTransaction(
 		const repairedSettingsHash = repaired
 			? settingsHashFromAgent(repairedAgent, input.command.settings)
 			: current.settings_hash;
-		assertExpectedSettingsHash(manifest, repairedSettingsHash);
+		assertExpectedSettingsHash(input.command, repairedSettingsHash);
 		if (repaired && repairedSettingsHash !== current.settings_hash) {
 			throw releaseError(
 				"agent_release_settings_drift_unrepairable",
@@ -634,7 +680,8 @@ async function applyInTransaction(
 				          manifest_digest, status, revision_ref, settings_hash, applied_at,
 				          personal_baseline_version_id,
 				          personal_baseline_effective_settings_digest,
-				          personal_baseline_settings
+				          personal_baseline_settings, baseline_override,
+				          baseline_override_digest
 			`;
 			return {
 				...evidenceFromReceipt(input.agentId, advancedRows[0]),
@@ -709,7 +756,7 @@ async function applyInTransaction(
 
 	const updated = await applyCommandSettings(tx, input);
 	const settingsHash = settingsHashFromAgent(updated, input.command.settings);
-	assertExpectedSettingsHash(manifest, settingsHash);
+	assertExpectedSettingsHash(input.command, settingsHash);
 	const revisionRef = [
 		"lobu",
 		input.agentId,
@@ -727,7 +774,7 @@ async function applyInTransaction(
 			rollback_to_release_id, rollback_to_sequence,
 			manifest_digest, status, revision_ref, settings_hash, error_code,
 			personal_baseline_version_id, personal_baseline_effective_settings_digest,
-			personal_baseline_settings,
+			personal_baseline_settings, baseline_override, baseline_override_digest,
 			created_at, updated_at, applied_at
 		) VALUES (
 			${input.organizationId}, ${input.agentId}, ${manifest.environment},
@@ -739,6 +786,8 @@ async function applyInTransaction(
 			${input.command.baselineVersionId ?? null},
 			${input.command.effectiveSettingsDigest ?? null},
 			${input.command.settings ? tx.json(input.command.settings) : null},
+			${input.command.baselineOverride ? tx.json(input.command.baselineOverride) : null},
+			${input.command.baselineOverride ? digestValue(input.command.baselineOverride) : null},
 			NOW(), NOW(), NOW()
 		)
 		ON CONFLICT (organization_id, agent_id) DO UPDATE SET
@@ -760,6 +809,8 @@ async function applyInTransaction(
 			personal_baseline_version_id = EXCLUDED.personal_baseline_version_id,
 			personal_baseline_effective_settings_digest = EXCLUDED.personal_baseline_effective_settings_digest,
 			personal_baseline_settings = EXCLUDED.personal_baseline_settings,
+			baseline_override = EXCLUDED.baseline_override,
+			baseline_override_digest = EXCLUDED.baseline_override_digest,
 			error_code = NULL,
 			updated_at = NOW(),
 			applied_at = NOW()
@@ -770,13 +821,49 @@ async function applyInTransaction(
 		          manifest_digest, status, revision_ref, settings_hash, applied_at,
 		          personal_baseline_version_id,
 		          personal_baseline_effective_settings_digest,
-		          personal_baseline_settings
+		          personal_baseline_settings, baseline_override,
+		          baseline_override_digest
 	`;
 	return {
 		...evidenceFromReceipt(input.agentId, receipt[0]),
 		idempotent: false,
 		repaired: false,
 	};
+}
+
+function assertRetryMatchesReceipt(
+	current: ReceiptRow,
+	command: AgentReleaseApplyCommand,
+): void {
+	const identity = personalBaselineIdentityFromReceipt(current);
+	if (
+		identity.baselineVersionId !== command.baselineVersionId ||
+		identity.effectiveSettingsDigest !== command.effectiveSettingsDigest
+	) {
+		throw releaseError(
+			"agent_release_personal_baseline_retry_identity_mismatch",
+			409,
+			"Agent release retry must use the originally persisted baseline identity",
+		);
+	}
+	const persistedOverride = baselineOverrideFromReceipt(
+		current,
+		identity,
+	).baselineOverride;
+	if (
+		(persistedOverride === undefined) !==
+			(command.baselineOverride === undefined) ||
+		(persistedOverride !== undefined &&
+			command.baselineOverride !== undefined &&
+			canonicalize(persistedOverride) !==
+				canonicalize(command.baselineOverride))
+	) {
+		throw releaseError(
+			"agent_release_baseline_override_retry_mismatch",
+			409,
+			"Agent release retry must use the originally persisted break-glass provenance",
+		);
+	}
 }
 
 async function applyManagedSettings(
@@ -947,6 +1034,8 @@ interface ReceiptRow {
 	personal_baseline_version_id?: string | null;
 	personal_baseline_effective_settings_digest?: string | null;
 	personal_baseline_settings?: Record<string, unknown> | null;
+	baseline_override?: unknown | null;
+	baseline_override_digest?: string | null;
 }
 
 type ReceiptWithAgentRow = ReceiptRow & AgentSettingsRow;
@@ -961,6 +1050,7 @@ function evidenceFromReceipt(
 	row: ReceiptRow,
 ): AgentReleaseEvidence {
 	const personalIdentity = personalBaselineIdentityFromReceipt(row);
+	const baselineOverride = baselineOverrideFromReceipt(row, personalIdentity);
 	return {
 		ok: true,
 		agentId,
@@ -981,11 +1071,52 @@ function evidenceFromReceipt(
 		revisionRef: row.revision_ref,
 		settingsHash: row.settings_hash,
 		...personalIdentity,
+		...baselineOverride,
 		appliedAt:
 			row.applied_at instanceof Date
 				? row.applied_at.toISOString()
 				: new Date(row.applied_at).toISOString(),
 	};
+}
+
+function baselineOverrideFromReceipt(
+	row: ReceiptRow,
+	personalIdentity: {
+		baselineVersionId?: string;
+		effectiveSettingsDigest?: string;
+	},
+): { baselineOverride?: BaselineOverrideProvenance } {
+	if (row.baseline_override == null && row.baseline_override_digest == null)
+		return {};
+	try {
+		if (
+			row.baseline_override == null ||
+			typeof row.baseline_override_digest !== "string" ||
+			!SHA256_PATTERN.test(row.baseline_override_digest) ||
+			!safeDigestEqual(
+				digestValue(row.baseline_override),
+				row.baseline_override_digest,
+			)
+		) {
+			throw new Error("receipt provenance digest mismatch");
+		}
+		const baselineOverride = parseBaselineOverride(row.baseline_override);
+		if (
+			baselineOverride.overrideBaselineVersionId !==
+				personalIdentity.baselineVersionId ||
+			baselineOverride.overrideEffectiveSettingsDigest !==
+				personalIdentity.effectiveSettingsDigest
+		) {
+			throw new Error("receipt identity mismatch");
+		}
+		return { baselineOverride };
+	} catch {
+		throw releaseError(
+			"agent_release_baseline_override_receipt_invalid",
+			409,
+			"Break-glass baseline override receipt provenance is invalid",
+		);
+	}
 }
 
 function personalBaselineIdentityFromReceipt(row: ReceiptRow): {
@@ -1069,7 +1200,9 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 			"assignment",
 			"settings",
 			"baselineVersionId",
+			"baselineVersion",
 			"effectiveSettingsDigest",
+			"baselineOverride",
 			"assignmentRevision",
 			"claimToken",
 			"stepOrdinal",
@@ -1112,6 +1245,23 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 		) {
 			throw invalidRequest("Personal baseline identity is invalid");
 		}
+	}
+	const baselineOverride = hasOwn(value, "baselineOverride")
+		? parseBaselineOverride(value.baselineOverride)
+		: undefined;
+	if (
+		baselineOverride !== undefined &&
+		(!hasOwn(value, "baselineVersion") ||
+			!isPositiveSafeInteger(value.baselineVersion))
+	) {
+		throw invalidRequest(
+			"Break-glass baseline override requires a positive baselineVersion",
+		);
+	}
+	if (baselineOverride === undefined && hasOwn(value, "baselineVersion")) {
+		throw invalidRequest(
+			"baselineVersion is only accepted with a break-glass baseline override",
+		);
 	}
 	const currentAttemptKeys = [
 		"assignmentRevision",
@@ -1183,6 +1333,12 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 					settings,
 					baselineVersionId: value.baselineVersionId as string,
 					effectiveSettingsDigest: value.effectiveSettingsDigest as string,
+				}
+			: {}),
+		...(baselineOverride
+			? {
+					baselineVersion: value.baselineVersion as number,
+					baselineOverride,
 				}
 			: {}),
 		expectedCurrentReleaseSequence,
@@ -1853,9 +2009,16 @@ function parsePersonalAgentBaselineContract(value: unknown): void {
 	assertRequiredExactKeys(
 		baseline,
 		[
-			"baselineVersionId", "baselineVersion", "templateKey", "materializationVersion",
-			"sourceRepository", "sourceRevision", "sourcePath", "sourceDigest",
-			"effectiveSettingsDigest", "componentDigests",
+			"baselineVersionId",
+			"baselineVersion",
+			"templateKey",
+			"materializationVersion",
+			"sourceRepository",
+			"sourceRevision",
+			"sourcePath",
+			"sourceDigest",
+			"effectiveSettingsDigest",
+			"componentDigests",
 		],
 		[],
 		"personalAgentBaseline",
@@ -1893,8 +2056,95 @@ function parsePersonalAgentBaselineContract(value: unknown): void {
 			(value) => typeof value !== "string" || !SHA256_PATTERN.test(value),
 		)
 	) {
-		throw invalidRequest("Agent release personal baseline component digest is invalid");
+		throw invalidRequest(
+			"Agent release personal baseline component digest is invalid",
+		);
 	}
+}
+
+function parseBaselineOverride(value: unknown): BaselineOverrideProvenance {
+	const override = requireRecord(value, "baselineOverride");
+	assertRequiredExactKeys(
+		override,
+		[
+			"kind",
+			"recordId",
+			"incidentReference",
+			"operatorUserId",
+			"reason",
+			"approvedAt",
+			"expiresAt",
+			"anchoredReleaseId",
+			"anchoredReleaseSequence",
+			"anchoredFeedSequence",
+			"anchoredFeedDigest",
+			"anchoredManifestDigest",
+			"anchoredBaselineVersionId",
+			"anchoredBaselineVersion",
+			"anchoredEffectiveSettingsDigest",
+			"overrideBaselineVersionId",
+			"overrideBaselineVersion",
+			"overrideEffectiveSettingsDigest",
+		],
+		[],
+		"baselineOverride",
+	);
+	if (
+		override.kind !== "break_glass" ||
+		typeof override.recordId !== "string" ||
+		!isUuid(override.recordId) ||
+		typeof override.operatorUserId !== "string" ||
+		!isCanonicalNonemptyString(override.operatorUserId, 200) ||
+		!isCanonicalNonemptyString(override.incidentReference, 500) ||
+		!isCanonicalNonemptyString(override.reason, 2000) ||
+		!isCanonicalNonemptyString(override.anchoredReleaseId, 200) ||
+		!isCanonicalTimestamp(override.approvedAt) ||
+		!isCanonicalTimestamp(override.expiresAt) ||
+		new Date(override.approvedAt as string).getTime() >=
+			new Date(override.expiresAt as string).getTime() ||
+		new Date(override.expiresAt as string).getTime() >
+			new Date(override.approvedAt as string).getTime() + 60 * 60 * 1000 ||
+		!isPositiveSafeInteger(override.anchoredReleaseSequence) ||
+		!isPositiveSafeInteger(override.anchoredFeedSequence) ||
+		typeof override.anchoredFeedDigest !== "string" ||
+		!SHA256_PATTERN.test(override.anchoredFeedDigest) ||
+		typeof override.anchoredManifestDigest !== "string" ||
+		!SHA256_PATTERN.test(override.anchoredManifestDigest) ||
+		typeof override.anchoredBaselineVersionId !== "string" ||
+		!PERSONAL_BASELINE_VERSION_PATTERN.test(
+			override.anchoredBaselineVersionId,
+		) ||
+		!isPositiveSafeInteger(override.anchoredBaselineVersion) ||
+		typeof override.anchoredEffectiveSettingsDigest !== "string" ||
+		!SHA256_PATTERN.test(override.anchoredEffectiveSettingsDigest) ||
+		typeof override.overrideBaselineVersionId !== "string" ||
+		!PERSONAL_BASELINE_VERSION_PATTERN.test(
+			override.overrideBaselineVersionId,
+		) ||
+		!isPositiveSafeInteger(override.overrideBaselineVersion) ||
+		typeof override.overrideEffectiveSettingsDigest !== "string" ||
+		!SHA256_PATTERN.test(override.overrideEffectiveSettingsDigest)
+	) {
+		throw invalidRequest("Break-glass baseline override provenance is invalid");
+	}
+	return override as unknown as BaselineOverrideProvenance;
+}
+
+function isCanonicalNonemptyString(value: unknown, maxLength: number): boolean {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= maxLength &&
+		value.trim() === value
+	);
+}
+
+function isCanonicalTimestamp(value: unknown): value is string {
+	if (typeof value !== "string" || !isStrictRfc3339(value)) return false;
+	const timestamp = new Date(value);
+	return (
+		!Number.isNaN(timestamp.getTime()) && timestamp.toISOString() === value
+	);
 }
 
 function parseRuntimeCarrierPolicy(value: unknown): void {
@@ -2107,8 +2357,12 @@ function validateCurrentContract(command: AgentReleaseApplyCommand): void {
 	}
 }
 
-function validatePersonalBaselineCommand(command: AgentReleaseApplyCommand): void {
-	const signed = command.signedManifest.controlPlanePolicy?.personalAgentBaseline;
+function validatePersonalBaselineCommand(
+	command: AgentReleaseApplyCommand,
+	now: Date,
+): void {
+	const signed =
+		command.signedManifest.controlPlanePolicy?.personalAgentBaseline;
 	const hasCommand = command.settings !== undefined;
 	if (!signed && !hasCommand) return;
 	if (!signed || !hasCommand) {
@@ -2116,27 +2370,38 @@ function validatePersonalBaselineCommand(command: AgentReleaseApplyCommand): voi
 			"Personal baseline releases require exact resolved settings and identity",
 		);
 	}
-	if (command.signedManifest.managedSettings &&
-		Object.keys(command.signedManifest.managedSettings).length > 0) {
+	if (
+		command.signedManifest.managedSettings &&
+		Object.keys(command.signedManifest.managedSettings).length > 0
+	) {
 		throw invalidRequest(
 			"Personal baseline releases cannot embed mutable managed settings in the manifest",
 		);
 	}
-	if (command.baselineVersionId !== signed.baselineVersionId) {
+	const baselineOverride = command.baselineOverride;
+	if (baselineOverride) {
+		validateBaselineOverride(command, signed, baselineOverride, now);
+	} else if (command.baselineVersionId !== signed.baselineVersionId) {
 		throw releaseError(
 			"agent_release_personal_baseline_id_mismatch",
 			409,
 			"Personal baseline version does not match the signed manifest",
 		);
 	}
-	if (command.effectiveSettingsDigest !== signed.effectiveSettingsDigest) {
+	if (
+		!baselineOverride &&
+		command.effectiveSettingsDigest !== signed.effectiveSettingsDigest
+	) {
 		throw releaseError(
 			"agent_release_personal_baseline_digest_mismatch",
 			409,
 			"Personal baseline digest does not match the signed manifest",
 		);
 	}
-	if (!safeDigestEqual(digestValue(command.settings), signed.effectiveSettingsDigest)) {
+	const expectedDigest = baselineOverride
+		? baselineOverride.overrideEffectiveSettingsDigest
+		: signed.effectiveSettingsDigest;
+	if (!safeDigestEqual(digestValue(command.settings), expectedDigest)) {
 		throw releaseError(
 			"agent_release_personal_baseline_settings_digest_mismatch",
 			409,
@@ -2145,14 +2410,90 @@ function validatePersonalBaselineCommand(command: AgentReleaseApplyCommand): voi
 	}
 }
 
+function validateBaselineOverride(
+	command: AgentReleaseApplyCommand,
+	signed: PersonalAgentBaselineContract,
+	override: BaselineOverrideProvenance,
+	now: Date,
+): void {
+	const manifest = command.signedManifest;
+	const feed = command.signedFeed;
+	if (manifest.environment !== "production" || feed.channel !== "stable") {
+		throw releaseError(
+			"agent_release_baseline_override_anchor_mismatch",
+			409,
+			"Break-glass baseline overrides must anchor a production stable release",
+		);
+	}
+	if (new Date(override.approvedAt).getTime() > now.getTime()) {
+		throw releaseError(
+			"agent_release_baseline_override_not_approved",
+			409,
+			"Break-glass baseline override approval is not active yet",
+		);
+	}
+	if (new Date(override.expiresAt).getTime() <= now.getTime()) {
+		throw releaseError(
+			"agent_release_baseline_override_expired",
+			409,
+			"Break-glass baseline override has expired",
+		);
+	}
+	if (
+		override.anchoredReleaseId !== manifest.releaseId ||
+		override.anchoredReleaseSequence !== manifest.releaseSequence ||
+		override.anchoredFeedSequence !== feed.feedSequence ||
+		!safeDigestEqual(override.anchoredFeedDigest, digestValue(feed)) ||
+		!safeDigestEqual(override.anchoredManifestDigest, digestValue(manifest)) ||
+		override.anchoredBaselineVersionId !== signed.baselineVersionId ||
+		override.anchoredBaselineVersion !== signed.baselineVersion ||
+		!safeDigestEqual(
+			override.anchoredEffectiveSettingsDigest,
+			signed.effectiveSettingsDigest,
+		)
+	) {
+		throw releaseError(
+			"agent_release_baseline_override_anchor_mismatch",
+			409,
+			"Break-glass baseline override does not match its signed stable anchor",
+		);
+	}
+	if (
+		command.baselineVersionId !== override.overrideBaselineVersionId ||
+		command.baselineVersion !== override.overrideBaselineVersion ||
+		command.effectiveSettingsDigest !== override.overrideEffectiveSettingsDigest
+	) {
+		throw releaseError(
+			"agent_release_baseline_override_identity_mismatch",
+			409,
+			"Break-glass baseline override does not match the requested baseline identity",
+		);
+	}
+	if (
+		override.overrideBaselineVersionId === signed.baselineVersionId &&
+		override.overrideBaselineVersion === signed.baselineVersion &&
+		safeDigestEqual(
+			override.overrideEffectiveSettingsDigest,
+			signed.effectiveSettingsDigest,
+		)
+	) {
+		throw releaseError(
+			"agent_release_baseline_override_not_distinct",
+			409,
+			"Break-glass baseline override cannot masquerade as the signed manifest baseline",
+		);
+	}
+}
+
 function assertExpectedSettingsHash(
-	manifest: SignedManifest,
+	command: AgentReleaseApplyCommand,
 	settingsHash: string,
 ): void {
 	const expected =
-		manifest.controlPlanePolicy?.personalAgentBaseline
+		command.baselineOverride?.overrideEffectiveSettingsDigest ??
+		command.signedManifest.controlPlanePolicy?.personalAgentBaseline
 			?.effectiveSettingsDigest ??
-		manifest.controlPlanePolicy?.baseline?.settingsHash;
+		command.signedManifest.controlPlanePolicy?.baseline?.settingsHash;
 	if (expected !== undefined && !safeDigestEqual(expected, settingsHash)) {
 		throw releaseError(
 			"agent_release_settings_hash_mismatch",
@@ -2425,6 +2766,9 @@ function signPostApplyEvidence(input: {
 					baselineVersionId: input.result.baselineVersionId,
 					effectiveSettingsDigest: input.result.effectiveSettingsDigest,
 				}),
+		...(input.result.baselineOverride === undefined
+			? {}
+			: { baselineOverride: input.result.baselineOverride }),
 		revisionRef: input.result.revisionRef,
 	});
 	const unsigned = {
@@ -2450,6 +2794,9 @@ function signPostApplyEvidence(input: {
 					effectiveSettingsDigest: input.result
 						.effectiveSettingsDigest as string,
 				}),
+		...(input.result.baselineOverride === undefined
+			? {}
+			: { baselineOverride: input.result.baselineOverride }),
 		drifted: input.result.status === "drifted",
 		postApplySmoke: { passed: true, digest: smokeDigest },
 		observedAt,
