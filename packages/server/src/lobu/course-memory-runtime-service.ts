@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { canonicalize } from 'json-canonicalize';
 import { getDb, type DbClient } from '../db/client';
 import { enqueueEmbeddingBackfillRun } from '../scheduled/trigger-embed-backfill';
 import { insertEvent } from '../utils/insert-event';
@@ -27,6 +28,8 @@ const RESERVED_METADATA_KEYS = new Set([
   'context_pack_id',
   'contentDigest',
   'content_digest',
+  'requestFingerprint',
+  'request_fingerprint',
   'traceId',
   'trace_id',
   'contract',
@@ -104,6 +107,7 @@ interface ReceiptRow {
   accepted_revision: number | null;
   applied_revision: number | null;
   content_digest: `sha256:${string}`;
+  request_fingerprint: `sha256:${string}`;
   memory_event_id: number | null;
   index_status: CourseMemoryIndexStatus;
   outcome: CourseMemoryOutcome;
@@ -124,6 +128,10 @@ interface ReceiptReadbackRow extends ReceiptRow {
   head_content_digest: `sha256:${string}` | null;
   head_memory_event_id: number | null;
   event_organization_id: string | null;
+  event_title: string | null;
+  event_payload_text: string | null;
+  event_payload_data: Record<string, unknown> | null;
+  event_semantic_type: string | null;
   event_metadata: Record<string, unknown> | null;
 }
 
@@ -278,12 +286,38 @@ function toReceipt(row: ReceiptRow): CourseMemoryReceipt {
   };
 }
 
+/**
+ * Canonical v2 projection fingerprint. This covers every normalized field that
+ * can change the durable projection. Transport-only idempotencyKey/traceId and
+ * server-derived event metadata are deliberately excluded.
+ */
+function projectionFingerprint(command: CourseMemoryApplyCommand): `sha256:${string}` {
+  const canonical = canonicalize({
+    contract: command.contract,
+    ownerUserId: command.ownerUserId,
+    agentId: command.agentId,
+    courseEntityId: command.courseEntityId,
+    courseRevision: command.courseRevision,
+    contextPackId: command.contextPackId,
+    contentDigest: command.contentDigest,
+    payload: command.payload,
+  });
+  return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
+}
+
+function callerProjectionMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(metadata).filter(([key]) => !RESERVED_METADATA_KEYS.has(key))
+  );
+}
+
 function exactReplay(row: ReceiptRow, command: CourseMemoryApplyCommand): boolean {
   return row.owner_user_id === command.ownerUserId
     && row.agent_id === command.agentId
     && row.course_entity_id === command.courseEntityId
     && Number(row.requested_revision) === command.courseRevision
-    && row.content_digest === command.contentDigest;
+    && row.content_digest === command.contentDigest
+    && row.request_fingerprint === projectionFingerprint(command);
 }
 
 function requiredReceiptRow(row: ReceiptRow | undefined): ReceiptRow {
@@ -319,6 +353,10 @@ export function createCourseMemoryRuntimeService(
              h.content_digest AS head_content_digest,
              h.memory_event_id AS head_memory_event_id,
              e.organization_id AS event_organization_id,
+             e.title AS event_title,
+             e.payload_text AS event_payload_text,
+             e.payload_data AS event_payload_data,
+             e.semantic_type AS event_semantic_type,
              e.metadata AS event_metadata
       FROM course_memory_apply_receipts r
       LEFT JOIN course_memory_heads h
@@ -344,6 +382,31 @@ export function createCourseMemoryRuntimeService(
         ? row.head_content_digest === row.content_digest
           && Number(row.head_memory_event_id) === Number(row.memory_event_id)
         : headRevision > requestedRevision;
+      const persistedSummary = row.event_payload_data?.summary;
+      const persistedFingerprint = metadata
+        && typeof row.event_title === 'string'
+        && typeof row.event_payload_text === 'string'
+        && typeof row.event_semantic_type === 'string'
+        && typeof persistedSummary === 'string'
+        ? projectionFingerprint({
+          contract: { name: 'course_context_projection', schemaVersion: 2 },
+          ownerUserId: input.ownerUserId,
+          agentId: input.agentId,
+          courseEntityId: input.courseEntityId,
+          courseRevision: requestedRevision,
+          contextPackId: String(metadata.context_pack_id ?? ''),
+          contentDigest: String(metadata.content_digest ?? '') as `sha256:${string}`,
+          idempotencyKey: row.idempotency_key,
+          traceId: String(metadata.trace_id ?? ''),
+          payload: {
+            title: row.event_title,
+            summary: persistedSummary,
+            content: row.event_payload_text,
+            semanticType: row.event_semantic_type,
+            metadata: callerProjectionMetadata(metadata),
+          },
+        })
+        : null;
       const exact = Number(row.accepted_revision) === Number(row.requested_revision)
         && Number(row.applied_revision) === Number(row.requested_revision)
         && currentHeadExact
@@ -355,7 +418,9 @@ export function createCourseMemoryRuntimeService(
         && metadata.course_entity_ids.length === 1
         && metadata.course_entity_ids[0] === input.courseEntityId
         && Number(metadata?.course_revision) === Number(row.requested_revision)
-        && metadata?.content_digest === row.content_digest;
+        && metadata?.content_digest === row.content_digest
+        && metadata?.request_fingerprint === row.request_fingerprint
+        && persistedFingerprint === row.request_fingerprint;
       if (!exact) {
         throw new Error('Course memory completed receipt failed exact durable readback');
       }
@@ -369,11 +434,20 @@ export function createCourseMemoryRuntimeService(
     idempotencyKey: string;
   }): Promise<CourseMemoryReceipt | null> {
     const identities = await sql<{ owner_user_id: string; agent_id: string }>`
-      SELECT owner_user_id, agent_id
-      FROM course_memory_apply_receipts
-      WHERE organization_id = ${input.organizationId}
-        AND course_entity_id = ${input.courseEntityId}
-        AND idempotency_key = ${input.idempotencyKey}
+      SELECT r.owner_user_id, r.agent_id
+      FROM course_memory_apply_receipts r
+      JOIN agents a
+        ON a.organization_id = r.organization_id
+       AND a.id = r.agent_id
+       AND a.owner_user_id = r.owner_user_id
+      JOIN course_memory_heads h
+        ON h.organization_id = r.organization_id
+       AND h.owner_user_id = r.owner_user_id
+       AND h.agent_id = r.agent_id
+       AND h.course_entity_id = r.course_entity_id
+      WHERE r.organization_id = ${input.organizationId}
+        AND r.course_entity_id = ${input.courseEntityId}
+        AND r.idempotency_key = ${input.idempotencyKey}
       LIMIT 1
     `;
     const identity = identities[0];
@@ -390,6 +464,7 @@ export function createCourseMemoryRuntimeService(
       const { organizationId } = input;
       const { courseEntityId, ...body } = input.command;
       const command = parseCourseMemoryApplyCommand(body, courseEntityId);
+      const requestFingerprint = projectionFingerprint(command);
       let insertedNewEvent = false;
       const result = await sql.begin(async (tx) => {
         const lockScope = [
@@ -474,12 +549,12 @@ export function createCourseMemoryRuntimeService(
               id, receipt_ref, organization_id, owner_user_id, agent_id,
               course_entity_id, idempotency_key, requested_revision,
               accepted_revision, applied_revision, content_digest,
-              memory_event_id, index_status, outcome, trace_id, rejection_code
+              request_fingerprint, memory_event_id, index_status, outcome, trace_id, rejection_code
             ) VALUES (
               ${receiptId}, ${receiptRef}, ${organizationId}, ${command.ownerUserId},
               ${command.agentId}, ${command.courseEntityId}, ${command.idempotencyKey},
               ${command.courseRevision}, ${head.applied_revision}, ${head.applied_revision},
-              ${command.contentDigest}, NULL, NULL, 'rejected', ${command.traceId},
+              ${command.contentDigest}, ${requestFingerprint}, NULL, NULL, 'rejected', ${command.traceId},
               'memory.stale_revision'
             )
             RETURNING *
@@ -510,6 +585,7 @@ export function createCourseMemoryRuntimeService(
           course_revision: command.courseRevision,
           context_pack_id: command.contextPackId,
           content_digest: command.contentDigest,
+          request_fingerprint: requestFingerprint,
           trace_id: command.traceId,
           contract_name: command.contract.name,
           schema_version: command.contract.schemaVersion,
@@ -536,12 +612,12 @@ export function createCourseMemoryRuntimeService(
             id, receipt_ref, organization_id, owner_user_id, agent_id,
             course_entity_id, idempotency_key, requested_revision,
             accepted_revision, applied_revision, content_digest,
-            memory_event_id, index_status, outcome, trace_id
+            request_fingerprint, memory_event_id, index_status, outcome, trace_id
           ) VALUES (
             ${receiptId}, ${receiptRef}, ${organizationId}, ${command.ownerUserId},
             ${command.agentId}, ${command.courseEntityId}, ${command.idempotencyKey},
             ${command.courseRevision}, ${command.courseRevision}, ${command.courseRevision},
-            ${command.contentDigest}, ${event.id}, 'pending', 'completed', ${command.traceId}
+            ${command.contentDigest}, ${requestFingerprint}, ${event.id}, 'pending', 'completed', ${command.traceId}
           )
           RETURNING *
         `;

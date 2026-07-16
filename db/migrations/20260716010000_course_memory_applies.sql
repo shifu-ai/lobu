@@ -13,7 +13,7 @@ CREATE TABLE public.course_memory_heads (
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (organization_id, owner_user_id, agent_id, course_entity_id),
   FOREIGN KEY (organization_id, agent_id)
-    REFERENCES public.agents(organization_id, id) ON DELETE RESTRICT
+    REFERENCES public.agents(organization_id, id) ON DELETE CASCADE
 );
 
 CREATE TABLE public.course_memory_apply_receipts (
@@ -28,6 +28,7 @@ CREATE TABLE public.course_memory_apply_receipts (
   accepted_revision bigint,
   applied_revision bigint,
   content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[0-9a-f]{64}$'),
+  request_fingerprint text NOT NULL CHECK (request_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
   memory_event_id bigint REFERENCES public.events(id) ON DELETE RESTRICT,
   index_status text CHECK (index_status IN ('ready', 'pending', 'failed')),
   outcome text NOT NULL CHECK (outcome IN ('completed', 'pending', 'rejected', 'indeterminate')),
@@ -35,8 +36,6 @@ CREATE TABLE public.course_memory_apply_receipts (
   rejection_code text,
   observed_at timestamptz NOT NULL DEFAULT now(),
   created_at timestamptz NOT NULL DEFAULT now(),
-  FOREIGN KEY (organization_id, agent_id)
-    REFERENCES public.agents(organization_id, id) ON DELETE RESTRICT,
   CONSTRAINT course_memory_apply_receipts_completed_exact CHECK (
     outcome <> 'completed' OR (
       accepted_revision = requested_revision

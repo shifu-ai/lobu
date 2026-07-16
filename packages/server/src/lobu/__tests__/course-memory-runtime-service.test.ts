@@ -126,6 +126,43 @@ describe('course memory runtime service', () => {
     })).rejects.toMatchObject({ code: 'memory.idempotency_conflict', status: 409 });
   });
 
+  test.each([
+    ['context pack', { contextPackId: 'context-pack-altered' }],
+    ['title', { payload: { ...command().payload, title: 'Altered title' } }],
+    ['summary', { payload: { ...command().payload, summary: 'Altered summary' } }],
+    ['content', { payload: { ...command().payload, content: 'Altered content' } }],
+    ['semantic type', { payload: { ...command().payload, semanticType: 'altered_type' } }],
+    ['custom metadata', {
+      payload: { ...command().payload, metadata: { confidence: 'low', candidateCount: 30 } },
+    }],
+  ])('rejects a same-key replay with altered %s despite the same caller digest', async (_field, overrides) => {
+    const service = createTestService();
+    await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+
+    await expect(service.apply({
+      organizationId: ORGANIZATION_ID,
+      command: command(overrides as Partial<CourseMemoryApplyCommand>),
+    })).rejects.toMatchObject({ code: 'memory.idempotency_conflict', status: 409 });
+  });
+
+  test('treats reordered custom metadata keys as the same canonical projection', async () => {
+    const service = createTestService();
+    const first = await service.apply({
+      organizationId: ORGANIZATION_ID,
+      command: command({
+        payload: { ...command().payload, metadata: { alpha: 1, omega: 2 } },
+      }),
+    });
+    const replay = await service.apply({
+      organizationId: ORGANIZATION_ID,
+      command: command({
+        payload: { ...command().payload, metadata: { omega: 2, alpha: 1 } },
+      }),
+    });
+
+    expect(replay).toEqual(first);
+  });
+
   test('rejects stale revision and same revision with a different digest', async () => {
     const service = createTestService();
     await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
@@ -306,6 +343,8 @@ describe('course memory runtime service', () => {
     ['course_entity_id', 'course:caller-override'],
     ['courseEntityIds', ['course:caller-override']],
     ['course_entity_ids', ['course:caller-override']],
+    ['requestFingerprint', `sha256:${'a'.repeat(64)}`],
+    ['request_fingerprint', `sha256:${'a'.repeat(64)}`],
   ])('rejects reserved metadata key %s even when the service is called without HTTP', async (key, value) => {
     const service = createTestService();
     await expect(service.apply({
@@ -327,6 +366,25 @@ describe('course memory runtime service', () => {
         delete metadata.course_entity_ids;
         return insertEvent({ ...input, metadata }, options);
       },
+    });
+
+    await expect(service.apply({ organizationId: ORGANIZATION_ID, command: command() }))
+      .rejects.toThrow('Course memory completed receipt failed exact durable readback');
+  });
+
+  test.each([
+    ['content', (input: Parameters<typeof insertEvent>[0]) => ({
+      ...input,
+      content: `${input.content}\nTAMPERED`,
+    })],
+    ['custom metadata', (input: Parameters<typeof insertEvent>[0]) => ({
+      ...input,
+      metadata: { ...input.metadata, confidence: 'tampered' },
+    })],
+  ])('fails completed receipt readback when persisted %s differs from the accepted projection', async (_field, alter) => {
+    const service = createCourseMemoryRuntimeService({
+      enqueueEmbeddingBackfill: async () => true,
+      insertEventImpl: async (input, options) => insertEvent(alter(input), options),
     });
 
     await expect(service.apply({ organizationId: ORGANIZATION_ID, command: command() }))

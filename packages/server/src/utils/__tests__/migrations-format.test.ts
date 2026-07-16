@@ -30,8 +30,15 @@ describe('migration files (dbmate format)', () => {
     expect(sql).toContain('CREATE TABLE public.course_memory_apply_receipts');
     expect(sql).toContain('(organization_id, idempotency_key)');
     expect(sql).toContain('requested_revision');
+    expect(sql).toContain('request_fingerprint text NOT NULL');
     expect(sql).toContain('REFERENCES public.events(id) ON DELETE RESTRICT');
+    expect(sql).toContain('REFERENCES public.agents(organization_id, id) ON DELETE CASCADE');
     expect(sql).toContain('trg_course_memory_apply_receipts_append_only');
-    expect(sql).not.toContain('ON DELETE CASCADE');
+    const receiptTable = sql.slice(
+      sql.indexOf('CREATE TABLE public.course_memory_apply_receipts'),
+      sql.indexOf('ALTER TABLE public.course_memory_heads')
+    );
+    expect(receiptTable).not.toContain('REFERENCES public.agents');
+    expect(receiptTable).not.toContain('ON DELETE CASCADE');
   });
 });

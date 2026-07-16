@@ -73,6 +73,24 @@ describe('migration invariants', () => {
       );
     });
 
+    it('retains immutable receipts while cascading the mutable head when an agent is deleted', async () => {
+      const foreignKeys = await getTestDb()`
+        SELECT conname, confdeltype
+        FROM pg_constraint
+        WHERE conname IN (
+          'course_memory_heads_organization_id_agent_id_fkey',
+          'course_memory_apply_receipts_organization_id_agent_id_fkey'
+        )
+        ORDER BY conname
+      `;
+      expect(foreignKeys).toEqual([
+        {
+          conname: 'course_memory_heads_organization_id_agent_id_fkey',
+          confdeltype: 'c',
+        },
+      ]);
+    });
+
     it('has the canonical course entity JSONB GIN index',async()=>{const rows=await getTestDb()`SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND tablename='events' AND indexname='events_course_entity_ids_gin_idx'`;expect(rows).toHaveLength(1);expect(String(rows[0]?.indexdef)).toContain("metadata -> 'course_entity_ids'");});
     it('the canonical course scope predicate is served by the GIN index',async()=>{const plan=await getTestDb().begin(async(tx)=>{await tx.unsafe('SET LOCAL enable_seqscan = off');return tx.unsafe("EXPLAIN SELECT id FROM events WHERE metadata->'course_entity_ids' ?| ARRAY['course:plan:test']::text[]")});expect(plan.map((row)=>String(row['QUERY PLAN'])).join('\n')).toContain('events_course_entity_ids_gin_idx');});
     it('auth_profiles has the per-user pending oauth_account unique index (#1121)', async () => {
