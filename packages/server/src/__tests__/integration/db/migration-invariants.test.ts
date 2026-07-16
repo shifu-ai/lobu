@@ -30,6 +30,49 @@ describe('migration invariants', () => {
   });
 
   describe('schema (DDL applied by the migration chain)', () => {
+    it('has durable course memory head and receipt constraints for multi-replica apply', async () => {
+      const sql = getTestDb();
+      const tables = await sql`
+        SELECT tablename
+        FROM pg_tables
+        WHERE schemaname = 'public'
+          AND tablename IN ('course_memory_heads', 'course_memory_apply_receipts')
+        ORDER BY tablename
+      `;
+      expect(tables.map((row) => row.tablename)).toEqual([
+        'course_memory_apply_receipts',
+        'course_memory_heads',
+      ]);
+      const indexes = await sql`
+        SELECT indexname, indexdef
+        FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname IN (
+            'course_memory_apply_receipts_org_idempotency_key',
+            'course_memory_apply_receipts_org_scope_revision'
+          )
+        ORDER BY indexname
+      `;
+      expect(indexes).toHaveLength(2);
+      expect(indexes.every((row) => String(row.indexdef).includes('UNIQUE'))).toBe(true);
+      expect(String(indexes[0]?.indexdef)).toContain('(organization_id, idempotency_key)');
+      expect(String(indexes[1]?.indexdef)).toContain(
+        '(organization_id, owner_user_id, agent_id, course_entity_id, requested_revision)'
+      );
+    });
+
+    it('enforces course memory receipts as append-only at the database layer', async () => {
+      const triggers = await getTestDb()`
+        SELECT tgname
+        FROM pg_trigger
+        WHERE tgrelid = 'course_memory_apply_receipts'::regclass
+          AND NOT tgisinternal
+      `;
+      expect(triggers.map((row) => row.tgname)).toContain(
+        'trg_course_memory_apply_receipts_append_only'
+      );
+    });
+
     it('has the canonical course entity JSONB GIN index',async()=>{const rows=await getTestDb()`SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND tablename='events' AND indexname='events_course_entity_ids_gin_idx'`;expect(rows).toHaveLength(1);expect(String(rows[0]?.indexdef)).toContain("metadata -> 'course_entity_ids'");});
     it('the canonical course scope predicate is served by the GIN index',async()=>{const plan=await getTestDb().begin(async(tx)=>{await tx.unsafe('SET LOCAL enable_seqscan = off');return tx.unsafe("EXPLAIN SELECT id FROM events WHERE metadata->'course_entity_ids' ?| ARRAY['course:plan:test']::text[]")});expect(plan.map((row)=>String(row['QUERY PLAN'])).join('\n')).toContain('events_course_entity_ids_gin_idx');});
     it('auth_profiles has the per-user pending oauth_account unique index (#1121)', async () => {

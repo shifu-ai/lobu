@@ -111,6 +111,27 @@ function contextPackBody(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function courseContextBody(overrides: Record<string, unknown> = {}) {
+  return {
+    contract: { name: 'course_context_projection', schemaVersion: 2 },
+    ownerUserId: OWNER_USER_ID,
+    agentId: AGENT_ID,
+    courseRevision: 4,
+    contextPackId: 'ctx-v2-004',
+    contentDigest: `sha256:${'4'.repeat(64)}`,
+    idempotencyKey: 'journey-v2-004:memory',
+    traceId: 'trace-v2-004',
+    payload: {
+      title: 'Course context v2',
+      summary: 'Course summary',
+      content: '# Course context v2',
+      semanticType: 'course_pm_profile',
+      metadata: { candidateCount: 30 },
+    },
+    ...overrides,
+  };
+}
+
 describe('Toolbox context pack memory route', () => {
   beforeEach(async () => {
     fakeRouteAgents.clear();
@@ -185,6 +206,107 @@ describe('Toolbox context pack memory route', () => {
         }),
       }),
     ]);
+  });
+
+  test('applies and reads back a strict course projection v2 receipt', async () => {
+    const app = await importMountedMemoryRoutes();
+    const courseEntityId = 'course:user-owner:course-v2';
+
+    const apply = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody()),
+      }
+    );
+    expect(apply.status).toBe(200);
+    const receipt = await apply.json();
+    expect(receipt).toMatchObject({
+      outcome: 'completed',
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId,
+      requestedCourseRevision: 4,
+      acceptedCourseRevision: 4,
+      appliedCourseRevision: 4,
+      contentDigest: `sha256:${'4'.repeat(64)}`,
+      memoryEventId: expect.any(Number),
+      indexStatus: 'pending',
+      receiptRef: expect.any(String),
+    });
+
+    const inspect = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}/receipt?`
+        + new URLSearchParams({
+          idempotencyKey: 'journey-v2-004:memory',
+        })
+    );
+    expect(inspect.status).toBe(200);
+    await expect(inspect.json()).resolves.toEqual(receipt);
+  });
+
+  test('rejects duplicate JSON members before applying a v2 projection', async () => {
+    const app = await importMountedMemoryRoutes();
+    const courseEntityId = 'course:user-owner:duplicate-json';
+    const body = JSON.stringify(courseContextBody()).replace(
+      '"courseRevision":4',
+      '"courseRevision":4,"courseRevision":5'
+    );
+
+    const response = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}`,
+      { method: 'PUT', headers: { 'content-type': 'application/json' }, body }
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      errorCode: 'memory.duplicate_json_member',
+    });
+  });
+
+  test.each([
+    ['owner_user_id', OWNER_USER_ID],
+    ['agent_id', AGENT_ID],
+    ['course_entity_id', 'course:caller-controlled'],
+    ['course_revision', 99],
+    ['content_digest', `sha256:${'f'.repeat(64)}`],
+    ['supersedes_event_id', 123],
+  ])('rejects caller override of reserved metadata %s', async (reservedKey, reservedValue) => {
+    const app = await importMountedMemoryRoutes();
+    const response = await app.request(
+      '/lobu/api/v1/memory/course-contexts/course%3Auser-owner%3Areserved',
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody({
+          payload: {
+            ...courseContextBody().payload,
+            metadata: { [reservedKey]: reservedValue },
+          },
+        })),
+      }
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      errorCode: 'memory.reserved_metadata_override',
+    });
+  });
+
+  test('rejects caller-supplied supersedesEventId on the v2 route', async () => {
+    const app = await importMountedMemoryRoutes();
+    const response = await app.request(
+      '/lobu/api/v1/memory/course-contexts/course%3Auser-owner%3Asupersedes',
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody({ supersedesEventId: 123 })),
+      }
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      errorCode: 'memory.invalid_request',
+    });
   });
 
   test.each([
