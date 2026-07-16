@@ -37,6 +37,10 @@ import {
   verifyRuntimeGrantPatterns,
 } from "./runtime-grant-verifier.js";
 import {
+  type ReconcileSalesBattleReportScheduleInput,
+  reconcileSalesBattleReportSchedule,
+} from "./sales-battle-report-schedule-reconcile.js";
+import {
   AGENT_ID_PATTERN,
   createPostgresAgentConfigStore,
   createPostgresAgentConnectionStore,
@@ -50,6 +54,9 @@ import {
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
 const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 const MAX_AGENT_RELEASE_BODY_BYTES = 1024 * 1024;
+const MAX_SALES_BATTLE_REPORT_BODY_BYTES = 64 * 1024;
+const MAX_SALES_BATTLE_REPORT_IDENTIFIER_LENGTH = 128;
+const MAX_SALES_BATTLE_REPORT_COURSE_NAME_LENGTH = 256;
 const SHIFU_UI_MANAGED_MCP_IDS = new Set([
   "google_workspace",
   "notion",
@@ -304,6 +311,117 @@ export function createProvisioningRoutes(
       return c.json({ error: "Authentication required" }, 401);
     return c.json(await releaseAssuranceReadback.readRuntime(), 200);
   });
+
+  provisioningRoutes.put(
+    "/sales-battle-report-schedules/:toolboxScheduleId",
+    bodyLimit({
+      maxSize: MAX_SALES_BATTLE_REPORT_BODY_BYTES,
+      onError: (c) =>
+        c.json({ error: "sales_battle_report_schedule_body_too_large" }, 413),
+    }),
+    async (c) => {
+      const denied = requireAdminPat(c);
+      if (denied) return denied;
+
+      const authenticatedOrganizationId = c.get("organizationId") as
+        | string
+        | null;
+      if (!authenticatedOrganizationId) {
+        return c.json({ error: "Authentication required" }, 401);
+      }
+
+      let body: Partial<ReconcileSalesBattleReportScheduleInput>;
+      try {
+        const parsed: unknown = await c.req.json();
+        if (!isObject(parsed)) {
+          return c.json({ error: "invalid_sales_battle_report_schedule" }, 400);
+        }
+        body = parsed;
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        return c.json({ error: "invalid_json" }, 400);
+      }
+
+      const toolboxScheduleId = c.req.param("toolboxScheduleId").trim();
+      const organizationId =
+        typeof body.organizationId === "string"
+          ? body.organizationId.trim()
+          : "";
+      const createdByUser =
+        typeof body.createdByUser === "string" ? body.createdByUser.trim() : "";
+      const agentId =
+        typeof body.agentId === "string" ? body.agentId.trim() : "";
+      const courseName =
+        typeof body.courseName === "string" ? body.courseName.trim() : "";
+      const desiredState = body.desiredState;
+      const weekdays = Array.isArray(body.salesTalkWeekdays)
+        ? [...new Set(body.salesTalkWeekdays)]
+        : [];
+      if (
+        !toolboxScheduleId ||
+        toolboxScheduleId.length > MAX_SALES_BATTLE_REPORT_IDENTIFIER_LENGTH ||
+        !organizationId ||
+        !createdByUser ||
+        createdByUser.length > MAX_SALES_BATTLE_REPORT_IDENTIFIER_LENGTH ||
+        !agentId ||
+        agentId.length > MAX_SALES_BATTLE_REPORT_IDENTIFIER_LENGTH ||
+        !courseName ||
+        courseName.length > MAX_SALES_BATTLE_REPORT_COURSE_NAME_LENGTH ||
+        !Number.isSafeInteger(body.scheduleRevision) ||
+        Number(body.scheduleRevision) < 1 ||
+        Number(body.scheduleRevision) > 2_147_483_647 ||
+        !weekdays.length ||
+        !weekdays.every(
+          (weekday) =>
+            Number.isInteger(weekday) && weekday >= 0 && weekday <= 6
+        ) ||
+        !(["active", "paused", "deleted"] as const).includes(
+          desiredState as "active" | "paused" | "deleted"
+        )
+      ) {
+        return c.json({ error: "invalid_sales_battle_report_schedule" }, 400);
+      }
+      if (organizationId !== authenticatedOrganizationId) {
+        return c.json(
+          { error: "organizationId does not match authenticated org" },
+          403
+        );
+      }
+
+      const result = await reconcileSalesBattleReportSchedule({
+        organizationId,
+        createdByUser,
+        agentId,
+        toolboxScheduleId,
+        scheduleRevision: Number(body.scheduleRevision),
+        courseName,
+        salesTalkWeekdays: weekdays as number[],
+        desiredState: desiredState as "active" | "paused" | "deleted",
+      });
+      if (!result.ok) {
+        if (
+          result.error === "stale_revision" ||
+          result.error === "revision_payload_conflict"
+        ) {
+          return c.json(
+            {
+              error: result.error,
+              acceptedRevision: result.acceptedRevision,
+            },
+            409
+          );
+        }
+        return c.json(
+          {
+            error: result.error,
+            conflictingJobIds: result.conflictingJobIds,
+          },
+          409
+        );
+      }
+      return c.json(result, 200);
+    }
+  );
 
   provisioningRoutes.get("/agents/:agentId/release-assurance", async (c) => {
     const denied = requireAdminPat(c);

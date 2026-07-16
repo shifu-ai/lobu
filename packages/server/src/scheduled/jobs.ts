@@ -34,13 +34,14 @@ import {
 	validateTrustedCourseFireEligibility,
 } from "./course-aware-wake.js";
 import {
-	registerScheduledJobsTicker,
-	resolveWakeAgentId,
-} from "./scheduled-jobs-service";
-import {
 	resolveScheduledPersonalReminder,
 	type ScheduledPersonalReminderV1,
 } from "./personal-reminder.js";
+import { salesBattleReportObserverLogFields } from "./sales-battle-report-observer-log.js";
+import {
+	registerScheduledJobsTicker,
+	resolveWakeAgentId,
+} from "./scheduled-jobs-service";
 import { TaskScheduler } from "./task-scheduler";
 import { triggerEmbedBackfill } from "./trigger-embed-backfill";
 import {
@@ -191,6 +192,14 @@ function registerMaintenanceTasks(
 	// as task runs via this same scheduler. The actual firing handlers are
 	// registered below so spawn() can find them.
 	registerScheduledJobsTicker(scheduler);
+
+	// Observer only: Toolbox's Cloudflare cron remains the sole report sender.
+	scheduler.register("sales_battle_report_observer", async (ctx) => {
+		logger.info(
+			salesBattleReportObserverLogFields(ctx.payload),
+			"[task] sales battle report observer fired",
+		);
+	});
 
 	// Handler: send_notification. Payload mirrors the notify-tool shape;
 	// resolves recipients to user_ids and inserts events + notification_targets.
