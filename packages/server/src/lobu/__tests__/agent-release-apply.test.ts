@@ -256,6 +256,8 @@ describe("signed managed agent release apply", () => {
 				signature: expect.any(String),
 			},
 		});
+		expect(evidence).not.toHaveProperty("baselineVersionId");
+		expect(evidence).not.toHaveProperty("effectiveSettingsDigest");
 		const { signature, ...evidenceSigning } = evidence.evidenceSigning;
 		expect(
 			verifySignature(
@@ -271,6 +273,401 @@ describe("signed managed agent release apply", () => {
 			),
 		).toBe(true);
 	});
+
+	test("applies exact personal baseline settings and exposes the effective digest", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(200);
+		const evidence = await response.json();
+		expect(evidence).toMatchObject({
+			baselineVersionId: request.baselineVersionId,
+			effectiveSettingsDigest: request.effectiveSettingsDigest,
+			settingsHash: request.effectiveSettingsDigest,
+			drifted: false,
+		});
+		expect(evidence).not.toHaveProperty("baselineOverride");
+
+		const settings = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/settings`,
+		);
+		expect(settings.status).toBe(200);
+		await expect(settings.json()).resolves.toMatchObject({
+			settings: {
+				identityMd: request.settings.identityMd,
+				mcpServers: request.settings.mcpServers,
+				skillsConfig: request.settings.skillsConfig,
+				preApprovedTools: request.settings.preApprovedTools,
+				modelSelection: request.settings.modelSelection,
+				providerModelPreferences: request.settings.providerModelPreferences,
+				networkConfig: request.settings.networkConfig,
+				toolsConfig: request.settings.toolsConfig,
+				pluginsConfig: request.settings.pluginsConfig,
+				guardrails: request.settings.guardrails,
+				installedProviders: request.settings.installedProviders,
+			},
+		});
+
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(status.status).toBe(200);
+		const statusBody = await status.json();
+		expect(statusBody).toMatchObject({
+			status: "applied",
+			baselineVersionId: request.baselineVersionId,
+			effectiveSettingsDigest: request.effectiveSettingsDigest,
+			settingsHash: request.effectiveSettingsDigest,
+		});
+		expect(statusBody).not.toHaveProperty("baselineOverride");
+		const grants = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/runtime-grants/verify`,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					revisionId: "personal-baseline-apply",
+					expectedGrantPatterns: [
+						"/mcp/shifu-toolbox/tools/get_project_profile",
+					],
+				}),
+			},
+		);
+		expect(grants.status).toBe(200);
+		await expect(grants.json()).resolves.toMatchObject({ ok: true });
+	});
+
+	test("applies an active break-glass baseline override and reads back its exact provenance", async () => {
+		const app = await buildApp();
+		const request = personalBaselineOverrideApplyRequest();
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toMatchObject({
+			baselineVersionId: request.baselineVersionId,
+			effectiveSettingsDigest: request.effectiveSettingsDigest,
+			settingsHash: request.effectiveSettingsDigest,
+			baselineOverride: request.baselineOverride,
+		});
+		expect(await currentIdentity()).toBe("break-glass identity");
+
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(status.status).toBe(200);
+		await expect(status.json()).resolves.toMatchObject({
+			baselineVersionId: request.baselineVersionId,
+			effectiveSettingsDigest: request.effectiveSettingsDigest,
+			baselineOverride: request.baselineOverride,
+		});
+	});
+
+	test.each([
+		[
+			"expired",
+			(request: ReturnType<typeof personalBaselineOverrideApplyRequest>) => {
+				request.baselineOverride.approvedAt = new Date(
+					Date.now() - 2 * 60 * 60 * 1000,
+				).toISOString();
+				request.baselineOverride.expiresAt = new Date(
+					Date.now() - 60 * 60 * 1000,
+				).toISOString();
+			},
+		],
+		[
+			"tampered anchor",
+			(request: ReturnType<typeof personalBaselineOverrideApplyRequest>) => {
+				request.baselineOverride.anchoredManifestDigest = `sha256:${"f".repeat(64)}`;
+			},
+		],
+		[
+			"tampered override identity",
+			(request: ReturnType<typeof personalBaselineOverrideApplyRequest>) => {
+				request.baselineOverride.overrideEffectiveSettingsDigest = `sha256:${"e".repeat(64)}`;
+			},
+		],
+	])("rejects a %s break-glass override without writing", async (_label, mutate) => {
+		const app = await buildApp();
+		const request = personalBaselineOverrideApplyRequest();
+		mutate(request);
+		request.commandDigest = commandDigest(request);
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(409);
+		await expect(response.json()).resolves.toMatchObject({
+			error: expect.stringMatching(/^agent_release_baseline_override_/),
+		});
+		expect(await currentIdentity()).toBe("existing identity");
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(status.status).toBe(404);
+	});
+
+	test("returns the originally persisted break-glass provenance on an exact retry", async () => {
+		const app = await buildApp();
+		const request = personalBaselineOverrideApplyRequest();
+		expect((await putApply(app, request)).status).toBe(200);
+
+		request.expectedCurrentReleaseSequence =
+			request.signedManifest.releaseSequence;
+		request.commandDigest = commandDigest(request);
+		const retry = await putApply(app, request);
+		expect(retry.status).toBe(200);
+		await expect(retry.json()).resolves.toMatchObject({
+			baselineVersionId: request.baselineVersionId,
+			effectiveSettingsDigest: request.effectiveSettingsDigest,
+			baselineOverride: request.baselineOverride,
+		});
+
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		await expect(status.json()).resolves.toMatchObject({
+			baselineOverride: request.baselineOverride,
+		});
+	});
+
+	test("rejects changed break-glass provenance on retry and preserves the original receipt", async () => {
+		const app = await buildApp();
+		const request = personalBaselineOverrideApplyRequest();
+		const original = structuredClone(request.baselineOverride);
+		expect((await putApply(app, request)).status).toBe(200);
+
+		request.expectedCurrentReleaseSequence =
+			request.signedManifest.releaseSequence;
+		request.baselineOverride.reason = "A different incident justification";
+		request.commandDigest = commandDigest(request);
+		const retry = await putApply(app, request);
+		expect(retry.status).toBe(409);
+		await expect(retry.json()).resolves.toMatchObject({
+			error: "agent_release_baseline_override_retry_mismatch",
+		});
+
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		await expect(status.json()).resolves.toMatchObject({
+			baselineOverride: original,
+		});
+	});
+
+	test("fails closed when persisted break-glass provenance no longer matches its receipt digest", async () => {
+		const app = await buildApp();
+		const request = personalBaselineOverrideApplyRequest();
+		expect((await putApply(app, request)).status).toBe(200);
+		const sql = await db();
+		await sql`
+			UPDATE agent_release_applies
+			SET baseline_override = jsonb_set(
+				baseline_override,
+				'{reason}',
+				'"tampered provenance"'::jsonb
+			)
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
+		`;
+
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(status.status).toBe(409);
+		await expect(status.json()).resolves.toMatchObject({
+			error: "agent_release_baseline_override_receipt_invalid",
+		});
+	});
+
+	test.each([
+		"missing field",
+		"unknown field",
+	])("rejects closed break-glass provenance with a %s without writing", async (variant) => {
+		const app = await buildApp();
+		const request = personalBaselineOverrideApplyRequest();
+		const provenance = request.baselineOverride as unknown as Record<
+			string,
+			unknown
+		>;
+		if (variant === "missing field") delete provenance.incidentReference;
+		else provenance.unbounded = true;
+		request.commandDigest = commandDigest(request);
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(400);
+		expect(await currentIdentity()).toBe("existing identity");
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(status.status).toBe(404);
+	});
+
+	test("fails closed when retry identity differs from the persisted personal baseline receipt", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		expect((await putApply(app, request)).status).toBe(200);
+		const persistedBaselineVersionId = `personal-agent-baseline-v1-${"d".repeat(64)}`;
+		const sql = await db();
+		await sql`
+			UPDATE agent_release_applies
+			SET personal_baseline_version_id = ${persistedBaselineVersionId}
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
+		`;
+
+		request.expectedCurrentReleaseSequence =
+			request.signedManifest.releaseSequence;
+		request.commandDigest = commandDigest(request);
+		const retry = await putApply(app, request);
+		expect(retry.status).toBe(409);
+		await expect(retry.json()).resolves.toMatchObject({
+			error: "agent_release_personal_baseline_retry_identity_mismatch",
+		});
+
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(status.status).toBe(200);
+		await expect(status.json()).resolves.toMatchObject({
+			baselineVersionId: persistedBaselineVersionId,
+			effectiveSettingsDigest: request.effectiveSettingsDigest,
+		});
+	});
+
+	test("fails closed when a persisted personal baseline identity pair is incomplete", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		expect((await putApply(app, request)).status).toBe(200);
+		const sql = await db();
+		await sql`
+			UPDATE agent_release_applies
+			SET personal_baseline_effective_settings_digest = NULL
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
+		`;
+
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(status.status).toBe(409);
+		await expect(status.json()).resolves.toEqual({
+			error: "agent_release_personal_baseline_receipt_identity_invalid",
+			error_description:
+				"Personal baseline receipt identity must be present as a closed pair",
+		});
+	});
+
+	test("reports drift when the persisted personal baseline digest no longer matches settings", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		expect((await putApply(app, request)).status).toBe(200);
+		const persistedDigest = `sha256:${"e".repeat(64)}`;
+		const sql = await db();
+		await sql`
+			UPDATE agent_release_applies
+			SET personal_baseline_effective_settings_digest = ${persistedDigest}
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
+		`;
+
+		const status = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(status.status).toBe(200);
+		await expect(status.json()).resolves.toMatchObject({
+			status: "drifted",
+			baselineVersionId: request.baselineVersionId,
+			effectiveSettingsDigest: persistedDigest,
+			settingsHash: request.effectiveSettingsDigest,
+		});
+	});
+
+	for (const family of [
+		"instructions",
+		"skills",
+		"mcp",
+		"tool policy",
+		"runtime",
+	] as const) {
+		test(`reports personal baseline ${family} drift through managed status`, async () => {
+			const app = await buildApp();
+			const request = personalBaselineApplyRequest();
+			expect((await putApply(app, request)).status).toBe(200);
+			const sql = await db();
+			if (family === "instructions") {
+				await sql`UPDATE agents SET identity_md='tampered' WHERE organization_id=${ORG_ID} AND id=${AGENT_ID}`;
+			} else if (family === "skills") {
+				await sql`UPDATE agents SET skills_config='{"skills":[]}' WHERE organization_id=${ORG_ID} AND id=${AGENT_ID}`;
+			} else if (family === "mcp") {
+				await sql`UPDATE agents SET mcp_servers='{}' WHERE organization_id=${ORG_ID} AND id=${AGENT_ID}`;
+			} else if (family === "tool policy") {
+				await sql`UPDATE agents SET tools_config='{}' WHERE organization_id=${ORG_ID} AND id=${AGENT_ID}`;
+			} else {
+				await sql`UPDATE agents SET network_config='{}' WHERE organization_id=${ORG_ID} AND id=${AGENT_ID}`;
+			}
+
+			const status = await app.request(
+				`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+			);
+			expect(status.status).toBe(200);
+			await expect(status.json()).resolves.toMatchObject({
+				status: "drifted",
+				settingsHash: request.effectiveSettingsDigest,
+				liveSettingsHash: expect.not.stringMatching(
+					request.effectiveSettingsDigest,
+				),
+			});
+		});
+	}
+
+	test("preserves the stale release fence for personal baseline commands", async () => {
+		const app = await buildApp();
+		const newer = personalBaselineApplyRequest({
+			releaseSequence: 2,
+			feedSequence: 2,
+		});
+		expect((await putApply(app, newer)).status).toBe(200);
+		const stale = personalBaselineApplyRequest({
+			releaseSequence: 1,
+			feedSequence: 3,
+			expectedCurrentReleaseSequence: 2,
+		});
+		const response = await putApply(app, stale);
+		expect(response.status).toBe(409);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_stale",
+		});
+	});
+
+	for (const mismatch of [
+		"baseline id",
+		"effective digest",
+		"settings",
+	] as const) {
+		test(`rejects personal baseline ${mismatch} mismatch without writing settings`, async () => {
+			const app = await buildApp();
+			const request = personalBaselineApplyRequest();
+			if (mismatch === "baseline id") {
+				request.baselineVersionId = `personal-agent-baseline-v1-${"c".repeat(64)}`;
+			} else if (mismatch === "effective digest") {
+				request.effectiveSettingsDigest = `sha256:${"d".repeat(64)}`;
+			} else {
+				request.settings = {
+					...request.settings,
+					identityMd: "forged settings",
+				};
+			}
+			request.commandDigest = commandDigest(request);
+
+			const response = await putApply(app, request);
+			expect(response.status).toBe(409);
+			await expect(response.json()).resolves.toMatchObject({
+				error: expect.stringMatching(
+					/^agent_release_personal_baseline_.*_mismatch$/,
+				),
+			});
+			expect(await currentIdentity()).toBe("existing identity");
+			const status = await app.request(
+				`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+			);
+			expect(status.status).toBe(404);
+		});
+	}
 
 	test("binds the Toolbox apply attempt fields into the command digest", async () => {
 		const app = await buildApp();
@@ -559,6 +956,8 @@ describe("signed managed agent release apply", () => {
 			settingsHash: applied.settingsHash,
 			appliedAt: expect.any(String),
 		});
+		expect(evidence).not.toHaveProperty("baselineVersionId");
+		expect(evidence).not.toHaveProperty("effectiveSettingsDigest");
 		expect(JSON.stringify(evidence)).not.toContain("release identity");
 		expect(evidence).not.toHaveProperty("settings");
 	});
@@ -1935,6 +2334,128 @@ function latestSignedApplyRequest() {
 	});
 	latest.commandDigest = commandDigest(latest);
 	return latest;
+}
+
+function personalBaselineApplyRequest(
+	options: {
+		releaseSequence?: number;
+		feedSequence?: number;
+		expectedCurrentReleaseSequence?: number | null;
+	} = {},
+) {
+	const request = latestSignedApplyRequest();
+	const releaseSequence = options.releaseSequence ?? 1;
+	request.signedManifest.releaseSequence = releaseSequence;
+	request.signedManifest.releaseId = `agent-personal-${releaseSequence}`;
+	request.signedFeed.feedSequence = options.feedSequence ?? releaseSequence;
+	request.signedFeed.publications[0].releaseId =
+		request.signedManifest.releaseId;
+	request.signedFeed.publications[0].releaseSequence = releaseSequence;
+	request.expectedCurrentReleaseSequence =
+		options.expectedCurrentReleaseSequence ?? null;
+	const settings: Record<string, unknown> = {
+		templateKey: "pm-marketing-user-agent",
+		scope: "user",
+		baselinePrompt: "source-only baseline prompt metadata",
+		runtimeConfig: {},
+		identityMd: "personal release identity",
+		soulMd: "personal release soul",
+		userMd: "personal release user",
+		mcpServers: {
+			toolbox: { type: "streamable-http", url: "https://mcp.shifu-ai.org/mcp" },
+		},
+		skillsConfig: { skills: [{ name: "course-pm" }] },
+		preApprovedTools: ["/mcp/shifu-toolbox/tools/*"],
+		modelSelection: { mode: "auto" },
+		providerModelPreferences: { anthropic: "anthropic/claude-sonnet-4-5" },
+		networkConfig: { allowedDomains: ["mcp.shifu-ai.org"] },
+		egressConfig: { enabled: true },
+		nixConfig: { packages: ["curl"] },
+		toolsConfig: { strictMode: true, allowedTools: ["Read"] },
+		pluginsConfig: { plugins: [] },
+		guardrails: ["secret-scan"],
+		installedProviders: [{ provider: "anthropic" }],
+	};
+	const effectiveSettingsDigest = digestValue(settings);
+	const baselineVersionId = `personal-agent-baseline-v1-${"a".repeat(64)}`;
+	const policy = request.signedManifest.controlPlanePolicy as Record<
+		string,
+		unknown
+	>;
+	policy.baseline = null;
+	policy.personalAgentBaseline = {
+		baselineVersionId,
+		baselineVersion: 7,
+		templateKey: "pm-marketing-user-agent",
+		materializationVersion: 1,
+		sourceRepository: "shifu-tw/shifu-toolbox",
+		sourceRevision: "b".repeat(40),
+		sourcePath:
+			"api/src/modules/agent-workbench/agent-baselines/pm-marketing-user-agent/baseline.json",
+		sourceDigest: `sha256:${"c".repeat(64)}`,
+		effectiveSettingsDigest,
+		componentDigests: {
+			instructions: `sha256:${"1".repeat(64)}`,
+			skills: `sha256:${"2".repeat(64)}`,
+			mcp: `sha256:${"3".repeat(64)}`,
+			toolPolicy: `sha256:${"4".repeat(64)}`,
+			runtime: `sha256:${"5".repeat(64)}`,
+		},
+	};
+	request.signedManifest.managedSettings = {};
+	const command = Object.assign(request, {
+		settings,
+		baselineVersionId,
+		effectiveSettingsDigest,
+	});
+	resignLatestRequest(command);
+	return command;
+}
+
+function personalBaselineOverrideApplyRequest() {
+	const request = personalBaselineApplyRequest();
+	request.signedFeed.channel = "stable";
+	resignFeed(request.signedFeed);
+	const anchored =
+		request.signedManifest.controlPlanePolicy.personalAgentBaseline;
+	const overrideSettings = {
+		...request.settings,
+		identityMd: "break-glass identity",
+	};
+	const overrideEffectiveSettingsDigest = digestValue(overrideSettings);
+	const overrideBaselineVersionId = `personal-agent-baseline-v1-${"d".repeat(64)}`;
+	const approvedAt = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+	const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+	const baselineOverride = {
+		kind: "break_glass" as const,
+		recordId: "55555555-5555-4555-8555-555555555555",
+		incidentReference: "INC-2026-0716",
+		operatorUserId: "66666666-6666-4666-8666-666666666666",
+		reason: "Restore the last known safe course PM baseline",
+		approvedAt,
+		expiresAt,
+		anchoredReleaseId: request.signedManifest.releaseId,
+		anchoredReleaseSequence: request.signedManifest.releaseSequence,
+		anchoredFeedSequence: request.signedFeed.feedSequence,
+		anchoredFeedDigest: digestValue(request.signedFeed),
+		anchoredManifestDigest: request.signedFeed.publications[0].manifestDigest,
+		anchoredBaselineVersionId: anchored.baselineVersionId,
+		anchoredBaselineVersion: anchored.baselineVersion,
+		anchoredEffectiveSettingsDigest: anchored.effectiveSettingsDigest,
+		overrideBaselineVersionId,
+		overrideBaselineVersion: 8,
+		overrideEffectiveSettingsDigest,
+	};
+	const command = Object.assign(request, {
+		settings: overrideSettings,
+		baselineVersionId: overrideBaselineVersionId,
+		baselineVersion: baselineOverride.overrideBaselineVersion,
+		effectiveSettingsDigest: overrideEffectiveSettingsDigest,
+		baselineOverride,
+		commandDigest: "",
+	});
+	command.commandDigest = commandDigest(command);
+	return command;
 }
 
 function resignLatestRequest(

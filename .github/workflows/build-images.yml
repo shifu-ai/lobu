@@ -38,10 +38,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.timestamp.outputs.tag }}
+      build_time: ${{ steps.timestamp.outputs.build_time }}
     steps:
       - name: Generate shared timestamp tag
         id: timestamp
-        run: echo "tag=$(date -u +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+        run: |
+          echo "tag=$(date -u +'%Y%m%d-%H%M%S')" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')" >> "$GITHUB_OUTPUT"
 
   # Connector-runtime parity smoke gate (main/deploy side). RUNS the built worker
   # artifact's self-check before any image is pushed, so the packaging/parity
@@ -63,13 +66,13 @@ jobs:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Build worker image (amd64, load, no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           platforms: linux/amd64
@@ -87,6 +90,7 @@ jobs:
 
   build-app:
     runs-on: ubuntu-latest
+    environment: production
     # Push the app image LAST. Flux's ImageUpdateAutomation only watches
     # the app image policy, but the chart applies one shared tag to app,
     # worker, AND embeddings. If app pushed before worker or embeddings,
@@ -106,7 +110,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - id: submodule
         uses: ./.github/actions/setup-submodule
@@ -114,13 +118,13 @@ jobs:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -128,7 +132,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_APP }}
           tags: |
@@ -136,23 +140,53 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push App image
-        uses: docker/build-push-action@v6
+        id: push-app
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           platforms: ${{ env.BUILD_PLATFORMS }}
           file: ./docker/app/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ needs.generate-tag.outputs.build_time }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            io.shifu.release.workflow=.github/workflows/build-images.yml
           build-args: |
             CACHEBUST=${{ github.sha }}
             APP_GIT_SHA=${{ github.sha }}
-            APP_BUILD_TIME=${{ github.event.head_commit.timestamp || github.run_id }}
+            APP_BUILD_TIME=${{ needs.generate-tag.outputs.build_time }}
             SKIP_WEB_BUILD=${{ steps.submodule.outputs.stubbed == 'true' }}
             VITE_SENTRY_DSN=${{ secrets.VITE_SENTRY_DSN }}
             VITE_ENVIRONMENT=production
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Write bounded app image receipt
+        env:
+          IMAGE_DIGEST: ${{ steps.push-app.outputs.digest }}
+          IMAGE_TAG: ${{ needs.generate-tag.outputs.tag }}
+          BUILD_TIME: ${{ needs.generate-tag.outputs.build_time }}
+        run: |
+          jq -n \
+            --arg schemaVersion "1" \
+            --arg sourceRepository "${{ github.repository }}" \
+            --arg gitRevision "${{ github.sha }}" \
+            --arg buildTime "$BUILD_TIME" \
+            --arg image "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_APP }}:$IMAGE_TAG" \
+            --arg imageDigest "$IMAGE_DIGEST" \
+            '{schemaVersion:($schemaVersion|tonumber),sourceRepository:$sourceRepository,gitRevision:$gitRevision,buildTime:$buildTime,image:$image,imageDigest:$imageDigest}' \
+            > lobu-app-image-receipt.json
+
+      - name: Upload bounded app image receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lobu-app-image-receipt
+          path: lobu-app-image-receipt.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Make image public
         run: |
@@ -162,6 +196,136 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             https://api.github.com/user/packages/container/lobu-app/visibility \
             -d '{"visibility":"public"}' || true
+
+      - name: Verify immutable app image is pullable
+        run: docker manifest inspect ghcr.io/shifu-ai/lobu-app@${{ steps.push-app.outputs.digest }} > /dev/null
+
+      - name: Produce bounded unsigned Lobu build receipt
+        env:
+          IMAGE_DIGEST: ${{ steps.push-app.outputs.digest }}
+          IMAGE_REFERENCE: ghcr.io/shifu-ai/lobu-app@${{ steps.push-app.outputs.digest }}
+          BUILD_TIME: ${{ needs.generate-tag.outputs.build_time }}
+          RECEIPT_KEY_ID: pending-protected-signer
+        run: |
+          node scripts/publish-agent-release-build-receipt.mjs > lobu-app-unsigned-build-receipt.json
+          test "$(wc -c < lobu-app-unsigned-build-receipt.json)" -le 32768
+
+      - name: Upload bounded unsigned Lobu build receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lobu-app-unsigned-build-receipt
+          path: lobu-app-unsigned-build-receipt.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload checksum-pinned OCI identity verifier
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lobu-oci-image-identity-verifier
+          path: scripts/verify-lobu-oci-image-identity.mjs
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-lobu-build-receipt:
+    needs: [build-app]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: none
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: lobu-app-unsigned-build-receipt
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: lobu-app-image-receipt
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: lobu-oci-image-identity-verifier
+      - name: Verify exact registry image identity with checksum-pinned public CLI
+        run: |
+          echo '0e649c86df55b834cd35384295e2264dd42bf9c4af1dc3a16387aa4c9e6860d5  verify-lobu-oci-image-identity.mjs' | sha256sum -c -
+          node verify-lobu-oci-image-identity.mjs \
+            --image-reference "$(jq -er '.artifactIdentity' lobu-app-unsigned-build-receipt.json)" \
+            --expected-source-revision "$(jq -er '.sourceRevision' lobu-app-unsigned-build-receipt.json)" \
+            --expected-build-time "$(jq -er '.buildTime' lobu-app-unsigned-build-receipt.json)" \
+            --expected-source 'https://github.com/shifu-ai/lobu' \
+            --expected-workflow '.github/workflows/build-images.yml' \
+            --verified-output lobu-app-verified-oci-identity.json
+      - name: Strictly validate and sign bounded receipt without repository code
+        env:
+          RECEIPT_PRIVATE_KEY_PKCS8: ${{ secrets.AGENT_RELEASE_LOBU_BUILD_RECEIPT_PRIVATE_KEY_PKCS8 }}
+          RECEIPT_KEY_ID: ${{ secrets.AGENT_RELEASE_LOBU_BUILD_RECEIPT_KEY_ID }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { createHash, createPrivateKey, sign } = require('node:crypto');
+          const path = 'lobu-app-unsigned-build-receipt.json';
+          if (fs.statSync(path).size > 32768) throw new Error('unsigned receipt too large');
+          if (fs.statSync('lobu-app-image-receipt.json').size > 32768) throw new Error('image receipt too large');
+          const receipt = JSON.parse(fs.readFileSync(path, 'utf8'));
+          const image = JSON.parse(fs.readFileSync('lobu-app-image-receipt.json', 'utf8'));
+          const verified = JSON.parse(fs.readFileSync('lobu-app-verified-oci-identity.json', 'utf8'));
+          const keys = x => Object.keys(x).sort().join(',');
+          const expected = 'artifactDigest,artifactIdentity,buildIdentityDigest,buildTime,dependencyId,expiresAt,observedAt,origin,provenance,provides,receiptKind,requires,scope,signing,sourceRevision';
+          if (!receipt || Array.isArray(receipt) || keys(receipt) !== expected) throw new Error('closed receipt schema required');
+          if (!image || Array.isArray(image) || keys(image) !== 'buildTime,gitRevision,image,imageDigest,schemaVersion,sourceRepository' || image.schemaVersion !== 1) throw new Error('closed image receipt schema required');
+          if (!verified || Array.isArray(verified) || keys(verified) !== 'artifactDigest,buildTime,imageReference,platformCount,schemaVersion,source,sourceRevision,status,workflow' || verified.schemaVersion !== 1 || verified.status !== 'verified') throw new Error('closed verified identity required');
+          if (keys(receipt.provenance) !== 'breakGlass,conclusion,environmentProtected,provider,ref,repository,runAttempt,runId,workflow') throw new Error('closed provenance schema required');
+          if (keys(receipt.signing) !== 'algorithm,keyId,purpose') throw new Error('closed signing schema required');
+          if (receipt.receiptKind !== 'build_artifact' || receipt.scope !== 'global' || receipt.dependencyId !== 'lobu-runtime') throw new Error('invalid receipt identity');
+          if (!/^sha256:[0-9a-f]{64}$/.test(receipt.artifactDigest) || receipt.artifactIdentity !== `ghcr.io/shifu-ai/lobu-app@${receipt.artifactDigest}`) throw new Error('invalid OCI digest binding');
+          if (!/^[0-9a-f]{40}$/.test(receipt.sourceRevision) || receipt.origin !== 'ghcr.io/shifu-ai/lobu-app') throw new Error('invalid source identity');
+          if (receipt.sourceRevision !== process.env.GITHUB_SHA || process.env.GITHUB_REPOSITORY !== 'shifu-ai/lobu' || process.env.GITHUB_REF !== 'refs/heads/main') throw new Error('signer source context mismatch');
+          if (receipt.provenance.repository !== 'shifu-ai/lobu' || receipt.provenance.workflow !== '.github/workflows/build-images.yml' || receipt.provenance.ref !== 'refs/heads/main' || receipt.provenance.conclusion !== 'success' || receipt.provenance.environmentProtected !== true || receipt.provenance.breakGlass !== false) throw new Error('invalid provenance');
+          if (receipt.provenance.runId !== process.env.GITHUB_RUN_ID || receipt.provenance.runAttempt !== process.env.GITHUB_RUN_ATTEMPT) throw new Error('signer run context mismatch');
+          if (receipt.signing.algorithm !== 'Ed25519' || receipt.signing.purpose !== 'lobu_build_artifact_receipt') throw new Error('invalid signing policy');
+          if (receipt.signing.keyId !== 'pending-protected-signer' || !process.env.RECEIPT_KEY_ID || !/^[A-Za-z0-9._:-]{1,128}$/.test(process.env.RECEIPT_KEY_ID)) throw new Error('invalid protected signing key id');
+          if (image.sourceRepository !== process.env.GITHUB_REPOSITORY || image.gitRevision !== receipt.sourceRevision || image.buildTime !== receipt.buildTime || image.imageDigest !== receipt.artifactDigest || image.image !== `ghcr.io/shifu-ai/lobu-app:${image.image.split(':').at(-1)}`) throw new Error('independent build output mismatch');
+          if (verified.imageReference !== receipt.artifactIdentity || verified.artifactDigest !== receipt.artifactDigest || verified.sourceRevision !== process.env.GITHUB_SHA || verified.sourceRevision !== receipt.sourceRevision || verified.buildTime !== receipt.buildTime || verified.source !== 'https://github.com/shifu-ai/lobu' || verified.workflow !== '.github/workflows/build-images.yml' || !Number.isSafeInteger(verified.platformCount) || verified.platformCount < 1 || verified.platformCount > 4) throw new Error('verified registry identity mismatch');
+          if (!Array.isArray(receipt.provides) || receipt.provides.join(',') !== 'agent-release.readiness.v1' || !Array.isArray(receipt.requires) || receipt.requires.length) throw new Error('invalid capability contract');
+          if (Date.parse(receipt.expiresAt) - Date.parse(receipt.observedAt) !== 172800000) throw new Error('invalid receipt lifetime');
+          const canonical = value => JSON.stringify(value, (_k, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a],[b]) => a.localeCompare(b))) : item);
+          const expectedBuildIdentity = `sha256:${createHash('sha256').update(canonical({sourceRevision:receipt.sourceRevision,buildTime:receipt.buildTime,imageDigest:receipt.artifactDigest,capabilities:receipt.provides})).digest('hex')}`;
+          if (receipt.buildIdentityDigest !== expectedBuildIdentity) throw new Error('invalid build identity digest');
+          receipt.signing.keyId = process.env.RECEIPT_KEY_ID;
+          const key = createPrivateKey({ key: Buffer.from(process.env.RECEIPT_PRIVATE_KEY_PKCS8, 'base64'), format: 'der', type: 'pkcs8' });
+          receipt.signing.signature = sign(null, Buffer.from(canonical(receipt)), key).toString('base64');
+          const output = canonical(receipt) + '\n';
+          if (Buffer.byteLength(output) > 32768) throw new Error('signed receipt too large');
+          fs.writeFileSync('lobu-app-signed-build-receipt.json', output, { flag: 'wx' });
+          NODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lobu-app-signed-build-receipt
+          path: lobu-app-signed-build-receipt.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-lobu-build-receipt:
+    needs: [sign-lobu-build-receipt]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: none
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: lobu-app-signed-build-receipt
+      - name: Publish signed receipt without signing key
+        env:
+          TOOLBOX_INTERNAL_SECRET: ${{ secrets.TOOLBOX_INTERNAL_SECRET }}
+          TOOLBOX_RECEIPT_INGRESS_URL: https://api.shifu-ai.org/agent-workbench/internal/agent-release-deployment-receipts
+        run: |
+          test "$(wc -c < lobu-app-signed-build-receipt.json)" -le 32768
+          jq -e 'has("signing") and (.signing.signature | type == "string")' lobu-app-signed-build-receipt.json >/dev/null
+          body="$(jq -c '{receipt:.}' lobu-app-signed-build-receipt.json)"
+          for attempt in 1 2 3 4 5; do
+            code="$(curl -sS -o /tmp/receipt-response -w '%{http_code}' -X POST "$TOOLBOX_RECEIPT_INGRESS_URL" -H 'content-type: application/json' -H "x-internal-secret: $TOOLBOX_INTERNAL_SECRET" --data-binary "$body")"
+            test "$code" -ge 200 && test "$code" -lt 300 && exit 0
+            sleep "$attempt"
+          done
+          exit 1
 
   build-worker:
     runs-on: ubuntu-latest
@@ -174,16 +338,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -191,7 +355,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_WORKER }}
           tags: |
@@ -199,7 +363,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Worker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           platforms: ${{ env.BUILD_PLATFORMS }}
@@ -230,16 +394,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -247,7 +411,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_EMBEDDINGS }}
           tags: |
@@ -255,7 +419,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Embeddings Service image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           platforms: ${{ env.BUILD_PLATFORMS }}
@@ -289,7 +453,14 @@ jobs:
   # repo secret; if unset the curl is skipped, never failing the job.
   notify-failure:
     runs-on: ubuntu-latest
-    needs: [generate-tag, connector-parity-smoke, build-worker, build-embeddings-service, build-app]
+    needs:
+      [
+        generate-tag,
+        connector-parity-smoke,
+        build-worker,
+        build-embeddings-service,
+        build-app,
+      ]
     if: failure() && github.ref == 'refs/heads/main'
     permissions:
       contents: read

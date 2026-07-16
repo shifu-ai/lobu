@@ -336,6 +336,48 @@ async function buildApp(
 	return app;
 }
 
+const FENCE_TARGET_ID = "a49ef354-e14f-4b42-a030-bd5f9a78f17f";
+const FENCE_TOKEN_A = "02a3b3ca-e30a-4c3f-8317-2a5da9b4a52a";
+const FENCE_TOKEN_B = "d9dd602c-f99f-4457-958c-67d2d89e922c";
+const BASELINE_VERSION_ID = `personal-agent-baseline-v1-${"a".repeat(64)}`;
+const EFFECTIVE_SETTINGS_DIGEST = `sha256:${"b".repeat(64)}`;
+
+function fencedProvisioningBody(
+	input: {
+		claimGeneration?: number;
+		claimToken?: string;
+		name?: string;
+		settings?: Record<string, unknown>;
+	} = {},
+) {
+	return {
+		name: input.name ?? "Fenced personal agent",
+		description: "Provisioned from the reviewed baseline",
+		ownerUserId: "toolbox-user-fenced",
+		targetId: FENCE_TARGET_ID,
+		claimGeneration: input.claimGeneration ?? 1,
+		claimToken: input.claimToken ?? FENCE_TOKEN_A,
+		baselineVersionId: BASELINE_VERSION_ID,
+		effectiveSettingsDigest: EFFECTIVE_SETTINGS_DIGEST,
+		settings: input.settings ?? { userMd: "generation one" },
+	};
+}
+
+async function putFencedAgent(
+	app: Hono,
+	agentId: string,
+	body: unknown,
+): Promise<Response> {
+	return app.request(
+		`/api/provisioning/agents/${encodeURIComponent(agentId)}/fenced-settings`,
+		{
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		},
+	);
+}
+
 async function seedPersonalAgent(
 	agentId = "shifu-u-abc123",
 	ownerUserId = "toolbox-user-1",
@@ -982,6 +1024,444 @@ describe("POST /api/provisioning/agents", () => {
 		});
 
 		expect(response.status).toBe(400);
+	});
+});
+
+describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
+	beforeEach(async () => {
+		await resetTestDatabase();
+		await seedOrg(ORG_ID);
+	});
+
+	test("creates once and makes an exact retry idempotent", async () => {
+		const app = await buildApp();
+		const agentId = "shifu-u-fenced-create";
+		const body = fencedProvisioningBody();
+
+		const first = await putFencedAgent(app, agentId, body);
+		expect(first.status).toBe(201);
+		await expect(first.json()).resolves.toEqual({
+			ok: true,
+			agentId,
+			created: true,
+			membership: { ensured: true, role: "member" },
+			revisionRef: `lobu:${agentId}`,
+			provisioningFence: {
+				targetId: FENCE_TARGET_ID,
+				claimGeneration: 1,
+				claimToken: FENCE_TOKEN_A,
+				baselineVersionId: BASELINE_VERSION_ID,
+				effectiveSettingsDigest: EFFECTIVE_SETTINGS_DIGEST,
+			},
+		});
+
+		const replay = await putFencedAgent(app, agentId, {
+			...body,
+			settings: { userMd: "generation one" },
+		});
+		expect(replay.status).toBe(200);
+		await expect(replay.json()).resolves.toMatchObject({
+			ok: true,
+			agentId,
+			created: false,
+			provisioningFence: { claimGeneration: 1, claimToken: FENCE_TOKEN_A },
+		});
+	});
+
+	test("rejects same-generation conflicts without changing observable settings", async () => {
+		const app = await buildApp();
+		const agentId = "shifu-u-fenced-conflict";
+		const retainedGrant = "/mcp/google_workspace/tools/gws_docs_read";
+		const rejectedGrant = "/mcp/shifu-toolbox/tools/get_project_profile";
+		expect(
+			(
+				await putFencedAgent(
+					app,
+					agentId,
+					fencedProvisioningBody({
+						settings: {
+							userMd: "generation one",
+							preApprovedTools: ["/mcp/google_workspace/tools/*"],
+						},
+					}),
+				)
+			).status,
+		).toBe(201);
+
+		const conflict = await putFencedAgent(
+			app,
+			agentId,
+			fencedProvisioningBody({
+				settings: {
+					userMd: "must not win",
+					preApprovedTools: ["/mcp/shifu-toolbox/tools/*"],
+				},
+			}),
+		);
+		expect(conflict.status).toBe(409);
+		await expect(conflict.json()).resolves.toEqual({
+			error: "provisioning_fence_conflict",
+		});
+		const tokenConflict = await putFencedAgent(app, agentId, {
+			...fencedProvisioningBody(),
+			claimToken: FENCE_TOKEN_B,
+		});
+		expect(tokenConflict.status).toBe(409);
+		await expect(tokenConflict.json()).resolves.toEqual({
+			error: "provisioning_fence_conflict",
+		});
+
+		const settings = await app.request(
+			`/api/provisioning/agents/${agentId}/settings`,
+		);
+		expect(settings.status).toBe(200);
+		await expect(settings.json()).resolves.toMatchObject({
+			settings: { userMd: "generation one" },
+		});
+		for (const [pattern, ok] of [
+			[retainedGrant, true],
+			[rejectedGrant, false],
+		] as const) {
+			const verification = await app.request(
+				`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+				{
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						revisionId: "same-generation-conflict",
+						expectedGrantPatterns: [pattern],
+					}),
+				},
+			);
+			await expect(verification.json()).resolves.toMatchObject({ ok });
+		}
+	});
+
+	test("lets a newer generation take over and rejects the late old owner", async () => {
+		const app = await buildApp();
+		const agentId = "shifu-u-fenced-takeover";
+		const retiredGrant = "/mcp/google_workspace/tools/gws_docs_read";
+		const winningGrant = "/mcp/shifu-toolbox/tools/get_project_profile";
+		const generationOne = fencedProvisioningBody({
+			settings: {
+				userMd: "generation one",
+				networkConfig: { allowedDomains: ["*"] },
+				preApprovedTools: ["/mcp/google_workspace/tools/*"],
+			},
+		});
+		expect(
+			(await putFencedAgent(app, agentId, generationOne)).status,
+		).toBe(201);
+		const beforeTakeover = await app.request(
+			`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					revisionId: "generation-one",
+					expectedGrantPatterns: [retiredGrant],
+				}),
+			},
+		);
+		await expect(beforeTakeover.json()).resolves.toMatchObject({ ok: true });
+
+		const takeover = await putFencedAgent(
+			app,
+			agentId,
+			fencedProvisioningBody({
+				claimGeneration: 2,
+				claimToken: FENCE_TOKEN_B,
+				settings: {
+					userMd: "generation two",
+					preApprovedTools: ["/mcp/shifu-toolbox/tools/*"],
+				},
+			}),
+		);
+		expect(takeover.status).toBe(200);
+		await expect(takeover.json()).resolves.toMatchObject({
+			provisioningFence: { claimGeneration: 2, claimToken: FENCE_TOKEN_B },
+		});
+
+		const late = await putFencedAgent(app, agentId, generationOne);
+		expect(late.status).toBe(409);
+		await expect(late.json()).resolves.toEqual({
+			error: "provisioning_fence_stale",
+		});
+		const settings = await app.request(
+			`/api/provisioning/agents/${agentId}/settings`,
+		);
+		await expect(settings.json()).resolves.toMatchObject({
+			settings: { userMd: "generation two" },
+		});
+		const afterTakeover = await app.request(
+			`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					revisionId: "generation-two",
+					expectedGrantPatterns: [retiredGrant],
+				}),
+			},
+		);
+		await expect(afterTakeover.json()).resolves.toMatchObject({
+			ok: false,
+			errorCode: "runtime_grants_missing",
+			missingGrantPatterns: [retiredGrant],
+		});
+		const winningGrantCheck = await app.request(
+			`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					revisionId: "generation-two-winning-grant",
+					expectedGrantPatterns: [winningGrant],
+				}),
+			},
+		);
+		await expect(winningGrantCheck.json()).resolves.toMatchObject({ ok: true });
+	});
+
+	test("rejects a delayed legacy provisioning write after fenced generation wins", async () => {
+		const app = await buildApp();
+		const agentId = "shifu-u-fenced-legacy-late";
+		const winningGrant = "/mcp/shifu-toolbox/tools/get_project_profile";
+		const rejectedGrant = "/mcp/google_workspace/tools/gws_docs_read";
+		const generationTwo = fencedProvisioningBody({
+			claimGeneration: 2,
+			claimToken: FENCE_TOKEN_B,
+			settings: {
+				userMd: "generation two wins",
+				preApprovedTools: ["/mcp/shifu-toolbox/tools/*"],
+			},
+		});
+
+		expect((await putFencedAgent(app, agentId, generationTwo)).status).toBe(201);
+
+		const delayedLegacy = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId,
+				name: "Delayed legacy agent",
+				ownerUserId: "toolbox-user-legacy",
+				settings: {
+					userMd: "legacy must not win",
+					preApprovedTools: ["/mcp/google_workspace/tools/*"],
+				},
+			}),
+		});
+		expect(delayedLegacy.status).toBe(409);
+		await expect(delayedLegacy.json()).resolves.toEqual({
+			error: "agent_settings_managed_by_fenced_provisioning",
+		});
+
+		const settings = await app.request(
+			`/api/provisioning/agents/${agentId}/settings`,
+		);
+		await expect(settings.json()).resolves.toMatchObject({
+			settings: { userMd: "generation two wins" },
+		});
+		for (const [pattern, ok] of [
+			[winningGrant, true],
+			[rejectedGrant, false],
+		] as const) {
+			const verification = await app.request(
+				`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+				{
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						revisionId: "legacy-after-fenced-generation",
+						expectedGrantPatterns: [pattern],
+					}),
+				},
+			);
+			await expect(verification.json()).resolves.toMatchObject({ ok });
+		}
+
+		const exactReplay = await putFencedAgent(app, agentId, generationTwo);
+		expect(exactReplay.status).toBe(200);
+		await expect(exactReplay.json()).resolves.toMatchObject({
+			provisioningFence: { claimGeneration: 2, claimToken: FENCE_TOKEN_B },
+		});
+	});
+
+	test("serializes concurrent requests from separate app replicas so the highest generation wins", async () => {
+		const replicaA = await buildApp();
+		const replicaB = await buildApp();
+		const agentId = "shifu-u-fenced-replicas";
+
+		const [oldOwner, newOwner] = await Promise.all([
+			putFencedAgent(replicaA, agentId, fencedProvisioningBody()),
+			putFencedAgent(
+				replicaB,
+				agentId,
+				fencedProvisioningBody({
+					claimGeneration: 2,
+					claimToken: FENCE_TOKEN_B,
+					settings: { userMd: "generation two" },
+				}),
+			),
+		]);
+		expect([200, 201, 409]).toContain(oldOwner.status);
+		expect([200, 201]).toContain(newOwner.status);
+
+		const settings = await replicaA.request(
+			`/api/provisioning/agents/${agentId}/settings`,
+		);
+		await expect(settings.json()).resolves.toMatchObject({
+			settings: { userMd: "generation two" },
+		});
+	});
+
+	test("does not revoke a pre-existing grant that fenced provisioning does not own", async () => {
+		const app = await buildApp();
+		const agentId = "shifu-u-fenced-unrelated-grant";
+		const unrelatedGrant = "/mcp/notion/tools/notion_search";
+		const legacy = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId,
+				name: "Existing agent",
+				ownerUserId: "toolbox-user-fenced",
+				settings: { preApprovedTools: ["/mcp/notion/tools/*"] },
+			}),
+		});
+		expect(legacy.status).toBe(201);
+
+		const fenced = await putFencedAgent(
+			app,
+			agentId,
+			fencedProvisioningBody({
+				settings: { userMd: "authoritative fenced settings" },
+			}),
+		);
+		expect(fenced.status).toBe(200);
+
+		const verification = await app.request(
+			`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					revisionId: "unrelated-grant",
+					expectedGrantPatterns: [unrelatedGrant],
+				}),
+			},
+		);
+		await expect(verification.json()).resolves.toMatchObject({ ok: true });
+	});
+
+	for (const existingState of ["denied", "expired"] as const) {
+		test(`reactivates an unowned ${existingState} desired grant without later claiming or deleting it`, async () => {
+			const app = await buildApp();
+			const agentId = `shifu-u-fenced-${existingState}-grant`;
+			const wildcard = "/mcp/notion/tools/*";
+			const expectedTool = "/mcp/notion/tools/notion_search";
+			const legacy = await app.request("/api/provisioning/agents", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					agentId,
+					name: "Existing agent",
+					ownerUserId: "toolbox-user-fenced",
+					settings: { preApprovedTools: [wildcard] },
+				}),
+			});
+			expect(legacy.status).toBe(201);
+
+			const { GrantStore } = await import(
+				"../../gateway/permissions/grant-store.js"
+			);
+			await new GrantStore().grant(
+				agentId,
+				wildcard,
+				existingState === "expired" ? Date.now() - 1_000 : null,
+				existingState === "denied",
+				ORG_ID,
+			);
+
+			const verify = (revisionId: string) =>
+				app.request(
+					`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
+					{
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({
+							revisionId,
+							expectedGrantPatterns: [expectedTool],
+						}),
+					},
+				);
+			await expect((await verify("before-fenced-apply")).json()).resolves.toMatchObject({
+				ok: false,
+				errorCode: "runtime_grants_missing",
+			});
+
+			const apply = await putFencedAgent(
+				app,
+				agentId,
+				fencedProvisioningBody({
+					settings: { preApprovedTools: [wildcard] },
+				}),
+			);
+			expect(apply.status).toBe(200);
+			await expect((await verify("after-fenced-apply")).json()).resolves.toMatchObject({
+				ok: true,
+			});
+
+			const removeFromBaseline = await putFencedAgent(
+				app,
+				agentId,
+				fencedProvisioningBody({
+					claimGeneration: 2,
+					claimToken: FENCE_TOKEN_B,
+					settings: { userMd: "no fenced grants" },
+				}),
+			);
+			expect(removeFromBaseline.status).toBe(200);
+			await expect(
+				(await verify("after-fenced-removal")).json(),
+			).resolves.toMatchObject({ ok: true });
+		});
+	}
+
+	test("rejects malformed and unbounded fence fields before creating an agent", async () => {
+		const app = await buildApp();
+		const invalidBodies = [
+			(() => {
+				const { settings: _settings, ...withoutSettings } = fencedProvisioningBody();
+				return withoutSettings;
+			})(),
+			{ ...fencedProvisioningBody(), targetId: "not-a-uuid" },
+			{ ...fencedProvisioningBody(), claimGeneration: 0 },
+			{
+				...fencedProvisioningBody(),
+				claimGeneration: Number.MAX_SAFE_INTEGER + 1,
+			},
+			{
+				...fencedProvisioningBody(),
+				claimToken: "secret-like-unbounded".repeat(20),
+			},
+			{ ...fencedProvisioningBody(), baselineVersionId: "draft" },
+			{ ...fencedProvisioningBody(), effectiveSettingsDigest: "sha256:nope" },
+			{ ...fencedProvisioningBody(), name: "x".repeat(201) },
+		];
+
+		for (const [index, body] of invalidBodies.entries()) {
+			const response = await putFencedAgent(
+				app,
+				`shifu-u-invalid-fence-${index}`,
+				body,
+			);
+			expect(response.status).toBe(400);
+			const payload = (await response.json()) as { error?: unknown };
+			expect(typeof payload.error).toBe("string");
+			expect(JSON.stringify(payload).length).toBeLessThan(300);
+		}
 	});
 });
 

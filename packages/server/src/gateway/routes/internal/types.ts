@@ -18,6 +18,7 @@ export type WorkerContext = {
       platform?: string;
       connectionId?: string;
       organizationId?: string;
+		releaseState?: import("@lobu/core").ReleaseCapabilityState;
     };
   };
 };
