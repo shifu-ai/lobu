@@ -492,26 +492,6 @@ export function createCourseMemoryRuntimeService(
           );
         }
 
-        const sameKey = await tx<ReceiptRow>`
-          SELECT *
-          FROM course_memory_apply_receipts
-          WHERE organization_id = ${organizationId}
-            AND idempotency_key = ${command.idempotencyKey}
-          LIMIT 1
-          FOR UPDATE
-        `;
-        if (sameKey[0]) {
-          if (!exactReplay(sameKey[0], command)) {
-            throw new CourseMemoryRuntimeError(
-              'memory.idempotency_conflict',
-              'Idempotency key was already used for a different projection',
-              409
-            );
-          }
-          if (sameKey[0].outcome === 'rejected') throw errorForRejectedReceipt(sameKey[0]);
-          return toReceipt(sameKey[0]);
-        }
-
         const heads = await tx<HeadRow>`
           SELECT applied_revision, content_digest, memory_event_id, receipt_id
           FROM course_memory_heads
@@ -551,6 +531,47 @@ export function createCourseMemoryRuntimeService(
           `;
           head = historicalHeads[0];
         }
+        const upsertLiveHead = async (value: HeadRow) => {
+          await tx`
+            INSERT INTO course_memory_heads (
+              organization_id, owner_user_id, agent_id, course_entity_id,
+              applied_revision, content_digest, memory_event_id, receipt_id
+            ) VALUES (
+              ${organizationId}, ${command.ownerUserId}, ${command.agentId},
+              ${command.courseEntityId}, ${value.applied_revision}, ${value.content_digest},
+              ${value.memory_event_id}, ${value.receipt_id}
+            )
+            ON CONFLICT (organization_id, owner_user_id, agent_id, course_entity_id)
+            DO UPDATE SET
+              applied_revision = EXCLUDED.applied_revision,
+              content_digest = EXCLUDED.content_digest,
+              memory_event_id = EXCLUDED.memory_event_id,
+              receipt_id = EXCLUDED.receipt_id,
+              updated_at = now()
+          `;
+        };
+
+        const sameKey = await tx<ReceiptRow>`
+          SELECT *
+          FROM course_memory_apply_receipts
+          WHERE organization_id = ${organizationId}
+            AND idempotency_key = ${command.idempotencyKey}
+          LIMIT 1
+          FOR UPDATE
+        `;
+        if (sameKey[0]) {
+          if (!exactReplay(sameKey[0], command)) {
+            throw new CourseMemoryRuntimeError(
+              'memory.idempotency_conflict',
+              'Idempotency key was already used for a different projection',
+              409
+            );
+          }
+          if (sameKey[0].outcome === 'rejected') throw errorForRejectedReceipt(sameKey[0]);
+          if (!heads[0] && head) await upsertLiveHead(head);
+          return toReceipt(sameKey[0]);
+        }
+
         const revisionRows = await tx<ReceiptRow>`
           SELECT *
           FROM course_memory_apply_receipts
@@ -650,23 +671,12 @@ export function createCourseMemoryRuntimeService(
           )
           RETURNING *
         `;
-        await tx`
-          INSERT INTO course_memory_heads (
-            organization_id, owner_user_id, agent_id, course_entity_id,
-            applied_revision, content_digest, memory_event_id, receipt_id
-          ) VALUES (
-            ${organizationId}, ${command.ownerUserId}, ${command.agentId},
-            ${command.courseEntityId}, ${command.courseRevision}, ${command.contentDigest},
-            ${event.id}, ${receiptId}
-          )
-          ON CONFLICT (organization_id, owner_user_id, agent_id, course_entity_id)
-          DO UPDATE SET
-            applied_revision = EXCLUDED.applied_revision,
-            content_digest = EXCLUDED.content_digest,
-            memory_event_id = EXCLUDED.memory_event_id,
-            receipt_id = EXCLUDED.receipt_id,
-            updated_at = now()
-        `;
+        await upsertLiveHead({
+          applied_revision: command.courseRevision,
+          content_digest: command.contentDigest,
+          memory_event_id: Number(event.id),
+          receipt_id: receiptId,
+        });
         return toReceipt(requiredReceiptRow(rows[0]));
       });
 

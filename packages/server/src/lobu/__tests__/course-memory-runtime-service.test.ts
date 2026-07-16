@@ -66,7 +66,7 @@ async function seedOwnerAndAgent() {
   `;
 }
 
-async function deleteAndRecreateAgent() {
+async function deleteAndRecreateAgent(ownerUserId = OWNER_USER_ID) {
   const sql = getDb();
   await sql`
     DELETE FROM agents
@@ -74,7 +74,7 @@ async function deleteAndRecreateAgent() {
   `;
   await sql`
     INSERT INTO agents (organization_id, id, name, owner_platform, owner_user_id)
-    VALUES (${ORGANIZATION_ID}, ${AGENT_ID}, 'Recreated Course PM Agent', 'toolbox', ${OWNER_USER_ID})
+    VALUES (${ORGANIZATION_ID}, ${AGENT_ID}, 'Recreated Course PM Agent', 'toolbox', ${ownerUserId})
   `;
 }
 
@@ -262,6 +262,90 @@ describe('course memory runtime service', () => {
       courseEntityId: COURSE_ENTITY_ID,
       idempotencyKey: 'journey-8-after-recreate:memory',
     })).resolves.toEqual(revision8);
+  });
+
+  test('restores the live head on exact same-key retry after deterministic agent recreation', async () => {
+    const enqueueCalls: string[] = [];
+    const service = createCourseMemoryRuntimeService({
+      enqueueEmbeddingBackfill: async (organizationId) => {
+        enqueueCalls.push(organizationId);
+        return true;
+      },
+    });
+    const revision7 = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    await deleteAndRecreateAgent();
+
+    const replay = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const sql = getDb();
+    const heads = await sql`
+      SELECT applied_revision, memory_event_id, receipt_id
+      FROM course_memory_heads
+      WHERE organization_id = ${ORGANIZATION_ID}
+        AND owner_user_id = ${OWNER_USER_ID}
+        AND agent_id = ${AGENT_ID}
+        AND course_entity_id = ${COURSE_ENTITY_ID}
+    `;
+    const receipts = await sql`SELECT id FROM course_memory_apply_receipts`;
+    const current = await sql`
+      SELECT id
+      FROM current_event_records
+      WHERE organization_id = ${ORGANIZATION_ID}
+        AND metadata->>'course_entity_id' = ${COURSE_ENTITY_ID}
+    `;
+
+    expect(replay).toEqual(revision7);
+    expect(heads).toEqual([{
+      applied_revision: 7,
+      memory_event_id: revision7.memoryEventId,
+      receipt_id: revision7.receiptRef.replace('course-memory-receipt:', ''),
+    }]);
+    expect(receipts).toHaveLength(1);
+    expect(current).toEqual([{ id: revision7.memoryEventId }]);
+    expect(enqueueCalls).toEqual([ORGANIZATION_ID]);
+  });
+
+  test('converges concurrent same-key retries on one restored head without side effects', async () => {
+    const enqueueCalls: string[] = [];
+    const dependencies = {
+      enqueueEmbeddingBackfill: async (organizationId: string) => {
+        enqueueCalls.push(organizationId);
+        return true;
+      },
+    };
+    const first = createCourseMemoryRuntimeService(dependencies);
+    const revision7 = await first.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    await deleteAndRecreateAgent();
+    const replicas = [
+      createCourseMemoryRuntimeService(dependencies),
+      createCourseMemoryRuntimeService(dependencies),
+      createCourseMemoryRuntimeService(dependencies),
+    ];
+
+    const replays = await Promise.all(replicas.map((service) =>
+      service.apply({ organizationId: ORGANIZATION_ID, command: command() })
+    ));
+    const sql = getDb();
+
+    expect(replays).toEqual([revision7, revision7, revision7]);
+    expect(await sql`SELECT receipt_id FROM course_memory_heads`).toHaveLength(1);
+    expect(await sql`SELECT id FROM course_memory_apply_receipts`).toHaveLength(1);
+    expect(await sql`
+      SELECT id FROM current_event_records
+      WHERE organization_id = ${ORGANIZATION_ID}
+        AND metadata->>'course_entity_id' = ${COURSE_ENTITY_ID}
+    `).toEqual([{ id: revision7.memoryEventId }]);
+    expect(enqueueCalls).toEqual([ORGANIZATION_ID]);
+  });
+
+  test('never restores historical state into a recreated agent owned by someone else', async () => {
+    const service = createTestService();
+    await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    await deleteAndRecreateAgent('different-owner');
+
+    await expect(service.apply({ organizationId: ORGANIZATION_ID, command: command() }))
+      .rejects.toMatchObject({ code: 'memory.owner_agent_mismatch', status: 403 });
+    expect(await getDb()`SELECT receipt_id FROM course_memory_heads`).toHaveLength(0);
+    expect(await getDb()`SELECT id FROM course_memory_apply_receipts`).toHaveLength(1);
   });
 
   test('serializes stale and newer applies across replicas after deterministic agent recreation', async () => {
