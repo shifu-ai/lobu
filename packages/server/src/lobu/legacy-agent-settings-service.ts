@@ -19,6 +19,19 @@ const RELEASE_OWNED_SETTINGS = [
 	"modelSelection",
 	"toolsConfig",
 ] as const;
+const PERSONAL_BASELINE_LOBU_OWNED_SETTINGS = new Set([
+	...RELEASE_OWNED_SETTINGS,
+	"mcpServers",
+	"skillsConfig",
+	"preApprovedTools",
+	"providerModelPreferences",
+	"networkConfig",
+	"egressConfig",
+	"nixConfig",
+	"pluginsConfig",
+	"guardrails",
+	"installedProviders",
+]);
 
 export class AgentSettingsManagedByReleaseError extends Error {
 	readonly code = AGENT_SETTINGS_MANAGED_BY_RELEASE;
@@ -67,6 +80,7 @@ async function lockAgentAndAssertReleaseFence(
 	agentId: string,
 	writesManagedSettings: boolean,
 	rejectFencedProvisioning = false,
+	settingsWriteKeys: readonly string[] = [],
 ): Promise<boolean> {
 	const agents = await tx`
     SELECT 1
@@ -87,10 +101,10 @@ async function lockAgentAndAssertReleaseFence(
 			throw new AgentSettingsManagedByFencedProvisioningError();
 		}
 	}
-	if (!writesManagedSettings) return true;
+	if (!writesManagedSettings && settingsWriteKeys.length === 0) return true;
 
-	const receipts = await tx`
-    SELECT 1
+	const receipts = await tx<{ personal_baseline_settings: unknown }>`
+	    SELECT personal_baseline_settings
     FROM agent_release_applies
     WHERE organization_id = ${organizationId}
       AND agent_id = ${agentId}
@@ -98,11 +112,18 @@ async function lockAgentAndAssertReleaseFence(
       AND applied_at IS NOT NULL
     LIMIT 1
   `;
-	if (receipts.length > 0) throw new AgentSettingsManagedByReleaseError();
+	const personalBaselineWrite =
+		receipts[0]?.personal_baseline_settings != null &&
+		settingsWriteKeys.some((key) =>
+			PERSONAL_BASELINE_LOBU_OWNED_SETTINGS.has(key),
+		);
+	if (receipts.length > 0 && (writesManagedSettings || personalBaselineWrite)) {
+		throw new AgentSettingsManagedByReleaseError();
+	}
 	return true;
 }
 
-async function replaceAgentSettings(
+export async function replaceAgentSettings(
 	tx: DbClient,
 	organizationId: string,
 	agentId: string,
@@ -132,7 +153,7 @@ async function replaceAgentSettings(
     `;
 }
 
-async function syncProvisioningGrantsInTransaction(
+export async function syncProvisioningGrantsInTransaction(
 	tx: DbClient,
 	organizationId: string,
 	agentId: string,
@@ -573,6 +594,8 @@ export async function patchLegacyAgentSettings(
 				organizationId,
 				agentId,
 				writesManagedSettings,
+				false,
+				Object.keys(updates),
 			))
 		) {
 			return;

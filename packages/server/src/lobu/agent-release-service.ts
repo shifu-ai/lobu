@@ -9,8 +9,12 @@ import {
 import { canonicalize } from "json-canonicalize";
 import { type DbClient, getDb } from "../db/client.js";
 import { parseStrictJsonBytes } from "./strict-json-parser.js";
-import type { ReleaseCapabilityClaim } from "@lobu/core";
+import type { AgentSettings, ReleaseCapabilityClaim } from "@lobu/core";
 import type { RuntimeCapabilitySnapshot } from "../gateway/services/runtime-capability-snapshot.js";
+import {
+	replaceAgentSettings,
+	syncProvisioningGrantsInTransaction,
+} from "./legacy-agent-settings-service.js";
 
 const MANAGED_SETTING_KEYS = [
 	"identityMd",
@@ -19,7 +23,25 @@ const MANAGED_SETTING_KEYS = [
 	"modelSelection",
 	"toolsConfig",
 ] as const;
+// Lobu persists and reads these fields from live agent state. The remaining
+// personal baseline fields are signed, immutable source metadata only; they
+// may seed live digest reconstruction but can never mask a mutable field.
+const PERSONAL_BASELINE_LOBU_OWNED_KEYS = [
+	"identityMd", "soulMd", "userMd", "mcpServers", "skillsConfig",
+	"preApprovedTools", "modelSelection", "providerModelPreferences",
+	"networkConfig", "egressConfig", "nixConfig", "toolsConfig",
+	"pluginsConfig", "guardrails", "installedProviders",
+] as const;
+const PERSONAL_BASELINE_IMMUTABLE_METADATA_KEYS = [
+	"templateKey", "scope", "baselinePrompt", "runtimeConfig",
+] as const;
+const PERSONAL_BASELINE_SETTING_KEYS = [
+	...PERSONAL_BASELINE_IMMUTABLE_METADATA_KEYS,
+	...PERSONAL_BASELINE_LOBU_OWNED_KEYS,
+] as const;
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const PERSONAL_BASELINE_VERSION_PATTERN =
+	/^personal-agent-baseline-v1-[0-9a-f]{64}$/;
 const BASE64_PATTERN =
 	/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const MAX_KEYRING_BYTES = 64 * 1024;
@@ -36,7 +58,21 @@ interface ControlPlanePolicy {
 		fullBundleDigest: string;
 		patches: unknown[];
 	};
+	personalAgentBaseline?: PersonalAgentBaselineContract;
 	[key: string]: unknown;
+}
+
+interface PersonalAgentBaselineContract {
+	baselineVersionId: string;
+	baselineVersion: number;
+	templateKey: "pm-marketing-user-agent";
+	materializationVersion: 1;
+	sourceRepository: "shifu-tw/shifu-toolbox";
+	sourceRevision: string;
+	sourcePath: string;
+	sourceDigest: string;
+	effectiveSettingsDigest: string;
+	componentDigests: Record<string, string>;
 }
 
 interface ManagedModelSelection {
@@ -125,6 +161,9 @@ export interface AgentReleaseApplyCommand {
 	claimToken?: string;
 	stepOrdinal?: number;
 	stepLeaseToken?: string;
+	settings?: Record<string, unknown>;
+	baselineVersionId?: string;
+	effectiveSettingsDigest?: string;
 	commandDigest: string;
 }
 
@@ -203,6 +242,7 @@ export interface ReleaseCapabilityReceiptRow {
 	applied_feed_sequence: number;
 	status: string;
 	settings_hash: string;
+	personal_baseline_settings?: Record<string, unknown> | null;
 }
 
 export function classifyAgentReleaseCapabilityState(input: {
@@ -218,7 +258,8 @@ export function classifyAgentReleaseCapabilityState(input: {
 		!snapshot ||
 		receipt.environment !== input.environment ||
 		receipt.status !== "applied" ||
-		receipt.settings_hash !== settingsHashFromAgent(agent) ||
+		receipt.settings_hash !==
+			settingsHashFromAgent(agent, receipt.personal_baseline_settings) ||
 		receipt.desired_release_id !== receipt.applied_release_id ||
 		receipt.desired_release_sequence !== receipt.applied_release_sequence ||
 		receipt.desired_feed_sequence !== receipt.applied_feed_sequence ||
@@ -257,7 +298,11 @@ export async function readAgentReleaseCapabilityState(input: {
 		ReleaseCapabilityReceiptRow & ReleaseCapabilityAgentRow
 	>`
 		SELECT a.owner_user_id, a.identity_md, a.soul_md, a.user_md,
-		       a.model_selection, a.tools_config, r.settings_hash, r.environment,
+		       a.model, a.model_selection, a.provider_model_preferences,
+		       a.network_config, a.egress_config, a.nix_config, a.mcp_servers,
+		       a.skills_config, a.tools_config, a.plugins_config, a.installed_providers,
+		       a.verbose_logging, a.pre_approved_tools, a.guardrails,
+		       r.settings_hash, r.environment, r.personal_baseline_settings,
 		       r.desired_release_id, r.desired_release_sequence, r.desired_feed_sequence,
 		       r.applied_release_id, r.applied_release_sequence, r.applied_feed_sequence,
 		       r.status
@@ -348,6 +393,7 @@ export function createAgentReleaseService(options: {
 					"Agent release command digest does not match its canonical payload",
 				);
 			}
+			validatePersonalBaselineCommand(command);
 			if (isCurrentApplyCommand(command) && evidenceSigner.error) {
 				throw evidenceSigner.error;
 			}
@@ -385,8 +431,15 @@ export function createAgentReleaseService(options: {
 				       r.rollback_to_release_id, r.rollback_to_sequence,
 				       r.manifest_digest, r.status,
 				       r.revision_ref, r.settings_hash, r.applied_at,
+				       r.personal_baseline_version_id,
+				       r.personal_baseline_effective_settings_digest,
+				       r.personal_baseline_settings,
 				       a.owner_user_id, a.identity_md, a.soul_md, a.user_md,
-				       a.model_selection, a.tools_config
+				       a.model, a.model_selection, a.provider_model_preferences,
+				       a.network_config, a.egress_config, a.nix_config, a.mcp_servers,
+				       a.skills_config, a.tools_config, a.plugins_config,
+				       a.installed_providers, a.verbose_logging,
+				       a.pre_approved_tools, a.guardrails
 				FROM agent_release_applies r
 				JOIN agents a
 				  ON a.organization_id = r.organization_id
@@ -405,7 +458,10 @@ export function createAgentReleaseService(options: {
 				}
 				if (!rows[0]) return null;
 				const evidence = evidenceFromReceipt(input.agentId, rows[0]);
-				const liveSettingsHash = settingsHashFromAgent(rows[0]);
+				const liveSettingsHash = settingsHashFromAgent(
+					rows[0],
+					rows[0].personal_baseline_settings,
+				);
 				return liveSettingsHash === rows[0].settings_hash
 					? evidence
 					: { ...evidence, status: "drifted", liveSettingsHash };
@@ -428,8 +484,11 @@ async function applyInTransaction(
 	},
 ): Promise<AgentReleaseApplyResult> {
 	const agentRows = await tx<AgentSettingsRow>`
-		SELECT owner_user_id, identity_md, soul_md, user_md,
-		       model_selection, tools_config
+		SELECT owner_user_id, identity_md, soul_md, user_md, model,
+		       model_selection, provider_model_preferences, network_config,
+		       egress_config, nix_config, mcp_servers, skills_config, tools_config,
+		       plugins_config, installed_providers, verbose_logging,
+		       pre_approved_tools, guardrails
 		FROM agents
 		WHERE organization_id = ${input.organizationId}
 		  AND id = ${input.agentId}
@@ -458,6 +517,8 @@ async function applyInTransaction(
 		       applied_channel, applied_feed_digest, environment,
 		       rollback_to_release_id, rollback_to_sequence,
 		       manifest_digest, status, revision_ref, settings_hash, applied_at
+		       , personal_baseline_version_id,
+		       personal_baseline_effective_settings_digest, personal_baseline_settings
 		FROM agent_release_applies
 		WHERE organization_id = ${input.organizationId}
 		  AND agent_id = ${input.agentId}
@@ -526,18 +587,16 @@ async function applyInTransaction(
 				"Agent release sequence was already applied with another manifest",
 			);
 		}
-		const liveSettingsHash = settingsHashFromAgent(agent);
+		const liveSettingsHash = settingsHashFromAgent(
+			agent,
+			current.personal_baseline_settings,
+		);
 		const repaired = liveSettingsHash !== current.settings_hash;
 		const repairedAgent = repaired
-			? await applyManagedSettings(
-					tx,
-					input.organizationId,
-					input.agentId,
-					manifest.managedSettings,
-				)
+			? await applyCommandSettings(tx, input)
 			: agent;
 		const repairedSettingsHash = repaired
-			? settingsHashFromAgent(repairedAgent)
+			? settingsHashFromAgent(repairedAgent, input.command.settings)
 			: current.settings_hash;
 		assertExpectedSettingsHash(manifest, repairedSettingsHash);
 		if (repaired && repairedSettingsHash !== current.settings_hash) {
@@ -641,13 +700,8 @@ async function applyInTransaction(
 	}
 	await writeFeedCursor(tx, input, cursor);
 
-	const updated = await applyManagedSettings(
-		tx,
-		input.organizationId,
-		input.agentId,
-		manifest.managedSettings,
-	);
-	const settingsHash = settingsHashFromAgent(updated);
+	const updated = await applyCommandSettings(tx, input);
+	const settingsHash = settingsHashFromAgent(updated, input.command.settings);
 	assertExpectedSettingsHash(manifest, settingsHash);
 	const revisionRef = [
 		"lobu",
@@ -665,6 +719,8 @@ async function applyInTransaction(
 			applied_channel, applied_feed_digest,
 			rollback_to_release_id, rollback_to_sequence,
 			manifest_digest, status, revision_ref, settings_hash, error_code,
+			personal_baseline_version_id, personal_baseline_effective_settings_digest,
+			personal_baseline_settings,
 			created_at, updated_at, applied_at
 		) VALUES (
 			${input.organizationId}, ${input.agentId}, ${manifest.environment},
@@ -673,6 +729,9 @@ async function applyInTransaction(
 			${feed.channel}, ${input.feedDigest},
 			${manifest.rollbackTo ?? null}, ${manifest.rollbackToSequence ?? null},
 			${manifestDigest}, 'applied', ${revisionRef}, ${settingsHash}, NULL,
+			${input.command.baselineVersionId ?? null},
+			${input.command.effectiveSettingsDigest ?? null},
+			${input.command.settings ? tx.json(input.command.settings) : null},
 			NOW(), NOW(), NOW()
 		)
 		ON CONFLICT (organization_id, agent_id) DO UPDATE SET
@@ -691,6 +750,9 @@ async function applyInTransaction(
 			status = EXCLUDED.status,
 			revision_ref = EXCLUDED.revision_ref,
 			settings_hash = EXCLUDED.settings_hash,
+			personal_baseline_version_id = EXCLUDED.personal_baseline_version_id,
+			personal_baseline_effective_settings_digest = EXCLUDED.personal_baseline_effective_settings_digest,
+			personal_baseline_settings = EXCLUDED.personal_baseline_settings,
 			error_code = NULL,
 			updated_at = NOW(),
 			applied_at = NOW()
@@ -754,6 +816,53 @@ async function applyManagedSettings(
 	return updated;
 }
 
+async function applyCommandSettings(
+	tx: DbClient,
+	input: {
+		organizationId: string;
+		agentId: string;
+		command: AgentReleaseApplyCommand;
+	},
+): Promise<AgentSettingsRow> {
+	if (!input.command.settings) {
+		return applyManagedSettings(
+			tx,
+			input.organizationId,
+			input.agentId,
+			input.command.signedManifest.managedSettings,
+		);
+	}
+	await replaceAgentSettings(
+		tx,
+		input.organizationId,
+		input.agentId,
+		input.command.settings as Omit<AgentSettings, "updatedAt">,
+	);
+	await syncProvisioningGrantsInTransaction(
+		tx,
+		input.organizationId,
+		input.agentId,
+		input.command.settings as Omit<AgentSettings, "updatedAt">,
+	);
+	const rows = await tx<AgentSettingsRow>`
+		SELECT owner_user_id, identity_md, soul_md, user_md, model,
+		       model_selection, provider_model_preferences, network_config,
+		       egress_config, nix_config, mcp_servers, skills_config, tools_config,
+		       plugins_config, installed_providers, verbose_logging,
+		       pre_approved_tools, guardrails
+		FROM agents
+		WHERE organization_id = ${input.organizationId} AND id = ${input.agentId}
+	`;
+	if (!rows[0]) {
+		throw releaseError(
+			"agent_release_agent_not_found",
+			404,
+			"Agent release target disappeared during apply",
+		);
+	}
+	return rows[0];
+}
+
 async function writeFeedCursor(
 	tx: DbClient,
 	input: {
@@ -794,6 +903,18 @@ interface AgentSettingsRow {
 	user_md: string | null;
 	model_selection: unknown;
 	tools_config: unknown;
+	model?: string | null;
+	provider_model_preferences?: unknown;
+	network_config?: unknown;
+	egress_config?: unknown;
+	nix_config?: unknown;
+	mcp_servers?: unknown;
+	skills_config?: unknown;
+	plugins_config?: unknown;
+	installed_providers?: unknown;
+	verbose_logging?: boolean;
+	pre_approved_tools?: unknown;
+	guardrails?: unknown;
 }
 
 interface ReceiptRow {
@@ -813,6 +934,9 @@ interface ReceiptRow {
 	revision_ref: string;
 	settings_hash: string;
 	applied_at: Date | string;
+	personal_baseline_version_id?: string | null;
+	personal_baseline_effective_settings_digest?: string | null;
+	personal_baseline_settings?: Record<string, unknown> | null;
 }
 
 type ReceiptWithAgentRow = ReceiptRow & AgentSettingsRow;
@@ -845,7 +969,34 @@ function evidenceFromReceipt(
 	};
 }
 
-function settingsHashFromAgent(agent: AgentSettingsRow): string {
+function settingsHashFromAgent(
+	agent: AgentSettingsRow,
+	personalSettings?: Record<string, unknown> | null,
+): string {
+	if (personalSettings) {
+		const live = { ...personalSettings };
+		const values: Record<string, unknown> = {
+			identityMd: agent.identity_md ?? "",
+			soulMd: agent.soul_md ?? "",
+			userMd: agent.user_md ?? "",
+			mcpServers: agent.mcp_servers ?? {},
+			skillsConfig: agent.skills_config ?? { skills: [] },
+			preApprovedTools: agent.pre_approved_tools ?? [],
+			modelSelection: agent.model_selection ?? {},
+			providerModelPreferences: agent.provider_model_preferences ?? {},
+			networkConfig: agent.network_config ?? {},
+			egressConfig: agent.egress_config ?? {},
+			nixConfig: agent.nix_config ?? {},
+			toolsConfig: agent.tools_config ?? {},
+			pluginsConfig: agent.plugins_config ?? {},
+			guardrails: agent.guardrails ?? [],
+			installedProviders: agent.installed_providers ?? [],
+		};
+		for (const [key, value] of Object.entries(values)) {
+			if (hasOwn(personalSettings, key)) live[key] = value;
+		}
+		return digestValue(live);
+	}
 	return digestValue({
 		identityMd: agent.identity_md ?? "",
 		soulMd: agent.soul_md ?? "",
@@ -864,6 +1015,9 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 			"signedManifest",
 			"signedFeed",
 			"assignment",
+			"settings",
+			"baselineVersionId",
+			"effectiveSettingsDigest",
 			"assignmentRevision",
 			"claimToken",
 			"stepOrdinal",
@@ -876,6 +1030,37 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 	const signedManifest = parseManifest(value.signedManifest);
 	const signedFeed = parseFeed(value.signedFeed);
 	const assignment = parseAssignment(value.assignment);
+	const personalKeys = [
+		"settings",
+		"baselineVersionId",
+		"effectiveSettingsDigest",
+	] as const;
+	const presentPersonalKeys = personalKeys.filter((key) => hasOwn(value, key));
+	if (
+		presentPersonalKeys.length !== 0 &&
+		presentPersonalKeys.length !== personalKeys.length
+	) {
+		throw invalidRequest(
+			"Personal baseline settings and identity must be provided together",
+		);
+	}
+	let settings: Record<string, unknown> | undefined;
+	if (presentPersonalKeys.length > 0) {
+		settings = requireRecord(value.settings, "personal baseline settings");
+		assertExactKeys(
+			settings,
+			PERSONAL_BASELINE_SETTING_KEYS,
+			"personal baseline settings",
+		);
+		if (
+			typeof value.baselineVersionId !== "string" ||
+			!PERSONAL_BASELINE_VERSION_PATTERN.test(value.baselineVersionId) ||
+			typeof value.effectiveSettingsDigest !== "string" ||
+			!SHA256_PATTERN.test(value.effectiveSettingsDigest)
+		) {
+			throw invalidRequest("Personal baseline identity is invalid");
+		}
+	}
 	const currentAttemptKeys = [
 		"assignmentRevision",
 		"claimToken",
@@ -939,6 +1124,13 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 					claimToken: value.claimToken as string,
 					stepOrdinal: value.stepOrdinal as number,
 					stepLeaseToken: value.stepLeaseToken as string,
+				}
+			: {}),
+		...(settings
+			? {
+					settings,
+					baselineVersionId: value.baselineVersionId as string,
+					effectiveSettingsDigest: value.effectiveSettingsDigest as string,
 				}
 			: {}),
 		expectedCurrentReleaseSequence,
@@ -1362,7 +1554,7 @@ function parseControlPlanePolicy(value: unknown): ControlPlanePolicy {
 			"migrations",
 			"rollbackStrategy",
 		],
-		["runtimeCarrier"],
+		["runtimeCarrier", "personalAgentBaseline"],
 		"controlPlanePolicy",
 	);
 	const eligibility = requireRecord(policy.eligibility, "eligibility");
@@ -1521,6 +1713,14 @@ function parseControlPlanePolicy(value: unknown): ControlPlanePolicy {
 			}
 		}
 	}
+	if (hasOwn(policy, "personalAgentBaseline")) {
+		parsePersonalAgentBaselineContract(policy.personalAgentBaseline);
+	}
+	if ((policy.baseline === null) === !hasOwn(policy, "personalAgentBaseline")) {
+		throw invalidRequest(
+			"Capability policy must contain exactly one managed baseline contract",
+		);
+	}
 
 	if (
 		!Array.isArray(policy.capabilities) ||
@@ -1594,6 +1794,55 @@ function parseControlPlanePolicy(value: unknown): ControlPlanePolicy {
 	if (hasOwn(policy, "runtimeCarrier"))
 		parseRuntimeCarrierPolicy(policy.runtimeCarrier);
 	return policy as unknown as ControlPlanePolicy;
+}
+
+function parsePersonalAgentBaselineContract(value: unknown): void {
+	const baseline = requireRecord(value, "personalAgentBaseline");
+	assertRequiredExactKeys(
+		baseline,
+		[
+			"baselineVersionId", "baselineVersion", "templateKey", "materializationVersion",
+			"sourceRepository", "sourceRevision", "sourcePath", "sourceDigest",
+			"effectiveSettingsDigest", "componentDigests",
+		],
+		[],
+		"personalAgentBaseline",
+	);
+	if (
+		typeof baseline.baselineVersionId !== "string" ||
+		!PERSONAL_BASELINE_VERSION_PATTERN.test(baseline.baselineVersionId) ||
+		!isPositiveSafeInteger(baseline.baselineVersion) ||
+		baseline.templateKey !== "pm-marketing-user-agent" ||
+		baseline.materializationVersion !== 1 ||
+		baseline.sourceRepository !== "shifu-tw/shifu-toolbox" ||
+		typeof baseline.sourceRevision !== "string" ||
+		!/^[0-9a-f]{40}$/.test(baseline.sourceRevision) ||
+		baseline.sourcePath !==
+			"api/src/modules/agent-workbench/agent-baselines/pm-marketing-user-agent/baseline.json" ||
+		typeof baseline.sourceDigest !== "string" ||
+		!SHA256_PATTERN.test(baseline.sourceDigest) ||
+		typeof baseline.effectiveSettingsDigest !== "string" ||
+		!SHA256_PATTERN.test(baseline.effectiveSettingsDigest)
+	) {
+		throw invalidRequest("Agent release personal baseline is invalid");
+	}
+	const components = requireRecord(
+		baseline.componentDigests,
+		"personalAgentBaseline componentDigests",
+	);
+	assertRequiredExactKeys(
+		components,
+		["instructions", "skills", "mcp", "toolPolicy", "runtime"],
+		[],
+		"personalAgentBaseline componentDigests",
+	);
+	if (
+		Object.values(components).some(
+			(value) => typeof value !== "string" || !SHA256_PATTERN.test(value),
+		)
+	) {
+		throw invalidRequest("Agent release personal baseline component digest is invalid");
+	}
 }
 
 function parseRuntimeCarrierPolicy(value: unknown): void {
@@ -1796,9 +2045,50 @@ function validateCurrentContract(command: AgentReleaseApplyCommand): void {
 			"Managed settings only accept per-agent capability activation releases",
 		);
 	}
-	if (manifestPolicy.baseline === null) {
+	if (
+		manifestPolicy.baseline === null &&
+		manifestPolicy.personalAgentBaseline === undefined
+	) {
 		throw invalidRequest(
 			"Capability activation requires a managed settings baseline",
+		);
+	}
+}
+
+function validatePersonalBaselineCommand(command: AgentReleaseApplyCommand): void {
+	const signed = command.signedManifest.controlPlanePolicy?.personalAgentBaseline;
+	const hasCommand = command.settings !== undefined;
+	if (!signed && !hasCommand) return;
+	if (!signed || !hasCommand) {
+		throw invalidRequest(
+			"Personal baseline releases require exact resolved settings and identity",
+		);
+	}
+	if (command.signedManifest.managedSettings &&
+		Object.keys(command.signedManifest.managedSettings).length > 0) {
+		throw invalidRequest(
+			"Personal baseline releases cannot embed mutable managed settings in the manifest",
+		);
+	}
+	if (command.baselineVersionId !== signed.baselineVersionId) {
+		throw releaseError(
+			"agent_release_personal_baseline_id_mismatch",
+			409,
+			"Personal baseline version does not match the signed manifest",
+		);
+	}
+	if (command.effectiveSettingsDigest !== signed.effectiveSettingsDigest) {
+		throw releaseError(
+			"agent_release_personal_baseline_digest_mismatch",
+			409,
+			"Personal baseline digest does not match the signed manifest",
+		);
+	}
+	if (!safeDigestEqual(digestValue(command.settings), signed.effectiveSettingsDigest)) {
+		throw releaseError(
+			"agent_release_personal_baseline_settings_digest_mismatch",
+			409,
+			"Resolved personal baseline settings do not match the signed digest",
 		);
 	}
 }
@@ -1807,7 +2097,10 @@ function assertExpectedSettingsHash(
 	manifest: SignedManifest,
 	settingsHash: string,
 ): void {
-	const expected = manifest.controlPlanePolicy?.baseline?.settingsHash;
+	const expected =
+		manifest.controlPlanePolicy?.personalAgentBaseline
+			?.effectiveSettingsDigest ??
+		manifest.controlPlanePolicy?.baseline?.settingsHash;
 	if (expected !== undefined && !safeDigestEqual(expected, settingsHash)) {
 		throw releaseError(
 			"agent_release_settings_hash_mismatch",
