@@ -31,6 +31,8 @@ describe('migration files (dbmate format)', () => {
     expect(sql).toContain('(organization_id, idempotency_key)');
     expect(sql).toContain('requested_revision');
     expect(sql).toContain('request_fingerprint text NOT NULL');
+    expect(sql).toContain('course_memory_apply_receipts_scope_applied');
+    expect(sql).toMatch(/applied_revision DESC,\s+id DESC/);
     expect(sql).toContain('REFERENCES public.events(id) ON DELETE RESTRICT');
     expect(sql).toContain('REFERENCES public.agents(organization_id, id) ON DELETE CASCADE');
     expect(sql).toContain('trg_course_memory_apply_receipts_append_only');

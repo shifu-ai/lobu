@@ -521,7 +521,36 @@ export function createCourseMemoryRuntimeService(
             AND course_entity_id = ${command.courseEntityId}
           FOR UPDATE
         `;
-        const head = heads[0];
+        let head = heads[0];
+        if (!head) {
+          const historicalHeads = await tx<HeadRow>`
+            SELECT r.applied_revision,
+                   r.content_digest,
+                   r.memory_event_id,
+                   r.id AS receipt_id
+            FROM course_memory_apply_receipts r
+            JOIN events e ON e.id = r.memory_event_id
+            WHERE r.organization_id = ${organizationId}
+              AND r.owner_user_id = ${command.ownerUserId}
+              AND r.agent_id = ${command.agentId}
+              AND r.course_entity_id = ${command.courseEntityId}
+              AND r.outcome = 'completed'
+              AND r.applied_revision IS NOT NULL
+              AND e.organization_id = ${organizationId}
+              AND e.metadata->>'owner_user_id' = ${command.ownerUserId}
+              AND e.metadata->>'agent_id' = ${command.agentId}
+              AND e.metadata->>'course_entity_id' = ${command.courseEntityId}
+              AND jsonb_typeof(e.metadata->'course_entity_ids') = 'array'
+              AND jsonb_array_length(e.metadata->'course_entity_ids') = 1
+              AND e.metadata->'course_entity_ids'->>0 = ${command.courseEntityId}
+              AND e.metadata->>'content_digest' = r.content_digest
+              AND e.metadata->>'request_fingerprint' = r.request_fingerprint
+            ORDER BY r.applied_revision DESC, r.id DESC
+            LIMIT 1
+            FOR UPDATE OF r
+          `;
+          head = historicalHeads[0];
+        }
         const revisionRows = await tx<ReceiptRow>`
           SELECT *
           FROM course_memory_apply_receipts

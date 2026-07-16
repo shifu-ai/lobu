@@ -66,6 +66,18 @@ async function seedOwnerAndAgent() {
   `;
 }
 
+async function deleteAndRecreateAgent() {
+  const sql = getDb();
+  await sql`
+    DELETE FROM agents
+    WHERE organization_id = ${ORGANIZATION_ID} AND id = ${AGENT_ID}
+  `;
+  await sql`
+    INSERT INTO agents (organization_id, id, name, owner_platform, owner_user_id)
+    VALUES (${ORGANIZATION_ID}, ${AGENT_ID}, 'Recreated Course PM Agent', 'toolbox', ${OWNER_USER_ID})
+  `;
+}
+
 describe('course memory runtime service', () => {
   beforeAll(async () => {
     await ensureDbForGatewayTests();
@@ -196,6 +208,102 @@ describe('course memory runtime service', () => {
         contentDigest: `sha256:${'9'.repeat(64)}`,
       }),
     })).rejects.toMatchObject({ code: 'memory.revision_conflict', status: 409 });
+  });
+
+  test('recovers historical revision and supersession after deterministic agent recreation', async () => {
+    const service = createTestService();
+    const revision7 = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    await deleteAndRecreateAgent();
+
+    await expect(service.inspectByIdempotencyKey({
+      organizationId: ORGANIZATION_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      idempotencyKey: command().idempotencyKey,
+    })).resolves.toBeNull();
+    await expect(service.apply({
+      organizationId: ORGANIZATION_ID,
+      command: command({
+        courseRevision: 6,
+        contextPackId: 'context-pack-6-after-recreate',
+        contentDigest: `sha256:${'6'.repeat(64)}`,
+        idempotencyKey: 'journey-6-after-recreate:memory',
+      }),
+    })).rejects.toMatchObject({ code: 'memory.stale_revision', status: 409 });
+
+    const revision8 = await service.apply({
+      organizationId: ORGANIZATION_ID,
+      command: command({
+        courseRevision: 8,
+        contextPackId: 'context-pack-8-after-recreate',
+        contentDigest: `sha256:${'8'.repeat(64)}`,
+        idempotencyKey: 'journey-8-after-recreate:memory',
+      }),
+    });
+    const current = await getDb()`
+      SELECT id, supersedes_event_id
+      FROM current_event_records
+      WHERE organization_id = ${ORGANIZATION_ID}
+        AND metadata->>'owner_user_id' = ${OWNER_USER_ID}
+        AND metadata->>'agent_id' = ${AGENT_ID}
+        AND metadata->>'course_entity_id' = ${COURSE_ENTITY_ID}
+    `;
+
+    expect(current).toEqual([{
+      id: revision8.memoryEventId,
+      supersedes_event_id: revision7.memoryEventId,
+    }]);
+    await expect(service.inspectByIdempotencyKey({
+      organizationId: ORGANIZATION_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      idempotencyKey: command().idempotencyKey,
+    })).resolves.toEqual(revision7);
+    await expect(service.inspectByIdempotencyKey({
+      organizationId: ORGANIZATION_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      idempotencyKey: 'journey-8-after-recreate:memory',
+    })).resolves.toEqual(revision8);
+  });
+
+  test('serializes stale and newer applies across replicas after deterministic agent recreation', async () => {
+    const service = createTestService();
+    const revision7 = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    await deleteAndRecreateAgent();
+    const replicas = [createTestService(), createTestService(), createTestService()] as const;
+    const newer = command({
+      courseRevision: 8,
+      contextPackId: 'context-pack-8-concurrent-recreate',
+      contentDigest: `sha256:${'8'.repeat(64)}`,
+      idempotencyKey: 'journey-8-concurrent-recreate:memory',
+    });
+    const stale = command({
+      courseRevision: 6,
+      contextPackId: 'context-pack-6-concurrent-recreate',
+      contentDigest: `sha256:${'6'.repeat(64)}`,
+      idempotencyKey: 'journey-6-concurrent-recreate:memory',
+    });
+
+    const results = await Promise.allSettled([
+      replicas[0].apply({ organizationId: ORGANIZATION_ID, command: stale }),
+      ...replicas.map((replica) => replica.apply({ organizationId: ORGANIZATION_ID, command: newer })),
+    ]);
+    const completed = results.filter((result) => result.status === 'fulfilled')
+      .map((result) => result.value);
+    const rejected = results.filter((result) => result.status === 'rejected')
+      .map((result) => result.reason);
+
+    expect(completed).toHaveLength(3);
+    expect(new Set(completed.map((receipt) => receipt.memoryEventId)).size).toBe(1);
+    expect(rejected).toEqual([expect.objectContaining({ code: 'memory.stale_revision' })]);
+    const events = await getDb()`
+      SELECT id, supersedes_event_id
+      FROM current_event_records
+      WHERE organization_id = ${ORGANIZATION_ID}
+        AND metadata->>'course_entity_id' = ${COURSE_ENTITY_ID}
+    `;
+    expect(events).toEqual([{
+      id: completed[0]?.memoryEventId,
+      supersedes_event_id: revision7.memoryEventId,
+    }]);
   });
 
   test('readback recovers a completed apply after its HTTP response is lost', async () => {

@@ -59,6 +59,17 @@ describe('migration invariants', () => {
       expect(String(indexes[1]?.indexdef)).toContain(
         '(organization_id, owner_user_id, agent_id, course_entity_id, requested_revision)'
       );
+      const historyIndexes = await sql`
+        SELECT indexdef
+        FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname = 'course_memory_apply_receipts_scope_applied'
+      `;
+      expect(historyIndexes).toHaveLength(1);
+      expect(String(historyIndexes[0]?.indexdef)).toContain(
+        '(organization_id, owner_user_id, agent_id, course_entity_id, applied_revision DESC, id DESC)'
+      );
+      expect(String(historyIndexes[0]?.indexdef)).toContain("WHERE (outcome = 'completed'::text)");
     });
 
     it('enforces course memory receipts as append-only at the database layer', async () => {

@@ -72,6 +72,17 @@ CREATE INDEX course_memory_apply_receipts_scope_observed
     observed_at DESC
   );
 
+CREATE INDEX course_memory_apply_receipts_scope_applied
+  ON public.course_memory_apply_receipts (
+    organization_id,
+    owner_user_id,
+    agent_id,
+    course_entity_id,
+    applied_revision DESC,
+    id DESC
+  )
+  WHERE outcome = 'completed';
+
 CREATE FUNCTION public.course_memory_apply_receipts_block_mutation()
   RETURNS trigger AS $$
 BEGIN
