@@ -1145,13 +1145,18 @@ export async function completeEmbeddings(c: Context<{ Bindings: Env }>) {
         }
       } catch (err) {
         if (observationScope?.eventIds.has(item.event_id)) {
-          failedEventIds.add(item.event_id);
+          // The vector write and observation append are separate durable
+          // operations. A retry may fail after a current-model embedding was
+          // already committed by this or an earlier run. Re-read searchable
+          // truth before classifying; only absence is a real index failure.
+          const current = await hasCurrentEmbedding(sql, item.event_id);
+          if (!current) failedEventIds.add(item.event_id);
           await observeCourseMemoryIndex(
             sql,
             observationScope,
             req.run_id,
             item.event_id,
-            'failed'
+            current ? 'ready' : 'failed'
           );
         }
         logger.error(

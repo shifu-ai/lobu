@@ -411,6 +411,41 @@ describe('course memory runtime service', () => {
     }))?.indexStatus).toBe('failed');
   });
 
+  test('keeps ready when a newer run write fails but the current embedding remains durable', async () => {
+    const service = createTestService();
+    const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
+    const readyRunId = await createEmbeddingRun(applied.memoryEventId!);
+    await completeEmbeddings(mockEmbeddingsContext({
+      run_id: readyRunId,
+      worker_id: 'trusted-embedding-worker',
+      embeddings: [{
+        event_id: applied.memoryEventId,
+        embedding: embedding(),
+        embedding_model: getConfiguredEmbeddingModel(),
+      }],
+    }).ctx);
+
+    const failedRunId = await createEmbeddingRun(applied.memoryEventId!);
+    const failedWrite = mockEmbeddingsContext({
+      run_id: failedRunId,
+      worker_id: 'trusted-embedding-worker',
+      embeddings: [{
+        event_id: applied.memoryEventId,
+        embedding: [1, 2],
+        embedding_model: getConfiguredEmbeddingModel(),
+      }],
+    });
+    await completeEmbeddings(failedWrite.ctx);
+
+    expect((await service.inspect({
+      organizationId: ORGANIZATION_ID,
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId: COURSE_ENTITY_ID,
+      idempotencyKey: command().idempotencyKey,
+    }))?.indexStatus).toBe('ready');
+  });
+
   test('rejects an index observation whose immutable receipt identity does not match', async () => {
     const service = createTestService();
     const applied = await service.apply({ organizationId: ORGANIZATION_ID, command: command() });
