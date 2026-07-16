@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import type { AgentSettings, StoredConnection } from "@lobu/core";
 import { type Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { canonicalize } from "json-canonicalize";
 import type { McpConfigService } from "../gateway/auth/mcp/config-service.js";
 import { startAuthCodeFlow } from "../gateway/auth/mcp/oauth-flow.js";
 import { GrantStore } from "../gateway/permissions/grant-store.js";
@@ -26,6 +27,8 @@ import {
 } from "./agent-release-service.js";
 import {
   AgentSettingsManagedByReleaseError,
+  ProvisioningFenceError,
+  provisionFencedAgent,
   provisionLegacyAgent,
 } from "./legacy-agent-settings-service.js";
 import {
@@ -138,6 +141,15 @@ function validateShifuAgentId(agentId: string): string | null {
 
 function parseUserId(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const BASELINE_VERSION_PATTERN = /^personal-agent-baseline-v1-[0-9a-f]{64}$/;
+const SHA256_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+
+function requestDigest(value: unknown): string {
+  return `sha256:${createHash("sha256").update(canonicalize(value)).digest("hex")}`;
 }
 
 export function isUiManagedMcp(mcpId: string): boolean {
@@ -309,6 +321,175 @@ export function createProvisioningRoutes(
       return c.json({ error: "agent_release_assurance_not_found" }, 404);
     return c.json(result, 200);
   });
+
+  provisioningRoutes.put(
+    "/agents/:agentId/fenced-settings",
+    bodyLimit({
+      maxSize: MAX_AGENT_RELEASE_BODY_BYTES,
+      onError: (c) => c.json({ error: "provisioning_body_too_large" }, 413),
+    }),
+    async (c) => {
+      const denied = requireAdminPat(c);
+      if (denied) return denied;
+      const user = c.get("user") as { id?: string } | null;
+      const organizationId = c.get("organizationId") as string | null;
+      if (!user?.id || !organizationId) {
+        return c.json({ error: "Authentication required" }, 401);
+      }
+
+      const agentId = c.req.param("agentId")?.trim() ?? "";
+      const agentIdError = validateShifuAgentId(agentId);
+      if (agentIdError) return c.json({ error: agentIdError }, 400);
+
+      let body: Record<string, unknown>;
+      try {
+        const parsed = parseStrictJsonBytes(
+          new Uint8Array(await c.req.arrayBuffer())
+        );
+        if (!isObject(parsed))
+          throw new StrictJsonError(
+            "invalid_json",
+            "JSON body must be an object"
+          );
+        body = parsed;
+      } catch (error) {
+        if (error instanceof StrictJsonError) {
+          return c.json({ error: "invalid_json" }, 400);
+        }
+        throw error;
+      }
+
+      const name = typeof body.name === "string" ? body.name.trim() : "";
+      const description =
+        typeof body.description === "string" && body.description.trim()
+          ? body.description.trim()
+          : undefined;
+      const ownerUserId = parseUserId(body.ownerUserId);
+      const targetId = typeof body.targetId === "string" ? body.targetId : "";
+      const claimGeneration = body.claimGeneration;
+      const claimToken =
+        typeof body.claimToken === "string" ? body.claimToken : "";
+      const baselineVersionId =
+        typeof body.baselineVersionId === "string"
+          ? body.baselineVersionId
+          : "";
+      const effectiveSettingsDigest =
+        typeof body.effectiveSettingsDigest === "string"
+          ? body.effectiveSettingsDigest
+          : "";
+
+      if (!name || name.length > 200) {
+        return c.json({ error: "name must contain 1 to 200 characters" }, 400);
+      }
+      if (description && description.length > 2000) {
+        return c.json(
+          { error: "description must not exceed 2000 characters" },
+          400
+        );
+      }
+      if (!ownerUserId || ownerUserId.length > 200) {
+        return c.json(
+          { error: "ownerUserId must contain 1 to 200 characters" },
+          400
+        );
+      }
+      if (!UUID_PATTERN.test(targetId)) {
+        return c.json({ error: "targetId must be a lowercase UUID" }, 400);
+      }
+      if (
+        typeof claimGeneration !== "number" ||
+        !Number.isSafeInteger(claimGeneration) ||
+        claimGeneration <= 0
+      ) {
+        return c.json(
+          { error: "claimGeneration must be a positive safe integer" },
+          400
+        );
+      }
+      if (!UUID_PATTERN.test(claimToken)) {
+        return c.json({ error: "claimToken must be a lowercase UUID" }, 400);
+      }
+      if (!BASELINE_VERSION_PATTERN.test(baselineVersionId)) {
+        return c.json(
+          { error: "baselineVersionId has an invalid format" },
+          400
+        );
+      }
+      if (!SHA256_DIGEST_PATTERN.test(effectiveSettingsDigest)) {
+        return c.json(
+          { error: "effectiveSettingsDigest has an invalid format" },
+          400
+        );
+      }
+
+      let settings: Omit<AgentSettings, "updatedAt">;
+      if (body.settings === undefined) {
+        return c.json({ error: "settings is required" }, 400);
+      }
+      try {
+        settings = validateSettings(body.settings);
+      } catch (error) {
+        return c.json(
+          {
+            error: error instanceof Error ? error.message : "Invalid settings",
+          },
+          400
+        );
+      }
+
+      const fence = {
+        targetId,
+        claimGeneration,
+        claimToken,
+        baselineVersionId,
+        effectiveSettingsDigest,
+      };
+      try {
+        const result = await provisionFencedAgent({
+          organizationId,
+          agentId,
+          name,
+          description,
+          ownerUserId,
+          patUserId: user.id,
+          membershipId: deterministicMembershipId(organizationId, ownerUserId),
+          ownerEmail: deterministicToolboxOwnerEmail(
+            organizationId,
+            ownerUserId
+          ),
+          settings,
+          fence,
+          requestDigest: requestDigest({
+            agentId,
+            name,
+            description: description ?? null,
+            ownerUserId,
+            settings,
+            ...fence,
+          }),
+        });
+        return c.json(
+          {
+            ok: true,
+            agentId,
+            created: result.created,
+            membership: result.membership,
+            revisionRef: `lobu:${agentId}`,
+            provisioningFence: fence,
+          },
+          result.created ? 201 : 200
+        );
+      } catch (error) {
+        if (error instanceof ProvisioningFenceError) {
+          return c.json({ error: error.code }, 409);
+        }
+        if (error instanceof AgentSettingsManagedByReleaseError) {
+          return c.json({ error: error.code }, 409);
+        }
+        throw error;
+      }
+    }
+  );
 
   provisioningRoutes.post("/agents", async (c) => {
     const denied = requireAdminPat(c);

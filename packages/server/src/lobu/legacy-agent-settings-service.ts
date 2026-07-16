@@ -1,4 +1,8 @@
-import type { AgentSettings } from "@lobu/core";
+import {
+	inferGrantKind,
+	normalizeDomainPattern,
+	type AgentSettings,
+} from "@lobu/core";
 import type { DbClient } from "../db/client.js";
 import { getDb } from "../db/client.js";
 import { recordLifecycleEvent } from "../utils/insert-event.js";
@@ -22,6 +26,23 @@ export class AgentSettingsManagedByReleaseError extends Error {
 			"Agent release-owned settings must be changed through managed release apply",
 		);
 		this.name = "AgentSettingsManagedByReleaseError";
+	}
+}
+
+export type ProvisioningFence = {
+	targetId: string;
+	claimGeneration: number;
+	claimToken: string;
+	baselineVersionId: string;
+	effectiveSettingsDigest: string;
+};
+
+export class ProvisioningFenceError extends Error {
+	constructor(
+		readonly code: "provisioning_fence_stale" | "provisioning_fence_conflict",
+	) {
+		super(code);
+		this.name = "ProvisioningFenceError";
 	}
 }
 
@@ -85,6 +106,233 @@ async function replaceAgentSettings(
         updated_at = NOW()
       WHERE organization_id = ${organizationId} AND id = ${agentId}
     `;
+}
+
+async function syncProvisioningGrantsInTransaction(
+	tx: DbClient,
+	organizationId: string,
+	agentId: string,
+	settings: Omit<AgentSettings, "updatedAt">,
+): Promise<void> {
+	const patterns = new Set([
+		...(settings.networkConfig?.allowedDomains ?? []),
+		...(settings.preApprovedTools ?? []),
+	]);
+	for (const rawPattern of patterns) {
+		const pattern = normalizeDomainPattern(rawPattern);
+		const kind = inferGrantKind(pattern);
+		await tx`
+			INSERT INTO grants (
+				organization_id, agent_id, kind, pattern, expires_at, granted_at, denied
+			) VALUES (
+				${organizationId}, ${agentId}, ${kind}, ${pattern}, NULL, NOW(), false
+			)
+			ON CONFLICT (organization_id, agent_id, kind, pattern) DO UPDATE SET
+				expires_at = NULL,
+				granted_at = EXCLUDED.granted_at,
+				denied = false
+		`;
+	}
+}
+
+type ProvisioningFenceRow = {
+	target_id: string;
+	claim_generation: number;
+	claim_token: string;
+	baseline_version_id: string;
+	effective_settings_digest: string;
+	request_digest: string;
+};
+
+export async function provisionFencedAgent(input: {
+	organizationId: string;
+	agentId: string;
+	name: string;
+	description?: string;
+	ownerUserId: string;
+	patUserId: string;
+	membershipId: string;
+	ownerEmail: string;
+	settings: Omit<AgentSettings, "updatedAt">;
+	fence: ProvisioningFence;
+	requestDigest: string;
+}): Promise<{
+	created: boolean;
+	replayed: boolean;
+	membership: { ensured: true; role: string };
+}> {
+	const sql = getDb();
+	const result = await sql.begin(async (tx) => {
+		const inserted = await tx`
+			INSERT INTO agents (
+				id, organization_id, name, description, owner_platform, owner_user_id,
+				is_workspace_agent, workspace_id, created_at
+			) VALUES (
+				${input.agentId}, ${input.organizationId}, ${input.name},
+				${input.description ?? null}, 'toolbox', ${input.ownerUserId},
+				false, NULL, NOW()
+			)
+			ON CONFLICT (organization_id, id) DO NOTHING
+			RETURNING 1
+		`;
+		const created = inserted.length > 0;
+		if (
+			!(await lockAgentAndAssertReleaseFence(
+				tx,
+				input.organizationId,
+				input.agentId,
+				true,
+			))
+		) {
+			throw new Error(
+				"Provisioned agent disappeared before fenced settings write",
+			);
+		}
+		// The agent row is the durable mutex shared by every app replica. Fence
+		// comparison and every downstream mutation stay inside this transaction.
+		const fenceRows = await tx<ProvisioningFenceRow>`
+			SELECT target_id, claim_generation, claim_token, baseline_version_id,
+			       effective_settings_digest, request_digest
+			FROM agent_provisioning_fences
+			WHERE organization_id = ${input.organizationId}
+			  AND agent_id = ${input.agentId}
+		`;
+		const current = fenceRows[0];
+		if (current) {
+			if (input.fence.claimGeneration < current.claim_generation) {
+				throw new ProvisioningFenceError("provisioning_fence_stale");
+			}
+			if (input.fence.claimGeneration === current.claim_generation) {
+				const exactReplay =
+					input.fence.targetId === current.target_id &&
+					input.fence.claimToken === current.claim_token &&
+					input.fence.baselineVersionId === current.baseline_version_id &&
+					input.fence.effectiveSettingsDigest ===
+						current.effective_settings_digest &&
+					input.requestDigest === current.request_digest;
+				if (!exactReplay) {
+					throw new ProvisioningFenceError("provisioning_fence_conflict");
+				}
+				const memberships = await tx<{ role: string }>`
+					SELECT role FROM "member"
+					WHERE "organizationId" = ${input.organizationId}
+					  AND "userId" = ${input.ownerUserId}
+					LIMIT 1
+				`;
+				return {
+					created: false,
+					replayed: true,
+					membership: {
+						ensured: true as const,
+						role: String(memberships[0]?.role ?? "member"),
+					},
+				};
+			}
+		}
+
+		await tx`
+			INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+			VALUES (
+				${input.ownerUserId}, ${input.ownerUserId}, ${input.ownerEmail},
+				true, NOW(), NOW()
+			)
+			ON CONFLICT (id) DO NOTHING
+		`;
+		await tx`
+			INSERT INTO "member" (id, "organizationId", "userId", role, "createdAt")
+			VALUES (
+				${input.membershipId}, ${input.organizationId}, ${input.ownerUserId},
+				'member', NOW()
+			)
+			ON CONFLICT ("organizationId", "userId") DO NOTHING
+		`;
+		const membershipRows = await tx<{ role: string }>`
+			SELECT role FROM "member"
+			WHERE "organizationId" = ${input.organizationId}
+			  AND "userId" = ${input.ownerUserId}
+			LIMIT 1
+		`;
+
+		await tx`
+			UPDATE agents SET
+				name = ${input.name},
+				description = ${input.description ?? null},
+				owner_platform = 'toolbox',
+				owner_user_id = ${input.ownerUserId},
+				is_workspace_agent = false,
+				workspace_id = NULL,
+				updated_at = NOW()
+			WHERE organization_id = ${input.organizationId} AND id = ${input.agentId}
+		`;
+		await replaceAgentSettings(
+			tx,
+			input.organizationId,
+			input.agentId,
+			input.settings,
+		);
+		await tx`
+			DELETE FROM agent_users
+			WHERE organization_id = ${input.organizationId}
+			  AND agent_id = ${input.agentId}
+			  AND platform = 'toolbox'
+			  AND user_id <> ${input.ownerUserId}
+		`;
+		await tx`
+			INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
+			VALUES
+				(${input.organizationId}, ${input.agentId}, 'toolbox', ${input.ownerUserId}, NOW()),
+				(${input.organizationId}, ${input.agentId}, 'external', ${input.patUserId}, NOW())
+			ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
+		`;
+		await syncProvisioningGrantsInTransaction(
+			tx,
+			input.organizationId,
+			input.agentId,
+			input.settings,
+		);
+		await tx`
+			INSERT INTO agent_provisioning_fences (
+				organization_id, agent_id, target_id, claim_generation, claim_token,
+				baseline_version_id, effective_settings_digest, request_digest,
+				created_at, updated_at
+			) VALUES (
+				${input.organizationId}, ${input.agentId}, ${input.fence.targetId},
+				${input.fence.claimGeneration}, ${input.fence.claimToken},
+				${input.fence.baselineVersionId}, ${input.fence.effectiveSettingsDigest},
+				${input.requestDigest}, NOW(), NOW()
+			)
+			ON CONFLICT (organization_id, agent_id) DO UPDATE SET
+				target_id = EXCLUDED.target_id,
+				claim_generation = EXCLUDED.claim_generation,
+				claim_token = EXCLUDED.claim_token,
+				baseline_version_id = EXCLUDED.baseline_version_id,
+				effective_settings_digest = EXCLUDED.effective_settings_digest,
+				request_digest = EXCLUDED.request_digest,
+				updated_at = NOW()
+		`;
+
+		return {
+			created,
+			replayed: false,
+			membership: {
+				ensured: true as const,
+				role: String(membershipRows[0]?.role ?? "member"),
+			},
+		};
+	});
+
+	if (!result.replayed) {
+		recordLifecycleEvent({
+			organizationId: input.organizationId,
+			entityType: "agent",
+			op: result.created ? "created" : "updated",
+			entityId: input.agentId,
+			summary: result.created
+				? `Agent "${input.name}" created`
+				: `Agent "${input.name}" updated`,
+		});
+	}
+	return result;
 }
 
 export async function provisionLegacyAgent(input: {
