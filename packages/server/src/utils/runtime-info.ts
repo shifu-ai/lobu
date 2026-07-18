@@ -9,6 +9,7 @@ export const RUNTIME_CARRIER_CAPABILITIES = [
   "lobu-runtime:member-schedule-direct-auth.v1",
   "lobu-runtime:automation-tool-catalog.v1",
   "lobu-runtime:turn.release_context.v1",
+  "lobu-runtime:course_context_projection.v2",
 ] as const;
 
 interface RuntimeEnvLike {
