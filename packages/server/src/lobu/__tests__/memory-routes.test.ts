@@ -13,7 +13,12 @@ import {
   fakeRouteAgents,
   fakeRouteConnections,
   fakeRouteSettings,
+  useRealRouteStores,
 } from './helpers/route-test-mocks.js';
+
+// These are database contract tests. Another test file may have installed the
+// process-global route store mocks before this module is evaluated.
+useRealRouteStores();
 
 const ORG_ID = 'org-memory';
 const OWNER_USER_ID = 'user-owner';
@@ -452,34 +457,10 @@ describe('Toolbox context pack memory route', () => {
       }
     );
     expect(apply.status).toBe(200);
-    const sql = getDb();
-    const logState = async (stage: string) => {
-      console.error('agent-incarnation-diagnostic', stage, await sql`
-        SELECT current_setting('session_replication_role') AS replication_role,
-               EXISTS (
-                 SELECT 1 FROM agents
-                 WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
-               ) AS agent_exists,
-               EXISTS (
-                 SELECT 1 FROM course_memory_heads
-                 WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
-               ) AS head_exists,
-               EXISTS (
-                 SELECT 1 FROM course_memory_apply_receipts
-                 WHERE organization_id = ${ORG_ID} AND idempotency_key = ${idempotencyKey}
-               ) AS receipt_exists,
-               (
-                 SELECT confdeltype FROM pg_constraint
-                 WHERE conname = 'course_memory_heads_organization_id_agent_id_fkey'
-               ) AS head_agent_delete_action
-      `);
-    };
-    await logState('before-delete');
     await orgContext.run({ organizationId: ORG_ID }, async () => {
       const { createPostgresAgentConfigStore } = await import('../stores/postgres-stores.js');
       const store = createPostgresAgentConfigStore();
       await store.deleteMetadata(AGENT_ID);
-      await logState('after-delete');
       await store.saveMetadata(AGENT_ID, {
         agentId: AGENT_ID,
         name: 'Recreated Personal Agent',
@@ -487,7 +468,6 @@ describe('Toolbox context pack memory route', () => {
         organizationId: ORG_ID,
         createdAt: Date.now(),
       });
-      await logState('after-recreate');
     });
 
     const inspect = await app.request(
