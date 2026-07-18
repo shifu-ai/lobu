@@ -320,6 +320,88 @@ describe("signed managed agent release apply", () => {
 		});
 	});
 
+	test("accepts and preserves signed post-canary smoke gates", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		const policy = request.signedManifest.controlPlanePolicy as Record<
+			string,
+			unknown
+		>;
+		const rolloutPolicy = policy.rolloutPolicy as Record<string, unknown>;
+		const gates = rolloutPolicy.gates as Record<string, unknown>;
+		gates.postCanarySmokeNames = [
+			"course-onboarding-protected-report-regression",
+		];
+		resignLatestRequest(request);
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toMatchObject({
+			baselineVersionId: request.baselineVersionId,
+			drifted: false,
+			manifestDigest: digestValue(request.signedManifest),
+			feedDigest: digestValue(request.signedFeed),
+		});
+	});
+
+	test("rejects an unknown rollout gate while allowing only the signed contract", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		const policy = request.signedManifest.controlPlanePolicy as Record<
+			string,
+			unknown
+		>;
+		const rolloutPolicy = policy.rolloutPolicy as Record<string, unknown>;
+		const gates = rolloutPolicy.gates as Record<string, unknown>;
+		gates.unrecognizedStableGate = ["unexpected-smoke"];
+		resignLatestRequest(request);
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_invalid_request",
+		});
+	});
+
+	test("rejects a post-canary smoke that overlaps a pre-apply smoke", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		const policy = request.signedManifest.controlPlanePolicy as Record<
+			string,
+			unknown
+		>;
+		const rolloutPolicy = policy.rolloutPolicy as Record<string, unknown>;
+		const gates = rolloutPolicy.gates as Record<string, unknown>;
+		gates.postCanarySmokeNames = ["managed-settings-contract"];
+		resignLatestRequest(request);
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_invalid_request",
+		});
+	});
+
+	test("rejects a non-array post-canary smoke gate", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		const policy = request.signedManifest.controlPlanePolicy as Record<
+			string,
+			unknown
+		>;
+		const rolloutPolicy = policy.rolloutPolicy as Record<string, unknown>;
+		const gates = rolloutPolicy.gates as Record<string, unknown>;
+		gates.postCanarySmokeNames =
+			"course-onboarding-protected-report-regression";
+		resignLatestRequest(request);
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_invalid_request",
+		});
+	});
+
 	test("applies exact personal baseline settings and exposes the effective digest", async () => {
 		const app = await buildApp();
 		const request = personalBaselineApplyRequest();

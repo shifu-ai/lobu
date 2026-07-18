@@ -72,6 +72,16 @@ interface ControlPlanePolicy {
 		fullBundleDigest: string;
 		patches: unknown[];
 	};
+	rolloutPolicy: {
+		kind: "standard" | "critical";
+		stages: number[];
+		gates: {
+			minimumCanaries: number;
+			minimumCanaryObservationMinutes: number;
+			requiredSmokeNames: string[];
+			postCanarySmokeNames?: string[];
+		};
+	};
 	personalAgentBaseline?: PersonalAgentBaselineContract;
 	[key: string]: unknown;
 }
@@ -1834,7 +1844,7 @@ function parseControlPlanePolicy(value: unknown): ControlPlanePolicy {
 			"minimumCanaryObservationMinutes",
 			"requiredSmokeNames",
 		],
-		[],
+		["postCanarySmokeNames"],
 		"rollout gates",
 	);
 	if (
@@ -1846,7 +1856,24 @@ function parseControlPlanePolicy(value: unknown): ControlPlanePolicy {
 	) {
 		throw invalidRequest("Agent release rollout gates are invalid");
 	}
-	parseStringArray(gates.requiredSmokeNames, "requiredSmokeNames", 1);
+	const requiredSmokeNames = parseStringArray(
+		gates.requiredSmokeNames,
+		"requiredSmokeNames",
+		1,
+	);
+	if (hasOwn(gates, "postCanarySmokeNames")) {
+		const postCanarySmokeNames = parseStringArray(
+			gates.postCanarySmokeNames,
+			"postCanarySmokeNames",
+			1,
+		);
+		const requiredSmokeNameSet = new Set(requiredSmokeNames);
+		if (postCanarySmokeNames.some((name) => requiredSmokeNameSet.has(name))) {
+			throw invalidRequest(
+				"Agent release post-canary smoke overlaps required smoke evidence",
+			);
+		}
+	}
 
 	if (
 		!Array.isArray(policy.requiredCarriers) ||
