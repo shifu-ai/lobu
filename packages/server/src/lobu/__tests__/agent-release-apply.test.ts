@@ -274,6 +274,52 @@ describe("signed managed agent release apply", () => {
 		).toBe(true);
 	});
 
+	test("accepts a signed policy that pins Toolbox evidence verification sources", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		const policy = request.signedManifest.controlPlanePolicy as Record<
+			string,
+			unknown
+		>;
+		policy.evidenceVerification = {
+			schemaVersion: 1,
+			toolbox: {
+				repository: "shifu-tw/shifu-toolbox",
+				revision: "f".repeat(40),
+			},
+			lobu: {
+				repository: "shifu-ai/lobu",
+				sourceRevision: "0".repeat(40),
+				targetRevision: "1".repeat(40),
+			},
+		};
+		resignLatestRequest(request);
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toMatchObject({
+			baselineVersionId: request.baselineVersionId,
+			drifted: false,
+		});
+	});
+
+	test("rejects a policy whose evidence verification pin is not an object", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		const policy = request.signedManifest.controlPlanePolicy as Record<
+			string,
+			unknown
+		>;
+		policy.evidenceVerification = "not-a-record";
+		resignLatestRequest(request);
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_invalid_request",
+		});
+	});
+
 	test("applies exact personal baseline settings and exposes the effective digest", async () => {
 		const app = await buildApp();
 		const request = personalBaselineApplyRequest();

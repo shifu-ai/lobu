@@ -1762,9 +1762,14 @@ function parseControlPlanePolicy(value: unknown): ControlPlanePolicy {
 			"migrations",
 			"rollbackStrategy",
 		],
-		["runtimeCarrier", "personalAgentBaseline"],
+		["runtimeCarrier", "personalAgentBaseline", "evidenceVerification"],
 		"controlPlanePolicy",
 	);
+	// evidenceVerification pins Toolbox-side evidence gates (repos/revisions);
+	// Lobu never consumes it but must round-trip it for signature verification.
+	if (hasOwn(policy, "evidenceVerification")) {
+		requireRecord(policy.evidenceVerification, "evidenceVerification");
+	}
 	const eligibility = requireRecord(policy.eligibility, "eligibility");
 	assertRequiredExactKeys(
 		eligibility,
