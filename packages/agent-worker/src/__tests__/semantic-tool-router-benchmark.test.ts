@@ -15,9 +15,9 @@ import {
   searchToolRetrievalIndex,
   toolRetrievalIndexCacheStats,
 } from "../openclaw/tool-retrieval-index";
-import { parseWorkerShifuTrace } from "../shared/journey-trace";
 import { routeToolEntries } from "../openclaw/tool-router";
 import { toolRouterRetainedMemoryStats } from "../openclaw/tool-router-memory-budget";
+import { parseWorkerShifuTrace } from "../shared/journey-trace";
 
 function syntheticTool(index: number): McpToolDef {
   return Object.freeze({
@@ -62,6 +62,24 @@ describe("semantic tool router repeatable performance guard", () => {
       ),
     };
     snapshotToolsByMcp(toolsByMcp);
+    // Warm up JIT + first-call module init so the timed assertion below
+    // measures the steady-state skip path rather than cold start. A single
+    // cold measurement here hit ~148ms on shared CI runners (JIT compile +
+    // 2000-tool snapshot init) while the product P95 is <5ms — see the
+    // external-turn guard below, which separates the product SLO from the
+    // CI ceiling for exactly this reason. The skip path is side-effect free
+    // (definite_non_tool: no retrieval cache miss, no retained memory), so
+    // this warm-up does not perturb the cache/memory assertions.
+    initializeExternalTurnToolRouting(
+      {
+        toolsByMcp,
+        message: "收到，謝謝！",
+        budget: 12,
+        routerMode: "semantic",
+        trace: parseWorkerShifuTrace({}),
+      },
+      { emitEvent: () => undefined }
+    );
     const before = toolRetrievalIndexCacheStats();
     const retainedBefore = toolRouterRetainedMemoryStats();
     let emitted: unknown;
