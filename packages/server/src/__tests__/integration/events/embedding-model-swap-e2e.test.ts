@@ -251,6 +251,7 @@ describe('embedding model swap E2E (Finding #3)', () => {
 
   it('completeEmbeddings (real handler) replaces a stale-model row and is idempotent on re-submit', async () => {
     const sql = getTestDb();
+    process.env.EMBEDDINGS_MODEL = MODEL_B;
 
     // Fresh event stamped MODEL_A, independent of mutations in earlier tests.
     const ev = await insertEvent(
@@ -274,9 +275,22 @@ describe('embedding model swap E2E (Finding #3)', () => {
     const newVec = new Array(EMBEDDING_DIM).fill(0);
     newVec[2] = 1; // distinct from unitVec so the replacement is observable
 
+    const createRun = async () => {
+      const rows = await sql`
+        INSERT INTO runs (
+          organization_id, run_type, status, claimed_by, approval_status, action_input, created_at
+        ) VALUES (
+          ${orgId}, 'embed_backfill', 'running', 'test-worker', 'auto',
+          ${sql.json({ event_ids: [ev.id] })}, current_timestamp
+        )
+        RETURNING id
+      `;
+      return Number(rows[0]!.id);
+    };
+
     // Drive the REAL handler: submit a model-B embedding for the model-A row.
     const first = mockEmbeddingsCtx({
-      run_id: -1, // no matching run row → the handler's run UPDATE is a harmless no-op
+      run_id: await createRun(),
       worker_id: 'test-worker',
       embeddings: [{ event_id: ev.id, embedding: newVec, embedding_model: MODEL_B }],
     });
@@ -291,7 +305,7 @@ describe('embedding model swap E2E (Finding #3)', () => {
 
     // Re-submit the SAME model → idempotent no-op (the ON CONFLICT WHERE blocks it).
     const second = mockEmbeddingsCtx({
-      run_id: -1,
+      run_id: await createRun(),
       worker_id: 'test-worker',
       embeddings: [{ event_id: ev.id, embedding: newVec, embedding_model: MODEL_B }],
     });

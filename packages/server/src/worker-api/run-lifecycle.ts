@@ -36,6 +36,7 @@ import { configuredEmbeddingModelSqlLiteral } from '../utils/embeddings';
 import { insertEvent, recordLifecycleEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
 import { authorizeRunForWorker } from './shared';
+import { completeCourseMemoryEmbeddingRun } from '../lobu/course-memory-index-producer';
 
 /**
  * POST /api/workers/heartbeat
@@ -972,72 +973,36 @@ export async function completeEmbeddings(c: Context<{ Bindings: Env }>) {
       error_message?: string;
     }>();
 
-    const sql = getDb();
-
-    if (!req.embeddings || req.embeddings.length === 0) {
-      if (req.error_message) {
-        await sql`
-          UPDATE runs
-          SET status = 'failed',
-              completed_at = current_timestamp,
-              error_message = ${req.error_message}
-          WHERE id = ${req.run_id}
-        `;
-        return c.json({ success: false, error: req.error_message }, 400);
+    const denied = await authorizeRunForWorker(c, req.run_id, req.worker_id);
+    if (denied) {
+      if (denied.status === 409) {
+        return c.json({ success: false, reason: 'already_finalized' });
       }
-      // Empty batch means all events already had embeddings — mark as completed
-      await sql`
-        UPDATE runs
-        SET status = 'completed',
-            completed_at = current_timestamp
-        WHERE id = ${req.run_id}
-      `;
-      return c.json({ success: true, updated: 0 });
+      return denied;
     }
 
-    let updated = 0;
-    for (const item of req.embeddings) {
-      try {
-        // pgvector expects '[0.1,0.2,...]' format
-        const vectorStr = `[${item.embedding.join(',')}]`;
-        // On conflict, REPLACE a stale-model row (a model swap left its vector in
-        // an incompatible space) with the freshly-embedded vector + stamp. The
-        // WHERE makes a same-model re-submit a no-op (idempotent), so we never
-        // churn rows that are already current.
-        const result = await sql.unsafe(
-          `INSERT INTO event_embeddings (event_id, embedding, embedding_model)
-           VALUES ($1, $2::vector, $3)
-           ON CONFLICT (event_id) DO UPDATE
-             SET embedding = EXCLUDED.embedding,
-                 embedding_model = EXCLUDED.embedding_model,
-                 created_at = now()
-             WHERE event_embeddings.embedding_model IS DISTINCT FROM EXCLUDED.embedding_model`,
-          [item.event_id, vectorStr, item.embedding_model ?? null]
-        );
-        if (result.count > 0) updated++;
-      } catch (err) {
-        logger.error(
-          { event_id: item.event_id, error: err },
-          '[completeEmbeddings] Failed to update event'
-        );
-      }
+    const result = await completeCourseMemoryEmbeddingRun({
+      sql: getDb(),
+      runId: req.run_id,
+      workerId: req.worker_id,
+      embeddings: (req.embeddings ?? []).map((item) => ({
+        eventId: item.event_id,
+        embedding: item.embedding,
+        embeddingModel: item.embedding_model ?? '',
+      })),
+      errorMessage: req.error_message,
+    });
+    if (result.kind === 'already_finalized') {
+      return c.json({ success: false, reason: 'already_finalized' });
     }
-
-    // Mark run as completed
-    await sql`
-      UPDATE runs
-      SET status = 'completed',
-          completed_at = current_timestamp,
-          items_collected = ${updated}
-      WHERE id = ${req.run_id}
-    `;
-
     logger.info(
-      { run_id: req.run_id, total: req.embeddings.length, updated },
+      { run_id: req.run_id, total: req.embeddings?.length ?? 0, updated: result.updated },
       'Embedding backfill completed'
     );
-
-    return c.json({ success: true, updated });
+    return c.json(
+      { success: result.success, updated: result.updated, ...(result.error ? { error: result.error } : {}) },
+      result.success ? 200 : 400
+    );
   } catch (err: unknown) {
     logger.error({ error: errorMessage(err) }, '[completeEmbeddings] Error');
     return c.json({ error: errorMessage(err) }, 500);

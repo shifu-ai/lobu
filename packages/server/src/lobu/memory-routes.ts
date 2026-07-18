@@ -9,7 +9,13 @@ import {
   parseContextPackMemoryRequest,
   writeContextPackMemory,
 } from './context-pack-memory-service';
+import {
+  CourseMemoryRuntimeError,
+  createCourseMemoryRuntimeService,
+  parseCourseMemoryApplyCommand,
+} from './course-memory-runtime-service';
 import { createPostgresAgentConfigStore } from './stores/postgres-stores';
+import { parseStrictJsonBytes, StrictJsonError } from './strict-json-parser';
 
 const memoryRoutes = new Hono<{ Bindings: Env }>();
 const configStore = createPostgresAgentConfigStore();
@@ -43,6 +49,46 @@ function authSourceFromContext(c: MemoryContext): 'session' | 'pat' | 'oauth' | 
   const source = c.get('authSource');
   if (source === 'session' || source === 'pat' || source === 'oauth') return source;
   return null;
+}
+
+function authorizeCourseMemoryIdentity(
+  c: MemoryContext,
+  ownerUserId: string,
+  operation: 'read' | 'write' = 'write'
+): { errorCode: string; message: string; status: 401 | 403 } | null {
+  const authSource = authSourceFromContext(c);
+  const user = c.get('user') as { id?: string } | null;
+  const scopes = scopesFromContext(c);
+  if (authSource === 'session') {
+    return user?.id === ownerUserId
+      ? null
+      : {
+          errorCode: 'memory.write_forbidden',
+          message: 'This route requires an owner session',
+          status: 403,
+        };
+  }
+  if (authSource === 'pat' || authSource === 'oauth') {
+    if (!user?.id) {
+      return { errorCode: 'memory.unauthorized', message: 'Authentication required', status: 401 };
+    }
+    if (!hasRequiredMcpScope(operation, scopes)) {
+      return {
+        errorCode: 'memory.write_forbidden',
+        message: `Course memory ${operation} requires an appropriate MCP scope`,
+        status: 403,
+      };
+    }
+    if (!hasAdminScope(scopes) && user.id !== ownerUserId) {
+      return {
+        errorCode: 'memory.write_forbidden',
+        message: 'This route requires mcp:admin or an owner-scoped token',
+        status: 403,
+      };
+    }
+    return null;
+  }
+  return { errorCode: 'memory.unauthorized', message: 'Authentication required', status: 401 };
 }
 
 function safeMetadataId(metadata: Record<string, unknown>, key: string): string | undefined {
@@ -250,6 +296,7 @@ memoryRoutes.post('/context-packs', async (c) => {
         viewUrl: result.viewUrl ?? null,
         semanticType: result.semanticType,
         agentId: result.agentId,
+        courseEntityIds: result.courseEntityIds,
       },
     });
   } catch (error) {
@@ -263,6 +310,68 @@ memoryRoutes.post('/context-packs', async (c) => {
       500
     );
   }
+});
+
+memoryRoutes.put('/course-contexts/:courseEntityId', async (c) => {
+  const organizationId = c.get('organizationId');
+  if (!organizationId) {
+    return c.json(memoryError('memory.unauthorized', 'Organization context is required'), 401);
+  }
+
+  let body: unknown;
+  try {
+    body = parseStrictJsonBytes(new Uint8Array(await c.req.arrayBuffer()));
+  } catch (error) {
+    if (error instanceof StrictJsonError) {
+      return c.json(memoryError(
+        error.code === 'duplicate_json_member'
+          ? 'memory.duplicate_json_member'
+          : 'memory.invalid_request',
+        error.message
+      ), 400);
+    }
+    throw error;
+  }
+
+  try {
+    const command = parseCourseMemoryApplyCommand(body, c.req.param('courseEntityId'));
+    const denied = authorizeCourseMemoryIdentity(c, command.ownerUserId);
+    if (denied) return c.json(memoryError(denied.errorCode, denied.message), denied.status);
+    const receipt = await createCourseMemoryRuntimeService().apply({ organizationId, command });
+    return c.json(receipt, 200);
+  } catch (error) {
+    if (error instanceof CourseMemoryRuntimeError) {
+      return c.json(memoryError(error.code, error.message), error.status);
+    }
+    logger.error(
+      { organizationId, error: { name: error instanceof Error ? error.name : 'UnknownError' } },
+      '[MemoryRoutes] course projection apply failed'
+    );
+    return c.json(memoryError('memory.apply_failed', 'Failed to apply course memory'), 500);
+  }
+});
+
+memoryRoutes.get('/course-contexts/:courseEntityId/receipt', async (c) => {
+  const organizationId = c.get('organizationId');
+  if (!organizationId) {
+    return c.json(memoryError('memory.unauthorized', 'Organization context is required'), 401);
+  }
+  const idempotencyKey = c.req.query('idempotencyKey')?.trim() ?? '';
+  const courseEntityId = c.req.param('courseEntityId')?.trim() ?? '';
+  if (!idempotencyKey || !courseEntityId) {
+    return c.json(memoryError('memory.invalid_request', 'Receipt identity is required'), 400);
+  }
+  const receipt = await createCourseMemoryRuntimeService().inspectByIdempotencyKey({
+    organizationId,
+    courseEntityId,
+    idempotencyKey,
+  });
+  if (!receipt) return c.json(memoryError('memory.receipt_not_found', 'Receipt not found'), 404);
+  const denied = authorizeCourseMemoryIdentity(c, receipt.ownerUserId, 'read');
+  if (denied) {
+    return c.json(memoryError('memory.receipt_not_found', 'Receipt not found'), 404);
+  }
+  return c.json(receipt, 200);
 });
 
 export { memoryRoutes };

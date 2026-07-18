@@ -46,7 +46,7 @@ export async function authorizeRunForWorker(
   runId: number,
   expectedWorkerId?: string
 ): Promise<Response | null> {
-  if (c.var.workerAuthMode !== 'user') {
+  if (c.var?.workerAuthMode !== 'user') {
     return null;
   }
   const workerUserId = c.var.workerUserId;

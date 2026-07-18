@@ -21,4 +21,50 @@ describe('migration files (dbmate format)', () => {
     expect(content).toContain('-- migrate:down');
   });
   it('backfills valid singular course ids before creating the canonical array GIN index',()=>{const sql=fs.readFileSync(path.join(MIGRATIONS_DIR,'20260712020000_course_memory_entity_scope.sql'),'utf-8');expect(sql).toContain("jsonb_typeof(metadata->'course_entity_id') = 'string'");expect(sql).toContain("jsonb_set(metadata, '{course_entity_ids}'");expect(sql).toContain("USING gin ((metadata->'course_entity_ids'))");});
+  it('pins course memory receipt uniqueness and append-only event references', () => {
+    const sql = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, '20260718183000_course_memory_applies.sql'),
+      'utf-8'
+    );
+    expect(sql).toContain('CREATE TABLE public.course_memory_heads');
+    expect(sql).toContain('CREATE TABLE public.course_memory_apply_receipts');
+    expect(sql).toContain('(organization_id, idempotency_key)');
+    expect(sql).toContain('requested_revision');
+    expect(sql).toContain('request_fingerprint text NOT NULL');
+    expect(sql).toContain('course_memory_apply_receipts_scope_applied');
+    expect(sql).toMatch(/applied_revision DESC,\s+id DESC/);
+    expect(sql).toContain('REFERENCES public.events(id) ON DELETE RESTRICT');
+    expect(sql).toContain('REFERENCES public.agents(organization_id, id) ON DELETE CASCADE');
+    expect(sql).toContain('trg_course_memory_apply_receipts_append_only');
+    const receiptTable = sql.slice(
+      sql.indexOf('CREATE TABLE public.course_memory_apply_receipts'),
+      sql.indexOf('ALTER TABLE public.course_memory_heads')
+    );
+    expect(receiptTable).not.toContain('REFERENCES public.agents');
+    expect(receiptTable).not.toContain('ON DELETE CASCADE');
+  });
+
+  it('pins append-only course memory index observations and producer ordering', () => {
+    const sql = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, '20260718183100_course_memory_index_observations.sql'),
+      'utf-8'
+    );
+    expect(sql).toContain('CREATE TABLE public.course_memory_index_observations');
+    expect(sql).toContain('observation_sequence bigint GENERATED ALWAYS AS IDENTITY');
+    expect(sql).toContain('producer_run_id bigint NOT NULL');
+    expect(sql).toContain('(organization_id, producer_run_id, memory_event_id, index_status)');
+    expect(sql).toContain('trg_course_memory_index_observations_append_only');
+    expect(sql).toContain('BEFORE UPDATE OR DELETE ON public.course_memory_index_observations');
+  });
+
+  it('pins the completed receipt lookup used by embedding observation batches', () => {
+    const sql = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, '20260718183200_course_memory_receipt_event_lookup.sql'),
+      'utf-8'
+    );
+    expect(sql).toContain('CREATE INDEX IF NOT EXISTS course_memory_apply_receipts_org_memory_event_completed');
+    expect(sql).toContain('(organization_id, memory_event_id)');
+    expect(sql).toContain("WHERE outcome = 'completed'");
+    expect(sql).toContain('DROP INDEX IF EXISTS public.course_memory_apply_receipts_org_memory_event_completed');
+  });
 });

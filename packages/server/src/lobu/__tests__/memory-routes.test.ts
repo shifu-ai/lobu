@@ -1,19 +1,19 @@
 import { beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { Hono } from 'hono';
+import { getDb } from '../../db/client.js';
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
 } from '../../gateway/__tests__/helpers/db-setup.js';
-import { getDb } from '../../db/client.js';
+import logger from '../../utils/logger.js';
+import { getWorkspaceRole } from '../../utils/organization-access.js';
 import { initWorkspaceProvider } from '../../workspace/index.js';
+import { orgContext } from '../stores/org-context.js';
 import {
   fakeRouteAgents,
   fakeRouteConnections,
   fakeRouteSettings,
 } from './helpers/route-test-mocks.js';
-import { orgContext } from '../stores/org-context.js';
-import { getWorkspaceRole } from '../../utils/organization-access.js';
-import logger from '../../utils/logger.js';
 
 const ORG_ID = 'org-memory';
 const OWNER_USER_ID = 'user-owner';
@@ -111,6 +111,27 @@ function contextPackBody(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function courseContextBody(overrides: Record<string, unknown> = {}) {
+  return {
+    contract: { name: 'course_context_projection', schemaVersion: 2 },
+    ownerUserId: OWNER_USER_ID,
+    agentId: AGENT_ID,
+    courseRevision: 4,
+    contextPackId: 'ctx-v2-004',
+    contentDigest: `sha256:${'4'.repeat(64)}`,
+    idempotencyKey: 'journey-v2-004:memory',
+    traceId: 'trace-v2-004',
+    payload: {
+      title: 'Course context v2',
+      summary: 'Course summary',
+      content: '# Course context v2',
+      semanticType: 'course_pm_profile',
+      metadata: { candidateCount: 30 },
+    },
+    ...overrides,
+  };
+}
+
 describe('Toolbox context pack memory route', () => {
   beforeEach(async () => {
     fakeRouteAgents.clear();
@@ -159,6 +180,7 @@ describe('Toolbox context pack memory route', () => {
         viewUrl: expect.any(String),
         semanticType: 'project_profile',
         agentId: AGENT_ID,
+        courseEntityIds: ['course:user-001:super-ai'],
       },
     });
 
@@ -184,6 +206,343 @@ describe('Toolbox context pack memory route', () => {
         }),
       }),
     ]);
+  });
+
+  test('applies and reads back a strict course projection v2 receipt', async () => {
+    const app = await importMountedMemoryRoutes();
+    const courseEntityId = 'course:user-owner:course-v2';
+
+    const apply = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody()),
+      }
+    );
+    expect(apply.status).toBe(200);
+    const receipt = await apply.json();
+    expect(receipt).toMatchObject({
+      outcome: 'completed',
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courseEntityId,
+      requestedCourseRevision: 4,
+      acceptedCourseRevision: 4,
+      appliedCourseRevision: 4,
+      contentDigest: `sha256:${'4'.repeat(64)}`,
+      memoryEventId: expect.any(Number),
+      indexStatus: 'pending',
+      receiptRef: expect.any(String),
+    });
+
+    const inspect = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}/receipt?`
+        + new URLSearchParams({
+          idempotencyKey: 'journey-v2-004:memory',
+        })
+    );
+    expect(inspect.status).toBe(200);
+    await expect(inspect.json()).resolves.toEqual(receipt);
+  });
+
+  test('allows an owner-scoped PAT with write permission to apply v2 course memory', async () => {
+    auth.user = {
+      id: OWNER_USER_ID,
+      name: OWNER_USER_ID,
+      email: 'owner@test.local',
+      emailVerified: true,
+    };
+    auth.mcpAuthInfo = { scopes: ['mcp:write'] };
+    const app = await importMountedMemoryRoutes();
+
+    const response = await app.request(
+      '/lobu/api/v1/memory/course-contexts/course%3Auser-owner%3Aowner-pat',
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody({
+          idempotencyKey: 'journey-v2-owner-pat:memory',
+        })),
+      }
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: 'completed',
+      ownerUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+    });
+  });
+
+  test('rejects a cross-owner PAT apply even when it has write scope', async () => {
+    auth.user = {
+      id: NON_MEMBER_USER_ID,
+      name: NON_MEMBER_USER_ID,
+      email: 'non-member@test.local',
+      emailVerified: true,
+    };
+    auth.mcpAuthInfo = { scopes: ['mcp:write'] };
+    const app = await importMountedMemoryRoutes();
+
+    const response = await app.request(
+      '/lobu/api/v1/memory/course-contexts/course%3Auser-owner%3Across-owner',
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody({
+          idempotencyKey: 'journey-v2-cross-owner:memory',
+        })),
+      }
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      errorCode: 'memory.write_forbidden',
+    });
+  });
+
+  test('rejects v2 applies without a write-capable PAT scope', async () => {
+    auth.mcpAuthInfo = { scopes: ['mcp:read'] };
+    const app = await importMountedMemoryRoutes();
+
+    const response = await app.request(
+      '/lobu/api/v1/memory/course-contexts/course%3Auser-owner%3Awrong-scope',
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody({
+          idempotencyKey: 'journey-v2-wrong-scope:memory',
+        })),
+      }
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      errorCode: 'memory.write_forbidden',
+    });
+  });
+
+  test('rejects a session whose user does not match the v2 owner', async () => {
+    auth.authSource = 'session';
+    auth.user = {
+      id: NON_MEMBER_USER_ID,
+      name: NON_MEMBER_USER_ID,
+      email: 'non-member@test.local',
+      emailVerified: true,
+    };
+    auth.mcpAuthInfo = { scopes: [] };
+    const app = await importMountedMemoryRoutes();
+
+    const response = await app.request(
+      '/lobu/api/v1/memory/course-contexts/course%3Auser-owner%3Asession-mismatch',
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody({
+          idempotencyKey: 'journey-v2-session-mismatch:memory',
+        })),
+      }
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      errorCode: 'memory.write_forbidden',
+    });
+  });
+
+  test('hides a v2 receipt from a cross-owner token without leaking its identity', async () => {
+    const app = await importMountedMemoryRoutes();
+    const courseEntityId = 'course:user-owner:hidden-owner';
+    const idempotencyKey = 'journey-v2-hidden-owner:memory';
+    const apply = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody({ idempotencyKey })),
+      }
+    );
+    expect(apply.status).toBe(200);
+    auth.user = {
+      id: NON_MEMBER_USER_ID,
+      name: NON_MEMBER_USER_ID,
+      email: 'non-member@test.local',
+      emailVerified: true,
+    };
+    auth.mcpAuthInfo = { scopes: ['mcp:read'] };
+
+    const inspect = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}/receipt?`
+        + new URLSearchParams({ idempotencyKey })
+    );
+
+    expect(inspect.status).toBe(404);
+    await expect(inspect.json()).resolves.toEqual({
+      ok: false,
+      errorCode: 'memory.receipt_not_found',
+      errorMessage: 'Receipt not found',
+    });
+  });
+
+  test('hides a v2 receipt from a PAT without a read-capable scope', async () => {
+    const app = await importMountedMemoryRoutes();
+    const courseEntityId = 'course:user-owner:hidden-scope';
+    const idempotencyKey = 'journey-v2-hidden-scope:memory';
+    const apply = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody({ idempotencyKey })),
+      }
+    );
+    expect(apply.status).toBe(200);
+    auth.mcpAuthInfo = { scopes: [] };
+
+    const inspect = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}/receipt?`
+        + new URLSearchParams({ idempotencyKey })
+    );
+
+    expect(inspect.status).toBe(404);
+    await expect(inspect.json()).resolves.toEqual({
+      ok: false,
+      errorCode: 'memory.receipt_not_found',
+      errorMessage: 'Receipt not found',
+    });
+  });
+
+  test('hides a v2 receipt from another organization', async () => {
+    const app = await importMountedMemoryRoutes();
+    const courseEntityId = 'course:user-owner:hidden-org';
+    const idempotencyKey = 'journey-v2-hidden-org:memory';
+    const apply = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody({ idempotencyKey })),
+      }
+    );
+    expect(apply.status).toBe(200);
+    auth.organizationId = 'org-memory-other';
+
+    const inspect = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}/receipt?`
+        + new URLSearchParams({ idempotencyKey })
+    );
+
+    expect(inspect.status).toBe(404);
+    await expect(inspect.json()).resolves.toMatchObject({
+      errorCode: 'memory.receipt_not_found',
+    });
+  });
+
+  test('hides a retained v2 receipt after its runtime agent identity is deleted and recreated', async () => {
+    const app = await importMountedMemoryRoutes();
+    const courseEntityId = 'course:user-owner:deleted-agent';
+    const idempotencyKey = 'journey-v2-deleted-agent:memory';
+    const apply = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody({ idempotencyKey })),
+      }
+    );
+    expect(apply.status).toBe(200);
+    await orgContext.run({ organizationId: ORG_ID }, async () => {
+      const { createPostgresAgentConfigStore } = await import('../stores/postgres-stores.js');
+      const store = createPostgresAgentConfigStore();
+      await store.deleteMetadata(AGENT_ID);
+      await store.saveMetadata(AGENT_ID, {
+        agentId: AGENT_ID,
+        name: 'Recreated Personal Agent',
+        owner: { platform: 'toolbox', userId: OWNER_USER_ID },
+        organizationId: ORG_ID,
+        createdAt: Date.now(),
+      });
+    });
+
+    const inspect = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}/receipt?`
+        + new URLSearchParams({ idempotencyKey })
+    );
+
+    expect(inspect.status).toBe(404);
+    await expect(inspect.json()).resolves.toEqual({
+      ok: false,
+      errorCode: 'memory.receipt_not_found',
+      errorMessage: 'Receipt not found',
+    });
+    expect(await getDb()`
+      SELECT id FROM course_memory_apply_receipts
+      WHERE organization_id = ${ORG_ID} AND idempotency_key = ${idempotencyKey}
+    `).toHaveLength(1);
+  });
+
+  test('rejects duplicate JSON members before applying a v2 projection', async () => {
+    const app = await importMountedMemoryRoutes();
+    const courseEntityId = 'course:user-owner:duplicate-json';
+    const body = JSON.stringify(courseContextBody()).replace(
+      '"courseRevision":4',
+      '"courseRevision":4,"courseRevision":5'
+    );
+
+    const response = await app.request(
+      `/lobu/api/v1/memory/course-contexts/${encodeURIComponent(courseEntityId)}`,
+      { method: 'PUT', headers: { 'content-type': 'application/json' }, body }
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      errorCode: 'memory.duplicate_json_member',
+    });
+  });
+
+  test.each([
+    ['owner_user_id', OWNER_USER_ID],
+    ['agent_id', AGENT_ID],
+    ['course_entity_id', 'course:caller-controlled'],
+    ['course_revision', 99],
+    ['content_digest', `sha256:${'f'.repeat(64)}`],
+    ['supersedes_event_id', 123],
+  ])('rejects caller override of reserved metadata %s', async (reservedKey, reservedValue) => {
+    const app = await importMountedMemoryRoutes();
+    const response = await app.request(
+      '/lobu/api/v1/memory/course-contexts/course%3Auser-owner%3Areserved',
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody({
+          payload: {
+            ...courseContextBody().payload,
+            metadata: { [reservedKey]: reservedValue },
+          },
+        })),
+      }
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      errorCode: 'memory.reserved_metadata_override',
+    });
+  });
+
+  test('rejects caller-supplied supersedesEventId on the v2 route', async () => {
+    const app = await importMountedMemoryRoutes();
+    const response = await app.request(
+      '/lobu/api/v1/memory/course-contexts/course%3Auser-owner%3Asupersedes',
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(courseContextBody({ supersedesEventId: 123 })),
+      }
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      errorCode: 'memory.invalid_request',
+    });
   });
 
   test.each([
@@ -399,6 +758,10 @@ describe('writeContextPackMemory', () => {
       eventId: 123,
       semanticType: 'project_profile',
       agentId: AGENT_ID,
+      courseEntityIds: [
+        'course:user-001:super-ai',
+        'course:user-001:advanced-ai',
+      ],
       viewUrl: 'https://app.example.test/events/123',
     });
     expect(calls).toHaveLength(1);

@@ -25,25 +25,26 @@ import {
   test,
 } from "bun:test";
 import { Hono } from "hono";
-import { createPostgresAgentConfigStore } from "../../lobu/stores/postgres-stores.js";
+import { getDb } from "../../db/client.js";
+import { createCourseMemoryRuntimeService } from "../../lobu/course-memory-runtime-service.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
+import { createPostgresAgentConfigStore } from "../../lobu/stores/postgres-stores.js";
 import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
 import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
-import { UserAgentsStore } from "../auth/user-agents-store.js";
 import type { SettingsTokenPayload } from "../auth/settings/token-service.js";
+import { UserAgentsStore } from "../auth/user-agents-store.js";
+import { createAgentRoutes } from "../routes/public/agents.js";
 import {
   createConnectionCrudRoutes,
   createConnectionWebhookRoutes,
 } from "../routes/public/connections.js";
-import { createAgentRoutes } from "../routes/public/agents.js";
-import { createSlackRoutes } from "../routes/public/slack.js";
 import { setAuthProvider } from "../routes/public/settings-auth.js";
+import { createSlackRoutes } from "../routes/public/slack.js";
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from "./helpers/db-setup.js";
-import { getDb } from "../../db/client.js";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -389,12 +390,17 @@ describe("agent CRUD: access control and input validation", () => {
     setAuthProvider(null);
   });
 
-  function buildApp() {
+  function buildApp(channelBindingService?: {
+    getBinding(): Promise<unknown>;
+    createBinding(): Promise<boolean>;
+    listBindings(): Promise<unknown[]>;
+    deleteAllBindings(): Promise<number>;
+  }) {
     return createAgentRoutes({
       userAgentsStore,
       agentMetadataStore,
       agentSettingsStore,
-      channelBindingService: {
+      channelBindingService: channelBindingService ?? {
         async getBinding() { return null; },
         async createBinding() { return true; },
         async listBindings() { return []; },
@@ -566,6 +572,78 @@ describe("agent CRUD: access control and input validation", () => {
     expect(response.status).toBe(200);
     const data = (await response.json()) as any;
     expect(data.success).toBe(true);
+  });
+
+  test("owner can delete an agent after a course projection while retaining its immutable receipt", async () => {
+    const sql = getDb();
+    await orgContext.run({ organizationId: ORG_A }, () =>
+      agentSettingsStore.updateSettings("my-agent", { soulMd: "must be removed" })
+    );
+    const bindings = new Set(["line:delete-regression"]);
+    const channelBindingService = {
+      async getBinding() { return null; },
+      async createBinding() { return true; },
+      async listBindings() { return [...bindings]; },
+      async deleteAllBindings() {
+        const count = bindings.size;
+        bindings.clear();
+        return count;
+      },
+    };
+    await sql`
+      INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+      VALUES ('owner', 'Owner', 'owner-delete-receipt@test.local', true, NOW(), NOW())
+    `;
+    const receipt = await createCourseMemoryRuntimeService({
+      enqueueEmbeddingBackfill: async () => undefined,
+    }).apply({
+      organizationId: ORG_A,
+      command: {
+        contract: { name: "course_context_projection", schemaVersion: 2 },
+        ownerUserId: "owner",
+        agentId: "my-agent",
+        courseEntityId: "course:owner:delete-regression",
+        courseRevision: 1,
+        contextPackId: "ctx-delete-regression",
+        contentDigest: `sha256:${"d".repeat(64)}`,
+        idempotencyKey: "delete-regression:memory",
+        traceId: "trace-delete-regression",
+        payload: {
+          title: "Deletion regression",
+          summary: "Receipt must outlive its agent",
+          content: "# Deletion regression",
+          semanticType: "course_pm_profile",
+          metadata: {},
+        },
+      },
+    });
+    setAuthProvider(() => makeSession({ userId: "owner", oauthUserId: "owner" }));
+
+    const response = await orgContext.run({ organizationId: ORG_A }, () =>
+      buildApp(channelBindingService).request("/my-agent", { method: "DELETE" })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: true, unboundChannels: 1 });
+    expect(bindings.size).toBe(0);
+    await expect(
+      orgContext.run({ organizationId: ORG_A }, () => agentSettingsStore.getSettings("my-agent"))
+    ).resolves.toBeNull();
+    expect(await sql`SELECT id FROM agents WHERE organization_id = ${ORG_A} AND id = 'my-agent'`)
+      .toHaveLength(0);
+    expect(await sql`
+      SELECT receipt_ref, owner_user_id, agent_id
+      FROM course_memory_apply_receipts
+      WHERE organization_id = ${ORG_A} AND idempotency_key = 'delete-regression:memory'
+    `).toEqual([{
+      receipt_ref: receipt.receiptRef,
+      owner_user_id: "owner",
+      agent_id: "my-agent",
+    }]);
+    expect(await sql`
+      SELECT 1 FROM course_memory_heads
+      WHERE organization_id = ${ORG_A} AND agent_id = 'my-agent'
+    `).toHaveLength(0);
   });
 
   test("PATCH with malformed JSON body returns 400", async () => {
