@@ -7,6 +7,7 @@ import { enqueueEmbeddingBackfillRun } from '../scheduled/trigger-embed-backfill
 import { generateEmbeddings, getConfiguredEmbeddingModel } from '../utils/embeddings';
 import { ToolUserError } from '../utils/errors';
 import logger from '../utils/logger';
+import { isCourseEntityId } from '../utils/course-entity-id';
 import { AGENT_ID_PATTERN } from './stores/postgres-stores';
 
 const MAX_TITLE_LENGTH = 500;
@@ -16,7 +17,6 @@ const MAX_CONTEXT_PACK_ENTITY_IDS = 20;
 const DEFAULT_SEMANTIC_TYPE = 'project_profile';
 const TOOLBOX_ONBOARDING_SOURCE = 'toolbox_onboarding';
 const LOG_SAFE_METADATA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,199}$/;
-const COURSE_ENTITY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,199}$/;
 
 export type ContextPackMemoryErrorCode =
   | 'lobu_memory_invalid_request'
@@ -103,7 +103,7 @@ function parseCourseEntityIds(value: unknown): string[] | undefined {
       );
     }
     const entityId = item.trim();
-    if (!COURSE_ENTITY_ID_PATTERN.test(entityId)) {
+    if (!isCourseEntityId(entityId)) {
       throw new ContextPackMemoryError(
         'lobu_memory_invalid_request',
         'entityIds contains an invalid course entity id'

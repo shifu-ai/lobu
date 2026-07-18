@@ -11,6 +11,7 @@ import { type Static, Type } from '@sinclair/typebox';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { entityLinkMatchSql, searchContentByText } from '../utils/content-search';
+import { isCourseEntityId } from '../utils/course-entity-id';
 import { toVectorLiteral } from '../utils/entity-management';
 import { ToolUserError } from '../utils/errors';
 import logger from '../utils/logger';
@@ -446,12 +447,11 @@ export async function search(
   );
 }
 
-const COURSE_ENTITY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,199}$/;
 function validateCourseEntityIds(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length > 20) throw new ToolUserError('entity_ids must be an array of at most 20 course ids', 400);
   const ids = value.map((item) => typeof item === 'string' ? item.trim() : '');
-  if (ids.some((item) => !COURSE_ENTITY_ID_PATTERN.test(item))) throw new ToolUserError('entity_ids contains an invalid course entity id', 400);
+  if (ids.some((item) => !isCourseEntityId(item))) throw new ToolUserError('entity_ids contains an invalid course entity id', 400);
   return [...new Set(ids)];
 }
 

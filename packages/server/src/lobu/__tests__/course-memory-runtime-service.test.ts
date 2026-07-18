@@ -142,6 +142,16 @@ describe('course memory runtime service', () => {
     await seedOwnerAndAgent();
   });
 
+  test('rejects course ids that downstream retrieval cannot address', async () => {
+    const service = createTestService();
+    for (const courseEntityId of ['course:owner:a.b', `course:${'a'.repeat(194)}`]) {
+      await expect(service.apply({
+        organizationId: ORGANIZATION_ID,
+        command: command({ courseEntityId }),
+      })).rejects.toMatchObject({ code: 'memory.invalid_request', status: 400 });
+    }
+  });
+
   test('returns the same durable receipt and event for a same-key replay', async () => {
     const enqueueCalls: string[] = [];
     const committedRowsSeenByEnqueue: number[] = [];

@@ -4,11 +4,11 @@ import { getDb, type DbClient } from '../db/client';
 import { enqueueEmbeddingBackfillRun } from '../scheduled/trigger-embed-backfill';
 import { insertEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
+import { isCourseEntityId } from '../utils/course-entity-id';
 import { AGENT_ID_PATTERN } from './stores/postgres-stores';
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,255}$/;
-const COURSE_ENTITY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,255}$/;
 const MAX_CONTENT_LENGTH = 200_000;
 const MAX_METADATA_BYTES = 64_000;
 const RESERVED_METADATA_KEYS = new Set([
@@ -217,7 +217,7 @@ export function parseCourseMemoryApplyCommand(
     throw new CourseMemoryRuntimeError('memory.invalid_request', 'agentId is invalid', 400);
   }
   const courseEntityId = requireBoundedString(pathCourseEntityId, 'courseEntityId');
-  if (!COURSE_ENTITY_ID_PATTERN.test(courseEntityId)) {
+  if (!isCourseEntityId(courseEntityId)) {
     throw new CourseMemoryRuntimeError('memory.invalid_request', 'courseEntityId is invalid', 400);
   }
   if (!Number.isSafeInteger(body.courseRevision) || Number(body.courseRevision) <= 0) {
