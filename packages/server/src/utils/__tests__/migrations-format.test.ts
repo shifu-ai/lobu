@@ -23,7 +23,7 @@ describe('migration files (dbmate format)', () => {
   it('backfills valid singular course ids before creating the canonical array GIN index',()=>{const sql=fs.readFileSync(path.join(MIGRATIONS_DIR,'20260712020000_course_memory_entity_scope.sql'),'utf-8');expect(sql).toContain("jsonb_typeof(metadata->'course_entity_id') = 'string'");expect(sql).toContain("jsonb_set(metadata, '{course_entity_ids}'");expect(sql).toContain("USING gin ((metadata->'course_entity_ids'))");});
   it('pins course memory receipt uniqueness and append-only event references', () => {
     const sql = fs.readFileSync(
-      path.join(MIGRATIONS_DIR, '20260716010000_course_memory_applies.sql'),
+      path.join(MIGRATIONS_DIR, '20260718183000_course_memory_applies.sql'),
       'utf-8'
     );
     expect(sql).toContain('CREATE TABLE public.course_memory_heads');
@@ -46,7 +46,7 @@ describe('migration files (dbmate format)', () => {
 
   it('pins append-only course memory index observations and producer ordering', () => {
     const sql = fs.readFileSync(
-      path.join(MIGRATIONS_DIR, '20260716020000_course_memory_index_observations.sql'),
+      path.join(MIGRATIONS_DIR, '20260718183100_course_memory_index_observations.sql'),
       'utf-8'
     );
     expect(sql).toContain('CREATE TABLE public.course_memory_index_observations');
@@ -59,7 +59,7 @@ describe('migration files (dbmate format)', () => {
 
   it('pins the completed receipt lookup used by embedding observation batches', () => {
     const sql = fs.readFileSync(
-      path.join(MIGRATIONS_DIR, '20260716030000_course_memory_receipt_event_lookup.sql'),
+      path.join(MIGRATIONS_DIR, '20260718183200_course_memory_receipt_event_lookup.sql'),
       'utf-8'
     );
     expect(sql).toContain('CREATE INDEX IF NOT EXISTS course_memory_apply_receipts_org_memory_event_completed');
