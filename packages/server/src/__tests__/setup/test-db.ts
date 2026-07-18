@@ -354,26 +354,31 @@ export async function cleanupTestDatabase(): Promise<void> {
     AND tablename NOT LIKE 'schema_migrations%'
   `;
 
-  // Disable triggers temporarily for faster truncation. `session_replication_role`
-  // is superuser-only, so on a non-superuser test role (the PG15+ fresh-`createdb`
-  // shape from #950, where DATABASE_URL points at a plain CREATE-granted user) this
-  // throws `permission denied to set parameter` (42501). Treat it as best-effort:
-  // `TRUNCATE ... CASCADE` already respects FK ordering on its own, so skipping the
-  // trigger-disable only forgoes the speedup, never correctness.
-  const triggersDisabled = await trySetReplicationRole(db, 'replica');
-
   if (tables.length > 0) {
     const quotedTables = tables.map(({ tablename }) => `"${tablename}"`).join(', ');
+    // session_replication_role is scoped to one physical connection. Reserve it
+    // so disabling triggers, truncating, and restoring the role cannot be split
+    // across different pooled connections and leak `replica` into later tests.
+    const reserved = await db.reserve();
+    let triggersDisabled = false;
     try {
-      await db.unsafe(`TRUNCATE ${quotedTables} CASCADE`);
-    } catch {
-      // Ignore errors for tables that may not exist.
+      // `session_replication_role` is superuser-only, so on a non-superuser test
+      // role this is best-effort. TRUNCATE CASCADE remains correct without it.
+      triggersDisabled = await trySetReplicationRole(reserved, 'replica');
+      try {
+        await reserved.unsafe(`TRUNCATE ${quotedTables} CASCADE`);
+      } catch {
+        // Ignore errors for tables that may not exist.
+      }
+    } finally {
+      try {
+        if (triggersDisabled) {
+          await trySetReplicationRole(reserved, 'origin');
+        }
+      } finally {
+        reserved.release();
+      }
     }
-  }
-
-  // Re-enable triggers only if we managed to disable them.
-  if (triggersDisabled) {
-    await trySetReplicationRole(db, 'origin');
   }
 
   // Fix check constraints that are out-of-date relative to the app code
