@@ -13,7 +13,12 @@ import {
   fakeRouteAgents,
   fakeRouteConnections,
   fakeRouteSettings,
+  useRealRouteStores,
 } from './helpers/route-test-mocks.js';
+
+// These are database contract tests. Another test file may have installed the
+// process-global route store mocks before this module is evaluated.
+useRealRouteStores();
 
 const ORG_ID = 'org-memory';
 const OWNER_USER_ID = 'user-owner';
