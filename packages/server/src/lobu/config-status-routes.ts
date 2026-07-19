@@ -7,6 +7,7 @@ import {
 	type LobuConfigStatusService,
 	type LobuConfigStatusStore,
 	type LobuOAuthStatusProvider,
+	type LobuToolInventoryProvider,
 } from "./config-status-service.js";
 import { isValidAgentId } from "./stores/postgres-stores.js";
 
@@ -14,6 +15,7 @@ export interface LobuConfigStatusRouteDeps {
 	token?: string;
 	store?: LobuConfigStatusStore;
 	oauthStatusProvider?: LobuOAuthStatusProvider;
+	toolInventoryProvider?: LobuToolInventoryProvider;
 	secretStore?: WritableSecretStore;
 	getSecretStore?: () => WritableSecretStore | undefined;
 	getCurrentStatus?: LobuConfigStatusService["getCurrentStatus"];
@@ -45,6 +47,7 @@ export function createLobuConfigStatusRoutes(deps: LobuConfigStatusRouteDeps = {
 		: createLobuConfigStatusService({
 				store: deps.store,
 				oauthStatusProvider: deps.oauthStatusProvider,
+				toolInventoryProvider: deps.toolInventoryProvider,
 				secretStore: deps.secretStore,
 				getSecretStore: deps.getSecretStore,
 			});

@@ -658,6 +658,21 @@ app.route(
   createLobuConfigStatusRoutes({
     token: process.env.LOBU_CONFIG_STATUS_TOKEN,
     getSecretStore: () => getLobuCoreServices()?.getSecretStore?.(),
+    toolInventoryProvider: {
+      async listToolNames({ agentId, userId, mcpId }) {
+        const proxy = getLobuCoreServices()?.getMcpProxy?.();
+        if (!proxy?.listToolsDirect) throw new Error('Lobu MCP proxy is unavailable');
+        const result = await proxy.listToolsDirect(agentId, userId, mcpId);
+        if (!result || typeof result !== 'object' || !Array.isArray(result.tools)) {
+          throw new Error('Lobu MCP tools/list returned an invalid inventory');
+        }
+        return result.tools.flatMap((tool: unknown) => {
+          if (!tool || typeof tool !== 'object') return [];
+          const name = (tool as { name?: unknown }).name;
+          return typeof name === 'string' && name.trim() ? [name.trim()] : [];
+        });
+      },
+    },
   })
 );
 
