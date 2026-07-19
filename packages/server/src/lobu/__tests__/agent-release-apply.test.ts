@@ -2552,8 +2552,9 @@ function personalBaselineOverrideApplyRequest() {
 	};
 	const overrideEffectiveSettingsDigest = digestValue(overrideSettings);
 	const overrideBaselineVersionId = `personal-agent-baseline-v1-${"d".repeat(64)}`;
-	const approvedAt = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-	const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+	const now = Date.now();
+	const approvedAt = new Date(now - 30 * 60 * 1000).toISOString();
+	const expiresAt = new Date(now + 30 * 60 * 1000).toISOString();
 	const baselineOverride = {
 		kind: "break_glass" as const,
 		recordId: "55555555-5555-4555-8555-555555555555",
