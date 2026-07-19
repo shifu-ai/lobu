@@ -16,7 +16,9 @@ const snapshot = {
 };
 
 function sqlReturning(row: unknown) {
-  return (async () => row ? [row] : []) as never;
+  const sql = async () => row ? [row] : [];
+  sql.json = (value: unknown) => JSON.stringify(value);
+  return sql as never;
 }
 
 const validReceipt = {

@@ -381,7 +381,7 @@ export async function readAgentReleaseCapabilityState(input: {
 				snapshot_digest, capability_ids, observed_at, expires_at
 			)
 			SELECT r.organization_id, r.agent_id, r.applied_release_id, r.applied_release_sequence,
-			       ${claim.snapshotDigest}, ${JSON.stringify(claim.capabilityIds)}::jsonb, now(), ${claim.expiresAt}
+			       ${claim.snapshotDigest}, ${sql.json(claim.capabilityIds)}, now(), ${claim.expiresAt}
 			FROM public.agent_release_applies r
 			WHERE r.organization_id = ${input.organizationId}
 			  AND r.agent_id = ${input.agentId}
