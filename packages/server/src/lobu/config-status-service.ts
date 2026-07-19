@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 import {
-	createBuiltinSecretRef,
 	type AgentConfigStore,
 	type AgentMetadata,
 	type AgentSettings,
+	createBuiltinSecretRef,
 } from "@lobu/core";
 import type { WritableSecretStore } from "../gateway/secrets/index.js";
 import {
@@ -12,14 +13,18 @@ import {
 } from "./connector-mcp-resolver.js";
 import {
 	isUiManagedMcp,
-	statusReasonForConnector,
 	type ShifuMcpStatusReasonCode,
+	statusReasonForConnector,
 } from "./provisioning-routes.js";
 import { orgContext } from "./stores/org-context.js";
 import { createPostgresAgentConfigStore } from "./stores/postgres-stores.js";
 
 export type LobuConnectorKey = ToolboxMcpStatusConnectorKey | (string & {});
-export type LobuOAuthStatus = "authorized" | "needs_reauth" | "not_connected" | "unknown";
+export type LobuOAuthStatus =
+	| "authorized"
+	| "needs_reauth"
+	| "not_connected"
+	| "unknown";
 export type LobuAgentToolStatus = "usable" | "not_usable" | "unknown";
 
 export interface LobuConnectorCurrentStatus {
@@ -32,22 +37,38 @@ export interface LobuConnectorCurrentStatus {
 	reauthorizationAvailable: boolean;
 	authorizationUrlAvailable: boolean;
 	uiManaged: boolean;
-	toolNames?: string[];
+	toolNames: string[];
+	usable: boolean;
+	runtimeReceiptRef: string | null;
 }
 
 export interface LobuConfigCurrentStatus {
 	ok: true;
 	agentId: string;
 	userId: string;
+	ownerUserId: string;
 	checkedAt: number;
+	contract: {
+		name: "connector_runtime_observation";
+		schemaVersion: 2;
+	};
+	runtimeReceiptRef: string;
+	observedAt: string;
+	expiresAt: string;
 	connectors: LobuConnectorCurrentStatus[];
 }
 
 export interface LobuConfigStatusService {
-	getCurrentStatus(input: { agentId: string; userId: string }): Promise<LobuConfigCurrentStatus>;
+	getCurrentStatus(input: {
+		agentId: string;
+		userId: string;
+	}): Promise<LobuConfigCurrentStatus>;
 }
 
-export type LobuConfigStatusStore = Pick<AgentConfigStore, "getMetadata" | "getSettings">;
+export type LobuConfigStatusStore = Pick<
+	AgentConfigStore,
+	"getMetadata" | "getSettings"
+>;
 
 export interface LobuOAuthStatusProvider {
 	getOAuthStatus(input: {
@@ -58,9 +79,19 @@ export interface LobuOAuthStatusProvider {
 	}): Promise<LobuOAuthStatus>;
 }
 
+export interface LobuToolInventoryProvider {
+	listToolNames(input: {
+		agentId: string;
+		userId: string;
+		connectorKey: LobuConnectorKey;
+		mcpId: string;
+	}): Promise<readonly string[]>;
+}
+
 interface LobuConfigStatusServiceOptions {
 	store?: LobuConfigStatusStore;
 	oauthStatusProvider?: LobuOAuthStatusProvider;
+	toolInventoryProvider?: LobuToolInventoryProvider;
 	secretStore?: WritableSecretStore;
 	getSecretStore?: () => WritableSecretStore | undefined;
 	now?: () => number;
@@ -97,8 +128,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function agentBelongsToToolboxUser(metadata: AgentMetadata, userId: string): boolean {
-	return metadata.owner?.platform === "toolbox" && metadata.owner.userId === userId;
+function agentBelongsToToolboxUser(
+	metadata: AgentMetadata,
+	userId: string,
+): boolean {
+	return (
+		metadata.owner?.platform === "toolbox" && metadata.owner.userId === userId
+	);
 }
 
 function configuredMcpIds(settings: AgentSettings | null): Map<string, string> {
@@ -125,7 +161,10 @@ function configuredMcpIdForKnownConnector(
 
 function stringArray(value: unknown): string[] {
 	return Array.isArray(value)
-		? value.filter((item): item is string => typeof item === "string" && item.trim() !== "")
+		? value.filter(
+				(item): item is string =>
+					typeof item === "string" && item.trim() !== "",
+			)
 		: [];
 }
 
@@ -169,7 +208,9 @@ function toolNamesForMcp(
 	return Array.from(
 		new Set(
 			rawTools
-				.map((pattern) => toolNameFromPattern(pattern, mcpId, options.allowUnqualified))
+				.map((pattern) =>
+					toolNameFromPattern(pattern, mcpId, options.allowUnqualified),
+				)
 				.filter((name): name is string => Boolean(name)),
 		),
 	).sort();
@@ -178,6 +219,7 @@ function toolNamesForMcp(
 async function statusFor(
 	deps: {
 		oauthStatusProvider?: LobuOAuthStatusProvider;
+		toolInventoryProvider?: LobuToolInventoryProvider;
 		inspectCredentialStatus?: (input: {
 			agentId: string;
 			userId: string;
@@ -190,7 +232,8 @@ async function statusFor(
 		key: LobuConnectorKey;
 		mcpId: string;
 		configured: boolean;
-		toolNames?: string[];
+		toolNames: string[];
+		runtimeReceiptRef: string;
 	},
 ): Promise<LobuConnectorCurrentStatus> {
 	const uiManaged = isUiManagedMcp(String(params.key));
@@ -235,22 +278,64 @@ async function statusFor(
 	}
 	const oauthStatus = oauthStatusForReason(reasonCode);
 	const authorized = oauthStatus === "authorized";
+	let toolNames = params.toolNames;
+	let runtimeInventoryObserved = false;
+	if (deps.toolInventoryProvider) {
+		toolNames = [];
+		if (params.configured && authorized) {
+			try {
+				const runtimeToolNames = await deps.toolInventoryProvider.listToolNames({
+					agentId: params.agentId,
+					userId: params.userId,
+					connectorKey: params.key,
+					mcpId: params.mcpId,
+				});
+				if (
+					runtimeToolNames.length <= 256 &&
+					runtimeToolNames.every((name) =>
+						/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(name),
+					)
+				) {
+					toolNames = [...new Set(runtimeToolNames)].sort();
+					runtimeInventoryObserved = true;
+				}
+			} catch {
+				// Runtime inventory is closed evidence: probe failure cannot become usable.
+			}
+		}
+	}
+	const usable =
+		params.configured &&
+		authorized &&
+		runtimeInventoryObserved &&
+		toolNames.length > 0;
 
 	return {
 		key: params.key,
 		oauthStatus,
-		agentToolStatus: params.configured ? "usable" : "not_usable",
+		// Keep the additive legacy projection honest: configured only means the
+		// MCP exists. It is usable only after authorization and a successful
+		// runtime inventory probe establish the v2 usable fact above.
+		agentToolStatus: usable ? "usable" : "not_usable",
 		configured: params.configured,
 		authorized,
 		reasonCode,
 		reauthorizationAvailable: uiManaged && params.configured,
 		authorizationUrlAvailable: uiManaged && params.configured,
 		uiManaged,
-		...(params.toolNames ? { toolNames: params.toolNames } : {}),
+		toolNames,
+		usable,
+		runtimeReceiptRef: usable
+			? `${params.runtimeReceiptRef}:${params.key}`
+			: null,
 	};
 }
 
-function credentialSecretRef(agentId: string, userId: string, mcpId: string): string {
+function credentialSecretRef(
+	agentId: string,
+	userId: string,
+	mcpId: string,
+): string {
 	return createBuiltinSecretRef(
 		encodeURIComponent(`mcp-auth/${agentId}/${userId}/${mcpId}/credential`),
 	);
@@ -260,13 +345,17 @@ function parseStoredCredential(value: string): StoredCredentialRecord | null {
 	const parsed: unknown = JSON.parse(value);
 	if (!isRecord(parsed)) return null;
 	if (typeof parsed.accessToken !== "string") return null;
-	if (typeof parsed.expiresAt !== "number" || !Number.isFinite(parsed.expiresAt)) {
+	if (
+		typeof parsed.expiresAt !== "number" ||
+		!Number.isFinite(parsed.expiresAt)
+	) {
 		return null;
 	}
 	return {
 		accessToken: parsed.accessToken,
 		expiresAt: parsed.expiresAt,
-		...(typeof parsed.refreshToken === "string" && parsed.refreshToken.length > 0
+		...(typeof parsed.refreshToken === "string" &&
+		parsed.refreshToken.length > 0
 			? { refreshToken: parsed.refreshToken }
 			: {}),
 	};
@@ -306,7 +395,9 @@ async function inspectCredentialStatus(input: {
 	}
 }
 
-function oauthStatusForReason(reasonCode: ShifuMcpStatusReasonCode): LobuOAuthStatus {
+function oauthStatusForReason(
+	reasonCode: ShifuMcpStatusReasonCode,
+): LobuOAuthStatus {
 	if (reasonCode === "ok") return "authorized";
 	if (
 		reasonCode === "token_expired" ||
@@ -337,15 +428,20 @@ function createStoredCredentialInspector(
 
 function resolveStoredCredentialInspector(
 	options: LobuConfigStatusServiceOptions,
-): ((input: {
-	agentId: string;
-	userId: string;
-	mcpId: string;
-}) => Promise<CredentialStatusInspection>) | undefined {
+):
+	| ((input: {
+			agentId: string;
+			userId: string;
+			mcpId: string;
+	  }) => Promise<CredentialStatusInspection>)
+	| undefined {
 	if (options.oauthStatusProvider) return undefined;
 	if (!options.secretStore && !options.getSecretStore) return undefined;
 	const getSecretStore = options.getSecretStore ?? (() => options.secretStore);
-	return createStoredCredentialInspector(getSecretStore, options.now ?? Date.now);
+	return createStoredCredentialInspector(
+		getSecretStore,
+		options.now ?? Date.now,
+	);
 }
 
 export function createLobuConfigStatusService(
@@ -353,7 +449,10 @@ export function createLobuConfigStatusService(
 ): LobuConfigStatusService {
 	const store = options.store ?? createPostgresAgentConfigStore();
 	const oauthStatusProvider = options.oauthStatusProvider;
-	const inspectStoredCredentialStatus = resolveStoredCredentialInspector(options);
+	const toolInventoryProvider = options.toolInventoryProvider;
+	const inspectStoredCredentialStatus =
+		resolveStoredCredentialInspector(options);
+	const now = options.now ?? Date.now;
 
 	return {
 		async getCurrentStatus({ agentId, userId }) {
@@ -361,10 +460,18 @@ export function createLobuConfigStatusService(
 			if (!metadata) {
 				throw new LobuConfigStatusError("agent_not_found");
 			}
-			if (!agentBelongsToToolboxUser(metadata, userId)) {
+			if (
+				metadata.agentId !== agentId ||
+				!agentBelongsToToolboxUser(metadata, userId)
+			) {
+				throw new LobuConfigStatusError("agent_owner_mismatch");
+			}
+			const ownerUserId = metadata.owner?.userId;
+			if (!ownerUserId) {
 				throw new LobuConfigStatusError("agent_owner_mismatch");
 			}
 			const buildStatus = async () => {
+				const runtimeReceiptRef = `lobu:connector-runtime-observation:v2:${randomUUID()}`;
 				const settings = await store.getSettings(agentId);
 				const ids = configuredMcpIds(settings);
 				const allowUnqualifiedToolNames = ids.size <= 1;
@@ -379,6 +486,7 @@ export function createLobuConfigStatusService(
 						await statusFor(
 							{
 								oauthStatusProvider,
+								toolInventoryProvider,
 								inspectCredentialStatus: inspectStoredCredentialStatus,
 							},
 							{
@@ -387,9 +495,14 @@ export function createLobuConfigStatusService(
 								key,
 								mcpId: configuredMcpId ?? canonical,
 								configured: Boolean(configuredMcpId),
-								toolNames: toolNamesForMcp(settings, configuredMcpId ?? canonical, {
-									allowUnqualified: allowUnqualifiedToolNames,
-								}),
+								toolNames: toolNamesForMcp(
+									settings,
+									configuredMcpId ?? canonical,
+									{
+										allowUnqualified: allowUnqualifiedToolNames,
+									},
+								),
+								runtimeReceiptRef,
 							},
 						),
 					);
@@ -400,6 +513,7 @@ export function createLobuConfigStatusService(
 							await statusFor(
 								{
 									oauthStatusProvider,
+									toolInventoryProvider,
 									inspectCredentialStatus: inspectStoredCredentialStatus,
 								},
 								{
@@ -411,22 +525,37 @@ export function createLobuConfigStatusService(
 									toolNames: toolNamesForMcp(settings, id, {
 										allowUnqualified: allowUnqualifiedToolNames,
 									}),
+									runtimeReceiptRef,
 								},
 							),
 						);
 					}
 				}
 
+				const observedAtMs = now();
+				const observedAt = new Date(observedAtMs).toISOString();
+				const expiresAt = new Date(observedAtMs + 5 * 60_000).toISOString();
 				return {
 					ok: true as const,
 					agentId,
 					userId,
-					checkedAt: Date.now(),
+					ownerUserId,
+					checkedAt: observedAtMs,
+					contract: {
+						name: "connector_runtime_observation" as const,
+						schemaVersion: 2 as const,
+					},
+					runtimeReceiptRef,
+					observedAt,
+					expiresAt,
 					connectors,
 				};
 			};
 			return metadata.organizationId
-				? orgContext.run({ organizationId: metadata.organizationId }, buildStatus)
+				? orgContext.run(
+						{ organizationId: metadata.organizationId },
+						buildStatus,
+					)
 				: buildStatus();
 		},
 	};
