@@ -158,8 +158,7 @@ export function createExecutionEventRoutes(
             );
           }
           const claim = worker.releaseState.claim;
-          const observedAt =
-            options.now?.() ?? readTestObservedAt(body.metadata) ?? new Date();
+          const observedAt = options.now?.() ?? new Date();
           const inventoryInput = {
             organizationId: worker.organizationId,
             agentId: worker.agentId,
@@ -270,13 +269,4 @@ function readEffectiveInventory(
   )
     return null;
   return { names: value.names, fingerprint: `sha256:${value.fingerprint}` };
-}
-
-function readTestObservedAt(metadata: unknown): Date | undefined {
-  if (process.env.NODE_ENV !== "test") return undefined;
-  if (!metadata || typeof metadata !== "object") return undefined;
-  const value = (metadata as Record<string, unknown>).testObservedAt;
-  if (typeof value !== "string") return undefined;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? undefined : date;
 }
