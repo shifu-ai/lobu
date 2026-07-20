@@ -240,6 +240,80 @@ describe("worker effective inventory writer to public release readback", () => {
       expiresAt: inventoryExpiresAt.toISOString(),
     });
   });
+
+  it("rejects inventory observed at or after CAP expiry without writing partial state", async () => {
+    const base = new Date(Date.now() + 30_000);
+    const capExpiresAt = new Date(base.getTime() + 60_000);
+
+    await pg.query(
+      "UPDATE public.agent_release_capability_snapshots SET observed_at=$1, expires_at=$2 WHERE organization_id=$3 AND agent_id=$4",
+      [base.toISOString(), capExpiresAt.toISOString(), ORG, AGENT],
+    );
+
+    for (const [taskId, observedAt] of [
+      ["exec:cap-expiry-bound", capExpiresAt],
+      ["exec:after-cap-expiry", new Date(capExpiresAt.getTime() + 1)],
+    ] as const) {
+      await write(
+        workerToken(ORG, "release-1", 1, capExpiresAt.toISOString()),
+        taskId,
+        ["too-late"],
+        409,
+        inventoryFingerprint(["too-late"]).slice("sha256:".length),
+        observedAt,
+      );
+    }
+
+    const partial = await pg.query<{ tasks: number; inventories: number }>(
+      `SELECT
+        (SELECT count(*)::int FROM public.execution_tasks WHERE id IN ('exec:cap-expiry-bound','exec:after-cap-expiry')) AS tasks,
+        (SELECT count(*)::int FROM public.agent_effective_tool_inventory_snapshots
+          WHERE snapshot_authority IN ('exec:cap-expiry-bound','exec:after-cap-expiry')) AS inventories`,
+    );
+    expect(partial.rows[0]).toEqual({ tasks: 0, inventories: 0 });
+  });
+
+  it("keeps inventory evidence TTL writer-owned when request metadata asks for a longer TTL", async () => {
+    const observedAt = new Date(Date.now() + 20_000);
+    const capExpiresAt = new Date(observedAt.getTime() + 60_000);
+    const requestedExpiresAt = new Date(observedAt.getTime() + 60 * 60_000);
+
+    await pg.query(
+      "UPDATE public.agent_release_capability_snapshots SET observed_at=$1, expires_at=$2 WHERE organization_id=$3 AND agent_id=$4",
+      [
+        observedAt.toISOString(),
+        capExpiresAt.toISOString(),
+        ORG,
+        AGENT,
+      ],
+    );
+
+    await write(
+      workerToken(ORG, "release-1", 1, capExpiresAt.toISOString()),
+      "exec:request-ttl-extension",
+      ["kept"],
+      200,
+      inventoryFingerprint(["kept"]).slice("sha256:".length),
+      observedAt,
+      {
+        expiresAt: requestedExpiresAt.toISOString(),
+        ttlMs: 60 * 60_000,
+        evidenceTtlMs: 60 * 60_000,
+      },
+    );
+
+    const stored = await pg.query<{
+      observed_at: Date | string;
+      expires_at: Date | string;
+    }>(
+      "SELECT observed_at, expires_at FROM public.agent_effective_tool_inventory_snapshots WHERE snapshot_authority='exec:request-ttl-extension'",
+    );
+    expect(stored.rows).toHaveLength(1);
+    expect(toIso(stored.rows[0]!.observed_at)).toBe(observedAt.toISOString());
+    expect(toIso(stored.rows[0]!.expires_at)).toBe(
+      new Date(observedAt.getTime() + 5 * 60_000).toISOString(),
+    );
+  });
 });
 
 async function write(
@@ -249,6 +323,7 @@ async function write(
   expectedStatus = 200,
   fingerprint = inventoryFingerprint(names).slice("sha256:".length),
   observedAt?: Date,
+  metadata: Record<string, unknown> = {},
 ) {
   controlledWriteNow = observedAt ?? new Date();
   const response = await app.request("/internal/execution-events", {
@@ -264,6 +339,7 @@ async function write(
       conversationId: "conversation-1",
       userId: "user-1",
       metadata: {
+        ...metadata,
         effectiveToolInventory: { names, fingerprint },
       },
     }),
@@ -332,4 +408,10 @@ function tagged(db: PGlite) {
 function inventoryFingerprint(names: string[]) {
   const canonical = [...new Set(names.map((name) => name.trim()))].sort();
   return `sha256:${createHash("sha256").update(canonicalize(canonical)).digest("hex")}`;
+}
+
+function toIso(value: Date | string) {
+  return value instanceof Date
+    ? value.toISOString()
+    : new Date(value).toISOString();
 }
