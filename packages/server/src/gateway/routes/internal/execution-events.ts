@@ -168,8 +168,6 @@ export function createExecutionEventRoutes(
             snapshotAuthority: taskId,
             toolNames: inventory.names,
             fingerprint: inventory.fingerprint,
-            observedAt,
-            expiresAt: new Date(observedAt.getTime() + 5 * 60_000),
           };
           try {
             let task;
@@ -180,7 +178,7 @@ export function createExecutionEventRoutes(
               await (
                 options.inventoryStore ??
                 createPostgresEffectiveToolInventoryStore(getDb())
-              ).write(inventoryInput);
+              ).write(inventoryInput, observedAt);
             } else {
               const sql = options.sql ?? getDb();
               task = await sql.begin(async (tx) => {
@@ -191,6 +189,7 @@ export function createExecutionEventRoutes(
                 await recordAgentEffectiveToolInventoryTruth(
                   inventoryInput,
                   tx,
+                  observedAt,
                 );
                 return created;
               });

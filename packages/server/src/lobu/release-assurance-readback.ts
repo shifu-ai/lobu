@@ -193,19 +193,16 @@ export async function recordAgentEffectiveToolInventoryTruth(
     snapshotAuthority: string;
     toolNames: readonly string[];
     fingerprint: string;
-    observedAt?: Date;
-    expiresAt?: Date;
   },
   sql: DbClient = getDb(),
+  observedAt = new Date(),
 ): Promise<void> {
   const inventory = canonicalToolInventory(input.toolNames);
   if (input.fingerprint !== inventory.fingerprint)
     throw new Error(
       "effective inventory fingerprint does not match tool names",
     );
-  const observedAt = input.observedAt ?? new Date();
-  const expiresAt =
-    input.expiresAt ?? new Date(observedAt.getTime() + 5 * 60_000);
+  const expiresAt = new Date(observedAt.getTime() + 5 * 60_000);
   const rows = await sql`
     INSERT INTO public.agent_effective_tool_inventory_snapshots (
       organization_id, agent_id, release_id, release_sequence, capability_snapshot_digest,
@@ -362,6 +359,7 @@ export async function readAgentToolInventoryTruth(
 export interface EffectiveToolInventoryStore {
   write(
     input: Parameters<typeof recordAgentEffectiveToolInventoryTruth>[0],
+    observedAt?: Date,
   ): Promise<void>;
   read(input: {
     organizationId: string;
@@ -373,7 +371,8 @@ export function createPostgresEffectiveToolInventoryStore(
   sql: DbClient,
 ): EffectiveToolInventoryStore {
   return {
-    write: (input) => recordAgentEffectiveToolInventoryTruth(input, sql),
+    write: (input, observedAt) =>
+      recordAgentEffectiveToolInventoryTruth(input, sql, observedAt),
     read: (input, now) => readAgentToolInventoryTruth(input, sql, now),
   };
 }
