@@ -1035,6 +1035,12 @@ export interface RunAISessionParams {
    * current agent/user/run context.
    */
   runJobToken?: string;
+  /**
+   * Verified claims of `runJobToken`, stamped by the SSE client. Workers
+   * have no ENCRYPTION_KEY, so the session context must take the release
+   * claim from here rather than decoding the token locally.
+   */
+  verifiedRunTokenClaims?: import("@lobu/core").WorkerTokenData | null;
   resolvedCourseContext?: ResolvedCourseExecutionContext;
   trustedExecutionScope?: TrustedExecutionScope;
   scheduledCourseContext?: import("@lobu/core").ScheduledCourseContext;
@@ -1410,6 +1416,7 @@ export async function runAISession(
     platformMetadata,
     agentId,
     runJobToken,
+    verifiedRunTokenClaims,
     resolvedCourseContext,
     trustedExecutionScope,
     scheduledCourseContext,
@@ -1478,6 +1485,10 @@ export async function runAISession(
     mcpExposure,
     shifuTrace,
     workerToken: sessionContextWorkerToken,
+    // Only forward the claims when they belong to the token we are about to
+    // present — if the run token is absent we fall back to the deployment
+    // token, whose claims these are not.
+    verifiedTokenClaims: runJobToken ? verifiedRunTokenClaims : undefined,
   });
 
   // Sync enabled skills to workspace filesystem so the agent can `cat` them.
@@ -2028,6 +2039,9 @@ export async function runAISession(
             mcpExposure,
             shifuTrace,
             workerToken: sessionContextWorkerToken,
+            verifiedTokenClaims: runJobToken
+              ? verifiedRunTokenClaims
+              : undefined,
           });
           const refreshedAllowedMcpTools = collectAllowedMcpTools(
             fresh.mcpTools

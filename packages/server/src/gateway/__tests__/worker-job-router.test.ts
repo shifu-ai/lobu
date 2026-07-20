@@ -146,6 +146,7 @@ describe("WorkerJobRouter", () => {
           messageId: "message-1",
           tokenKind: "run",
           executionMode: "personal",
+          releaseState: { status: "legacy_unenrolled" },
         });
         for (const forbidden of [
           "organizationId",

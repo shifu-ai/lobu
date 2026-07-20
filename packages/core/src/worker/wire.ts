@@ -21,6 +21,7 @@ import type {
   NetworkConfig,
   NixConfig,
 } from "../types";
+import type { WorkerTokenData } from "./auth";
 
 /**
  * Job type for queue messages.
@@ -219,6 +220,15 @@ export interface MessagePayload {
    * different run's slot — codex round 2 finding A on PR #865.
    */
   runJobToken?: string;
+
+  /**
+   * Claims of `runJobToken` after verification. Worker subprocesses do not
+   * hold ENCRYPTION_KEY, so they cannot decode the token locally; the SSE
+   * client stamps this from `gatewayVerifiedRunToken.claims` (sha256-bound
+   * to the token string at schema validation) so the session context can
+   * see the release claim without the decryption key.
+   */
+  verifiedRunTokenClaims?: WorkerTokenData | null;
 
   /** Per-agent egress judge configuration. */
   egressConfig?: AgentEgressConfig;

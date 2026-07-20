@@ -4,6 +4,7 @@ import type {
   ResolvedCourseExecutionContext,
   TrustedExecutionScope,
   ScheduledCourseContext,
+  WorkerTokenData,
   WorkerTransport,
 } from "@lobu/core";
 
@@ -52,6 +53,13 @@ export interface WorkerConfig {
    * When absent (legacy direct-enqueue), the snapshot write is skipped.
    */
   runJobToken?: string;
+  /**
+   * Claims of `runJobToken` as verified at SSE validation time. Worker
+   * subprocesses do not hold ENCRYPTION_KEY and cannot decode the token
+   * locally, so this is the only way the release claim reaches the
+   * session context (tool router mode, effective inventory reporting).
+   */
+  verifiedRunTokenClaims?: WorkerTokenData | null;
   /** Trusted, per-turn course resolution supplied by the gateway. */
   resolvedCourseContext?: ResolvedCourseExecutionContext;
   /** Trusted per-turn execution scope supplied by gateway orchestration. */

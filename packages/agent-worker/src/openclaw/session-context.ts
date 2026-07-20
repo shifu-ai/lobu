@@ -12,6 +12,7 @@ import {
   type ResolvedCourseExecutionContext,
   type ReleaseCapabilityState,
   type TrustedExecutionScope,
+  type WorkerTokenData,
   verifyWorkerToken,
 } from "@lobu/core";
 import type { WorkerShifuTraceContext } from "../shared/journey-trace";
@@ -454,6 +455,13 @@ export async function getOpenClawSessionContext(
     shifuTrace?: WorkerShifuTraceContext;
     /** Per-run token preferred by session-runner over the deployment token. */
     workerToken?: string;
+    /**
+     * Verified claims of `workerToken`, stamped by the SSE client at job
+     * validation. Worker subprocesses have no ENCRYPTION_KEY, so local
+     * verifyWorkerToken always fails there — when this field is present it
+     * is the authoritative source for the release claim.
+     */
+    verifiedTokenClaims?: WorkerTokenData | null;
   } = {}
 ): Promise<{
   /**
@@ -478,7 +486,9 @@ export async function getOpenClawSessionContext(
 }> {
   const mcpExposure: "tools" | "cli" = opts.mcpExposure ?? "tools";
   const workerToken = opts.workerToken ?? process.env.WORKER_TOKEN;
-  const verifiedToken = workerToken ? verifyWorkerToken(workerToken) : null;
+  const verifiedToken =
+    opts.verifiedTokenClaims ??
+    (workerToken ? verifyWorkerToken(workerToken) : null);
   const releaseState: ReleaseCapabilityState = verifiedToken?.releaseState ?? {
     status: "legacy_unenrolled",
   };
