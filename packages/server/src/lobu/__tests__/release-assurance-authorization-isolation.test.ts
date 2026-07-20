@@ -1,8 +1,22 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { extname, join, relative } from "node:path";
+import { dirname, extname, join, relative } from "node:path";
 import { describe, expect, test } from "bun:test";
 
-const ROOT = process.cwd();
+function findRepoRoot(startPath: string): string {
+	let currentPath = startPath;
+	for (;;) {
+		if (existsSync(join(currentPath, "packages/server"))) {
+			return currentPath;
+		}
+		const parentPath = dirname(currentPath);
+		if (parentPath === currentPath) {
+			throw new Error(`Could not find repository root from ${startPath}`);
+		}
+		currentPath = parentPath;
+	}
+}
+
+const ROOT = findRepoRoot(process.cwd());
 
 const AUTHORIZATION_FILE_ENTRYPOINTS = [
 	"packages/server/src/gateway/services/runtime-capability-snapshot.ts",
