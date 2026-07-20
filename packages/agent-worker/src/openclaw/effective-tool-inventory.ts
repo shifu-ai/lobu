@@ -65,6 +65,15 @@ export interface EffectiveToolInventory {
     readonly personalReminderDelivery: EffectiveToolBehavior;
   };
   readonly fingerprint: string;
+  /**
+   * sha256 hex over the canonicalized sorted-unique tool names only. This is
+   * the wire contract for the execution-events inventory snapshot: the
+   * gateway recomputes exactly this from the reported names
+   * (`canonicalToolInventory` in release-assurance-readback.ts) and rejects
+   * the write on mismatch. `fingerprint` above hashes the full inventory
+   * structure and must never be sent as the snapshot fingerprint.
+   */
+  readonly namesFingerprint: string;
 }
 
 export interface BuildEffectiveToolInventoryParams {
@@ -388,6 +397,16 @@ export function buildEffectiveToolInventory(
   const fingerprint = createHash("sha256")
     .update(canonicalJson(fingerprintInput))
     .digest("hex");
+  // Mirror of the server's canonicalToolInventory (sorted unique trimmed
+  // names, canonical JSON, sha256) — the two must stay in lockstep or the
+  // gateway rejects every inventory snapshot write.
+  const namesFingerprint = createHash("sha256")
+    .update(
+      canonicalJson(
+        [...new Set(allowedToolKeys.map((name) => name.trim()))].sort()
+      )
+    )
+    .digest("hex");
 
   return Object.freeze({
     scopedTools,
@@ -397,6 +416,7 @@ export function buildEffectiveToolInventory(
     releaseProvenance: provenance,
     behaviors,
     fingerprint,
+    namesFingerprint,
   });
 }
 
