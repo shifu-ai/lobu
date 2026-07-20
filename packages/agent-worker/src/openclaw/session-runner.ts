@@ -2101,7 +2101,11 @@ export async function runAISession(
         context.releaseState?.status === "active"
           ? {
               names: effectiveTools.allowedToolKeys,
-              fingerprint: effectiveTools.fingerprint,
+              // Names-only hash — the gateway recomputes this from `names`
+              // (canonicalToolInventory) and rejects the snapshot write if
+              // it differs. The structural `effectiveTools.fingerprint`
+              // never matches it by construction.
+              fingerprint: effectiveTools.namesFingerprint,
             }
           : undefined,
     },
