@@ -20,14 +20,19 @@ const CAP = `sha256:${"a".repeat(64)}`;
 const previousKey = process.env.ENCRYPTION_KEY;
 let pg: PGlite;
 let app: Hono;
+let controlledReadNow: Date;
+let controlledWriteNow: Date;
 
 describe("worker effective inventory writer to public release readback", () => {
   beforeAll(async () => {
     process.env.ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+    controlledReadNow = new Date();
+    controlledWriteNow = controlledReadNow;
     pg = new PGlite();
     await pg.exec(`CREATE TABLE agents (organization_id text,id text,PRIMARY KEY(organization_id,id));
       CREATE TABLE public.agent_release_applies (organization_id text,agent_id text,
-        applied_release_id text,applied_release_sequence bigint,status text);`);
+        desired_release_id text, desired_release_sequence bigint, desired_feed_sequence bigint,
+        applied_release_id text, applied_release_sequence bigint, applied_feed_sequence bigint, status text);`);
     for (const file of [
       "20260627120000_execution_observability.sql",
       "20260715020000_agent_effective_tool_inventory_snapshots.sql",
@@ -43,7 +48,7 @@ describe("worker effective inventory writer to public release readback", () => {
     }
     await pg.query("INSERT INTO agents VALUES($1,$2)", [ORG, AGENT]);
     await pg.query(
-      "INSERT INTO public.agent_release_applies VALUES($1,$2,'release-1',1,'applied')",
+      "INSERT INTO public.agent_release_applies VALUES($1,$2,'release-1',1,7,'release-1',1,7,'applied')",
       [ORG, AGENT],
     );
     await pg.query(
@@ -56,6 +61,7 @@ describe("worker effective inventory writer to public release readback", () => {
     const readback = createReleaseAssuranceReadback({
       sql,
       inventoryStore,
+      now: () => controlledReadNow,
       findAgentBase: async ({ organizationId, agentId }) =>
         organizationId === ORG && agentId === AGENT
           ? {
@@ -77,6 +83,7 @@ describe("worker effective inventory writer to public release readback", () => {
       "/",
       createExecutionEventRoutes({
         sql,
+        now: () => controlledWriteNow,
       }),
     );
     app.route(
@@ -155,8 +162,157 @@ describe("worker effective inventory writer to public release readback", () => {
       "UPDATE public.agent_effective_tool_inventory_snapshots SET inventory_fingerprint=$1 WHERE snapshot_authority='exec:authority'",
       [inventoryFingerprint(["kept"])],
     );
-    await new Promise((resolve) => setTimeout(resolve, 850));
-    expect(await inventory()).toMatchObject({ status: "missing", names: [] });
+    const expires = await pg.query<{ expires_at: Date | string }>(
+      "SELECT expires_at FROM public.agent_effective_tool_inventory_snapshots WHERE snapshot_authority='exec:authority'",
+    );
+    expect(expires.rows).toHaveLength(1);
+    const inventoryExpiresAt = expires.rows[0]?.expires_at;
+    if (!inventoryExpiresAt) throw new Error("inventory expiry not recorded");
+    const inventoryExpiresAtMs =
+      inventoryExpiresAt instanceof Date
+        ? inventoryExpiresAt.getTime()
+        : Date.parse(inventoryExpiresAt);
+    expect(
+      await inventory(new Date(inventoryExpiresAtMs + 1)),
+    ).toMatchObject({ status: "missing", names: [] });
+  });
+
+  it("keeps inventory evidence fresh after the 60 second CAP lease expires", async () => {
+    const base = new Date(Date.now());
+    const beforeClaimObservedAt = new Date(base.getTime() + 10_000);
+    const claimObservedAt = new Date(base.getTime() + 60_000);
+    const claimExpiresAt = new Date(base.getTime() + 70_000);
+
+    await pg.query(
+      "UPDATE public.agent_release_capability_snapshots SET observed_at=$1, expires_at=$2 WHERE organization_id=$3 AND agent_id=$4",
+      [
+        claimObservedAt.toISOString(),
+        claimExpiresAt.toISOString(),
+        ORG,
+        AGENT,
+      ],
+    );
+
+    await write(
+      workerToken(ORG, "release-1", 1, claimExpiresAt.toISOString()),
+      "exec:before-cap-observed",
+      ["too-early"],
+      409,
+      inventoryFingerprint(["too-early"]).slice("sha256:".length),
+      beforeClaimObservedAt,
+    );
+    const rejected = await pg.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM public.agent_effective_tool_inventory_snapshots WHERE snapshot_authority='exec:before-cap-observed'",
+    );
+    expect(rejected.rows[0]?.count).toBe(0);
+
+    const activeClaimObservedAt = base;
+    const activeClaimExpiresAt = new Date(base.getTime() + 60_000);
+    const inventoryObservedAt = new Date(base.getTime() + 10_000);
+    const readbackAt = new Date(base.getTime() + 70_000);
+    const inventoryExpiresAt = new Date(base.getTime() + 310_000);
+
+    await pg.query(
+      "UPDATE public.agent_release_capability_snapshots SET observed_at=$1, expires_at=$2 WHERE organization_id=$3 AND agent_id=$4",
+      [
+        activeClaimObservedAt.toISOString(),
+        activeClaimExpiresAt.toISOString(),
+        ORG,
+        AGENT,
+      ],
+    );
+
+    await write(
+      workerToken(ORG, "release-1", 1, activeClaimExpiresAt.toISOString()),
+      "exec:historical-cap",
+      ["kept"],
+      200,
+      inventoryFingerprint(["kept"]).slice("sha256:".length),
+      inventoryObservedAt,
+    );
+
+    expect(await inventory(readbackAt)).toMatchObject({
+      status: "available",
+      names: ["kept"],
+      releaseId: "release-1",
+      capabilitySnapshotDigest: CAP,
+      observedAt: inventoryObservedAt.toISOString(),
+      expiresAt: inventoryExpiresAt.toISOString(),
+    });
+  });
+
+  it("rejects inventory observed at or after CAP expiry without writing partial state", async () => {
+    const base = new Date(Date.now() + 30_000);
+    const capExpiresAt = new Date(base.getTime() + 60_000);
+
+    await pg.query(
+      "UPDATE public.agent_release_capability_snapshots SET observed_at=$1, expires_at=$2 WHERE organization_id=$3 AND agent_id=$4",
+      [base.toISOString(), capExpiresAt.toISOString(), ORG, AGENT],
+    );
+
+    for (const [taskId, observedAt] of [
+      ["exec:cap-expiry-bound", capExpiresAt],
+      ["exec:after-cap-expiry", new Date(capExpiresAt.getTime() + 1)],
+    ] as const) {
+      await write(
+        workerToken(ORG, "release-1", 1, capExpiresAt.toISOString()),
+        taskId,
+        ["too-late"],
+        409,
+        inventoryFingerprint(["too-late"]).slice("sha256:".length),
+        observedAt,
+      );
+    }
+
+    const partial = await pg.query<{ tasks: number; inventories: number }>(
+      `SELECT
+        (SELECT count(*)::int FROM public.execution_tasks WHERE id IN ('exec:cap-expiry-bound','exec:after-cap-expiry')) AS tasks,
+        (SELECT count(*)::int FROM public.agent_effective_tool_inventory_snapshots
+          WHERE snapshot_authority IN ('exec:cap-expiry-bound','exec:after-cap-expiry')) AS inventories`,
+    );
+    expect(partial.rows[0]).toEqual({ tasks: 0, inventories: 0 });
+  });
+
+  it("keeps inventory evidence TTL writer-owned when request metadata asks for a longer TTL", async () => {
+    const observedAt = new Date(Date.now() + 20_000);
+    const capExpiresAt = new Date(observedAt.getTime() + 60_000);
+    const requestedExpiresAt = new Date(observedAt.getTime() + 60 * 60_000);
+
+    await pg.query(
+      "UPDATE public.agent_release_capability_snapshots SET observed_at=$1, expires_at=$2 WHERE organization_id=$3 AND agent_id=$4",
+      [
+        observedAt.toISOString(),
+        capExpiresAt.toISOString(),
+        ORG,
+        AGENT,
+      ],
+    );
+
+    await write(
+      workerToken(ORG, "release-1", 1, capExpiresAt.toISOString()),
+      "exec:request-ttl-extension",
+      ["kept"],
+      200,
+      inventoryFingerprint(["kept"]).slice("sha256:".length),
+      observedAt,
+      {
+        expiresAt: requestedExpiresAt.toISOString(),
+        ttlMs: 60 * 60_000,
+        evidenceTtlMs: 60 * 60_000,
+      },
+    );
+
+    const stored = await pg.query<{
+      observed_at: Date | string;
+      expires_at: Date | string;
+    }>(
+      "SELECT observed_at, expires_at FROM public.agent_effective_tool_inventory_snapshots WHERE snapshot_authority='exec:request-ttl-extension'",
+    );
+    expect(stored.rows).toHaveLength(1);
+    expect(toIso(stored.rows[0]!.observed_at)).toBe(observedAt.toISOString());
+    expect(toIso(stored.rows[0]!.expires_at)).toBe(
+      new Date(observedAt.getTime() + 5 * 60_000).toISOString(),
+    );
   });
 });
 
@@ -166,7 +322,10 @@ async function write(
   names: string[],
   expectedStatus = 200,
   fingerprint = inventoryFingerprint(names).slice("sha256:".length),
+  observedAt?: Date,
+  metadata: Record<string, unknown> = {},
 ) {
+  controlledWriteNow = observedAt ?? new Date();
   const response = await app.request("/internal/execution-events", {
     method: "POST",
     headers: {
@@ -180,13 +339,19 @@ async function write(
       conversationId: "conversation-1",
       userId: "user-1",
       metadata: {
+        ...metadata,
         effectiveToolInventory: { names, fingerprint },
       },
     }),
   });
-  expect(response.status).toBe(expectedStatus);
+  if (response.status !== expectedStatus) {
+    throw new Error(
+      `expected status ${expectedStatus}, got ${response.status}: ${await response.text()}`,
+    );
+  }
 }
-async function inventory() {
+async function inventory(now?: Date) {
+  if (now) controlledReadNow = now;
   const response = await app.request(
     `/api/provisioning/agents/${AGENT}/release-assurance`,
   );
@@ -243,4 +408,10 @@ function tagged(db: PGlite) {
 function inventoryFingerprint(names: string[]) {
   const canonical = [...new Set(names.map((name) => name.trim()))].sort();
   return `sha256:${createHash("sha256").update(canonicalize(canonical)).digest("hex")}`;
+}
+
+function toIso(value: Date | string) {
+  return value instanceof Date
+    ? value.toISOString()
+    : new Date(value).toISOString();
 }

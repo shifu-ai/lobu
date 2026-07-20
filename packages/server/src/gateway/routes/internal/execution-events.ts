@@ -93,6 +93,7 @@ export function createExecutionEventRoutes(
     inventoryStore?: EffectiveToolInventoryStore;
     createTask?: typeof createExecutionTask;
     sql?: ReturnType<typeof getDb>;
+    now?: () => Date;
   } = {},
 ): Hono<WorkerContext> {
   const router = new Hono<WorkerContext>();
@@ -157,6 +158,7 @@ export function createExecutionEventRoutes(
             );
           }
           const claim = worker.releaseState.claim;
+          const observedAt = options.now?.() ?? new Date();
           const inventoryInput = {
             organizationId: worker.organizationId,
             agentId: worker.agentId,
@@ -166,9 +168,6 @@ export function createExecutionEventRoutes(
             snapshotAuthority: taskId,
             toolNames: inventory.names,
             fingerprint: inventory.fingerprint,
-            expiresAt: new Date(
-              Math.min(Date.parse(claim.expiresAt), Date.now() + 5 * 60_000),
-            ),
           };
           try {
             let task;
@@ -179,7 +178,7 @@ export function createExecutionEventRoutes(
               await (
                 options.inventoryStore ??
                 createPostgresEffectiveToolInventoryStore(getDb())
-              ).write(inventoryInput);
+              ).write(inventoryInput, observedAt);
             } else {
               const sql = options.sql ?? getDb();
               task = await sql.begin(async (tx) => {
@@ -190,6 +189,7 @@ export function createExecutionEventRoutes(
                 await recordAgentEffectiveToolInventoryTruth(
                   inventoryInput,
                   tx,
+                  observedAt,
                 );
                 return created;
               });
