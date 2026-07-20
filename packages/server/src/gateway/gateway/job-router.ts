@@ -35,6 +35,10 @@ function projectVerifiedRunTokenClaims(
     messageId: claims.messageId,
     tokenKind: claims.tokenKind,
     executionMode: claims.executionMode,
+    // Workers have no ENCRYPTION_KEY and cannot decode the token locally;
+    // the release claim must ride the verified-claims projection or the
+    // session context falls back to legacy_unenrolled.
+    releaseState: claims.releaseState,
     courseToolScope: claims.courseToolScope
       ? {
           ownerUserId: claims.courseToolScope.ownerUserId,

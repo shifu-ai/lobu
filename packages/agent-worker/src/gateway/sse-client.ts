@@ -172,6 +172,41 @@ const WorkerTokenClaimsSchema = z
     messageId: z.string().min(1).max(256).optional(),
     tokenKind: z.enum(["deployment", "session", "run"]).optional(),
     executionMode: z.enum(["personal", "onboarding", "course"]).optional(),
+    releaseState: z
+      .discriminatedUnion("status", [
+        z.object({ status: z.literal("legacy_unenrolled") }).strict(),
+        z
+          .object({
+            status: z.literal("enrolled_inactive"),
+            environment: z.enum(["staging", "production"]),
+            reason: z.enum([
+              "receipt_invalid",
+              "snapshot_unavailable",
+              "capability_expired",
+            ]),
+          })
+          .strict(),
+        z
+          .object({
+            status: z.literal("active"),
+            claim: z
+              .object({
+                environment: z.enum(["staging", "production"]),
+                toolboxUserId: z.string().min(1).max(256),
+                agentId: z.string().min(1).max(256),
+                releaseId: z.string().min(1).max(256),
+                releaseSequence: z.number().int().positive(),
+                snapshotDigest: z
+                  .string()
+                  .regex(/^sha256:[0-9a-f]{64}$/u),
+                expiresAt: z.string().min(1).max(64),
+                capabilityIds: z.array(z.string().min(1).max(256)).max(256),
+              })
+              .strict(),
+          })
+          .strict(),
+      ])
+      .optional(),
     courseToolScope: z
       .object({
         ownerUserId: z.string().min(1).max(256),
@@ -935,6 +970,14 @@ export class GatewayClient {
             throw new Error(
               "Bounded run token does not match worker deployment"
             );
+          // Worker subprocesses have no ENCRYPTION_KEY, so downstream code
+          // cannot decode runJobToken locally. Stamp the verified claims
+          // (gateway-verified and sha256-bound to the token string by the
+          // schema superRefine, or locally verified where the key exists)
+          // onto the payload so the session context can read the release
+          // claim without the decryption key.
+          payload.verifiedRunTokenClaims =
+            boundedRunToken?.tokenKind === "run" ? boundedRunToken : null;
 
           // Send delivery receipt immediately so the gateway knows
           // the job was actually received (not lost to a stale SSE connection).
@@ -1521,6 +1564,9 @@ export class GatewayClient {
         typeof payload.runJobToken === "string" && payload.runJobToken
           ? payload.runJobToken
           : undefined,
+      // Verified claims of runJobToken stamped at SSE validation; workers
+      // cannot decode the token themselves (no ENCRYPTION_KEY).
+      verifiedRunTokenClaims: payload.verifiedRunTokenClaims ?? null,
       resolvedCourseContext: payload.resolvedCourseContext,
       trustedExecutionScope: payload.trustedExecutionScope,
       scheduledCourseContext: payload.scheduledCourseContext,
