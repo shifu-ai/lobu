@@ -31,7 +31,8 @@ describe("worker effective inventory writer to public release readback", () => {
     pg = new PGlite();
     await pg.exec(`CREATE TABLE agents (organization_id text,id text,PRIMARY KEY(organization_id,id));
       CREATE TABLE public.agent_release_applies (organization_id text,agent_id text,
-        applied_release_id text,applied_release_sequence bigint,status text);`);
+        desired_release_id text, desired_release_sequence bigint, desired_feed_sequence bigint,
+        applied_release_id text, applied_release_sequence bigint, applied_feed_sequence bigint, status text);`);
     for (const file of [
       "20260627120000_execution_observability.sql",
       "20260715020000_agent_effective_tool_inventory_snapshots.sql",
@@ -47,7 +48,7 @@ describe("worker effective inventory writer to public release readback", () => {
     }
     await pg.query("INSERT INTO agents VALUES($1,$2)", [ORG, AGENT]);
     await pg.query(
-      "INSERT INTO public.agent_release_applies VALUES($1,$2,'release-1',1,'applied')",
+      "INSERT INTO public.agent_release_applies VALUES($1,$2,'release-1',1,7,'release-1',1,7,'applied')",
       [ORG, AGENT],
     );
     await pg.query(
