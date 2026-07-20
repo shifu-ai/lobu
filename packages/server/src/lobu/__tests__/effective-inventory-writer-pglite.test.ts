@@ -18,12 +18,16 @@ const ORG = "org-writer";
 const AGENT = "shifu-u-writer";
 const CAP = `sha256:${"a".repeat(64)}`;
 const previousKey = process.env.ENCRYPTION_KEY;
+const previousWorkerTokenClockSkew = process.env.WORKER_TOKEN_CLOCK_SKEW_MS;
 let pg: PGlite;
 let app: Hono;
+let controlledNow: Date;
 
 describe("worker effective inventory writer to public release readback", () => {
   beforeAll(async () => {
     process.env.ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+    process.env.WORKER_TOKEN_CLOCK_SKEW_MS = `${24 * 60 * 60 * 1000}`;
+    controlledNow = new Date();
     pg = new PGlite();
     await pg.exec(`CREATE TABLE agents (organization_id text,id text,PRIMARY KEY(organization_id,id));
       CREATE TABLE public.agent_release_applies (organization_id text,agent_id text,
@@ -56,6 +60,7 @@ describe("worker effective inventory writer to public release readback", () => {
     const readback = createReleaseAssuranceReadback({
       sql,
       inventoryStore,
+      now: () => controlledNow,
       findAgentBase: async ({ organizationId, agentId }) =>
         organizationId === ORG && agentId === AGENT
           ? {
@@ -88,6 +93,9 @@ describe("worker effective inventory writer to public release readback", () => {
     await pg.close();
     if (previousKey) process.env.ENCRYPTION_KEY = previousKey;
     else delete process.env.ENCRYPTION_KEY;
+    if (previousWorkerTokenClockSkew)
+      process.env.WORKER_TOKEN_CLOCK_SKEW_MS = previousWorkerTokenClockSkew;
+    else delete process.env.WORKER_TOKEN_CLOCK_SKEW_MS;
   });
 
   it("binds token authority, full-replaces names, rejects wrong scope, and expires", async () => {
@@ -155,8 +163,54 @@ describe("worker effective inventory writer to public release readback", () => {
       "UPDATE public.agent_effective_tool_inventory_snapshots SET inventory_fingerprint=$1 WHERE snapshot_authority='exec:authority'",
       [inventoryFingerprint(["kept"])],
     );
-    await new Promise((resolve) => setTimeout(resolve, 850));
-    expect(await inventory()).toMatchObject({ status: "missing", names: [] });
+    const expires = await pg.query<{ expires_at: Date | string }>(
+      "SELECT expires_at FROM public.agent_effective_tool_inventory_snapshots WHERE snapshot_authority='exec:authority'",
+    );
+    expect(expires.rows).toHaveLength(1);
+    const inventoryExpiresAt = expires.rows[0]?.expires_at;
+    if (!inventoryExpiresAt) throw new Error("inventory expiry not recorded");
+    const inventoryExpiresAtMs =
+      inventoryExpiresAt instanceof Date
+        ? inventoryExpiresAt.getTime()
+        : Date.parse(inventoryExpiresAt);
+    expect(
+      await inventory(new Date(inventoryExpiresAtMs + 1)),
+    ).toMatchObject({ status: "missing", names: [] });
+  });
+
+  it("keeps inventory evidence fresh after the 60 second CAP lease expires", async () => {
+    const claimObservedAt = new Date("2026-07-20T10:00:00.000Z");
+    const claimExpiresAt = new Date("2026-07-20T10:01:00.000Z");
+    const inventoryObservedAt = new Date("2026-07-20T10:00:10.000Z");
+    const readbackAt = new Date("2026-07-20T10:01:10.000Z");
+
+    await pg.query(
+      "UPDATE public.agent_release_capability_snapshots SET observed_at=$1, expires_at=$2 WHERE organization_id=$3 AND agent_id=$4",
+      [
+        claimObservedAt.toISOString(),
+        claimExpiresAt.toISOString(),
+        ORG,
+        AGENT,
+      ],
+    );
+
+    await write(
+      workerToken(ORG, "release-1", 1, claimExpiresAt.toISOString()),
+      "exec:historical-cap",
+      ["kept"],
+      200,
+      inventoryFingerprint(["kept"]).slice("sha256:".length),
+      inventoryObservedAt,
+    );
+
+    expect(await inventory(readbackAt)).toMatchObject({
+      status: "available",
+      names: ["kept"],
+      releaseId: "release-1",
+      capabilitySnapshotDigest: CAP,
+      observedAt: inventoryObservedAt.toISOString(),
+      expiresAt: "2026-07-20T10:05:10.000Z",
+    });
   });
 });
 
@@ -166,6 +220,7 @@ async function write(
   names: string[],
   expectedStatus = 200,
   fingerprint = inventoryFingerprint(names).slice("sha256:".length),
+  observedAt?: Date,
 ) {
   const response = await app.request("/internal/execution-events", {
     method: "POST",
@@ -181,12 +236,18 @@ async function write(
       userId: "user-1",
       metadata: {
         effectiveToolInventory: { names, fingerprint },
+        testObservedAt: observedAt?.toISOString(),
       },
     }),
   });
-  expect(response.status).toBe(expectedStatus);
+  if (response.status !== expectedStatus) {
+    throw new Error(
+      `expected status ${expectedStatus}, got ${response.status}: ${await response.text()}`,
+    );
+  }
 }
-async function inventory() {
+async function inventory(now?: Date) {
+  if (now) controlledNow = now;
   const response = await app.request(
     `/api/provisioning/agents/${AGENT}/release-assurance`,
   );

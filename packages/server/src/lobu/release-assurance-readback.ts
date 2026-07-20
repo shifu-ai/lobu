@@ -221,7 +221,9 @@ export async function recordAgentEffectiveToolInventoryTruth(
     WHERE r.organization_id=${input.organizationId} AND r.agent_id=${input.agentId}
       AND r.status='applied' AND r.applied_release_id=${input.releaseId}
       AND r.applied_release_sequence=${input.releaseSequence}
-      AND c.snapshot_digest=${input.capabilitySnapshotDigest} AND c.expires_at > ${observedAt}
+      AND c.snapshot_digest=${input.capabilitySnapshotDigest}
+      AND c.observed_at <= ${observedAt}
+      AND ${observedAt} < c.expires_at
     ON CONFLICT (organization_id, agent_id, snapshot_authority) DO NOTHING
     RETURNING snapshot_authority
   `;
@@ -287,6 +289,7 @@ export async function readRuntimeReleaseAssurance(
 export async function readAgentToolInventoryTruth(
   input: { organizationId: string; agentId: string },
   sql: DbClient = getDb(),
+  now = new Date(),
 ) {
   const rows = await sql<{
     tool_names: unknown;
@@ -308,7 +311,9 @@ export async function readAgentToolInventoryTruth(
      AND c.release_id = i.release_id AND c.release_sequence = i.release_sequence
      AND c.snapshot_digest = i.capability_snapshot_digest
     WHERE i.organization_id = ${input.organizationId} AND i.agent_id = ${input.agentId}
-      AND r.status = 'applied' AND i.expires_at > now() AND c.expires_at > now()
+      AND r.status = 'applied' AND i.expires_at > ${now}
+      AND c.observed_at <= i.observed_at
+      AND i.observed_at < c.expires_at
     ORDER BY i.observed_at DESC
     LIMIT 1
   `;
@@ -361,7 +366,7 @@ export interface EffectiveToolInventoryStore {
   read(input: {
     organizationId: string;
     agentId: string;
-  }): ReturnType<typeof readAgentToolInventoryTruth>;
+  }, now?: Date): ReturnType<typeof readAgentToolInventoryTruth>;
 }
 
 export function createPostgresEffectiveToolInventoryStore(
@@ -369,7 +374,7 @@ export function createPostgresEffectiveToolInventoryStore(
 ): EffectiveToolInventoryStore {
   return {
     write: (input) => recordAgentEffectiveToolInventoryTruth(input, sql),
-    read: (input) => readAgentToolInventoryTruth(input, sql),
+    read: (input, now) => readAgentToolInventoryTruth(input, sql, now),
   };
 }
 
@@ -433,9 +438,10 @@ export function createReleaseAssuranceReadback(input: {
     readAgent: async (query: { organizationId: string; agentId: string }) => {
       const base = await input.findAgentBase(query);
       if (!base) return null;
+      const now = input.now?.() ?? new Date();
       const [inventory, capabilitySnapshot] = await Promise.all([
-        input.inventoryStore?.read(query) ??
-          readAgentToolInventoryTruth(query, sql()),
+        input.inventoryStore?.read(query, now) ??
+          readAgentToolInventoryTruth(query, sql(), now),
         readAgentCapabilitySnapshotTruth(query, sql()),
       ]);
       return {
@@ -444,7 +450,7 @@ export function createReleaseAssuranceReadback(input: {
         ...base,
         capabilitySnapshotDigest: capabilitySnapshot?.snapshotDigest ?? null,
         effectiveMcpToolInventory: inventory,
-        observedAt: (input.now?.() ?? new Date()).toISOString(),
+        observedAt: now.toISOString(),
       };
     },
   };

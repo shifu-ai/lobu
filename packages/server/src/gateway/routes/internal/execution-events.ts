@@ -93,6 +93,7 @@ export function createExecutionEventRoutes(
     inventoryStore?: EffectiveToolInventoryStore;
     createTask?: typeof createExecutionTask;
     sql?: ReturnType<typeof getDb>;
+    now?: () => Date;
   } = {},
 ): Hono<WorkerContext> {
   const router = new Hono<WorkerContext>();
@@ -157,6 +158,8 @@ export function createExecutionEventRoutes(
             );
           }
           const claim = worker.releaseState.claim;
+          const observedAt =
+            options.now?.() ?? readTestObservedAt(body.metadata) ?? new Date();
           const inventoryInput = {
             organizationId: worker.organizationId,
             agentId: worker.agentId,
@@ -166,9 +169,8 @@ export function createExecutionEventRoutes(
             snapshotAuthority: taskId,
             toolNames: inventory.names,
             fingerprint: inventory.fingerprint,
-            expiresAt: new Date(
-              Math.min(Date.parse(claim.expiresAt), Date.now() + 5 * 60_000),
-            ),
+            observedAt,
+            expiresAt: new Date(observedAt.getTime() + 5 * 60_000),
           };
           try {
             let task;
@@ -268,4 +270,13 @@ function readEffectiveInventory(
   )
     return null;
   return { names: value.names, fingerprint: `sha256:${value.fingerprint}` };
+}
+
+function readTestObservedAt(metadata: unknown): Date | undefined {
+  if (process.env.NODE_ENV !== "test") return undefined;
+  if (!metadata || typeof metadata !== "object") return undefined;
+  const value = (metadata as Record<string, unknown>).testObservedAt;
+  if (typeof value !== "string") return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
 }
