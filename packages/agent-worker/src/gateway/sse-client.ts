@@ -196,9 +196,7 @@ const WorkerTokenClaimsSchema = z
                 agentId: z.string().min(1).max(256),
                 releaseId: z.string().min(1).max(256),
                 releaseSequence: z.number().int().positive(),
-                snapshotDigest: z
-                  .string()
-                  .regex(/^sha256:[0-9a-f]{64}$/u),
+                snapshotDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
                 expiresAt: z.string().min(1).max(64),
                 capabilityIds: z.array(z.string().min(1).max(256)).max(256),
               })

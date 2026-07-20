@@ -2039,7 +2039,9 @@ export async function runAISession(
             mcpExposure,
             shifuTrace,
             workerToken: sessionContextWorkerToken,
-            verifiedTokenClaims: runJobToken ? verifiedRunTokenClaims : undefined,
+            verifiedTokenClaims: runJobToken
+              ? verifiedRunTokenClaims
+              : undefined,
           });
           const refreshedAllowedMcpTools = collectAllowedMcpTools(
             fresh.mcpTools
