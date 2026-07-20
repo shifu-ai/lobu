@@ -10,6 +10,7 @@ import { orgContext } from "../stores/org-context";
 const ORG = "org-isolated";
 const AGENT = "shifu-u-isolated";
 const DIGEST = `sha256:${"a".repeat(64)}`;
+const OTHER_DIGEST = `sha256:${"b".repeat(64)}`;
 const databases: PGlite[] = [];
 afterEach(async () => { await Promise.all(databases.splice(0).map((db) => db.close())); });
 
@@ -82,10 +83,16 @@ describe("authenticated agent release readback with isolated Postgres", () => {
 			applied_release_sequence: 1,
 			applied_feed_sequence: 7,
 		});
-		await db.query(`INSERT INTO public.agent_release_capability_snapshots VALUES
-			($1,$2,'release-1',1,$3,'["cap.v1"]','2026-07-20T10:00:00Z','2026-07-20T10:01:00Z')`, [ORG, AGENT, DIGEST]);
-		await db.query(`INSERT INTO public.agent_effective_tool_inventory_snapshots VALUES
-			($1,$2,'release-1',1,$3,'turn-1','["calendar_events_list","docs_create"]',$4,'2026-07-20T10:00:10Z','2026-07-20T10:05:10Z')`,
+		await db.query(`INSERT INTO public.agent_release_capability_snapshots
+			(organization_id, agent_id, release_id, release_sequence, snapshot_digest, capability_ids, observed_at, expires_at)
+			VALUES ($1,$2,'release-1',1,$3,'["cap.v1"]','2026-07-20T10:00:00Z','2026-07-20T10:01:00Z')`, [ORG, AGENT, DIGEST]);
+		await db.query(`INSERT INTO public.agent_release_capability_snapshots
+			(organization_id, agent_id, release_id, release_sequence, snapshot_digest, capability_ids, observed_at, expires_at)
+			VALUES ($1,$2,'release-1',1,$3,'["cap.other"]','2026-07-20T10:01:05Z','2026-07-20T10:06:05Z')`, [ORG, AGENT, OTHER_DIGEST]);
+		await db.query(`INSERT INTO public.agent_effective_tool_inventory_snapshots
+			(organization_id, agent_id, release_id, release_sequence, capability_snapshot_digest,
+			 snapshot_authority, tool_names, inventory_fingerprint, observed_at, expires_at)
+			VALUES ($1,$2,'release-1',1,$3,'turn-1','["calendar_events_list","docs_create"]',$4,'2026-07-20T10:00:10Z','2026-07-20T10:05:10Z')`,
 			[ORG, AGENT, DIGEST, inventoryFingerprint(["calendar_events_list", "docs_create"])]);
 		const readback = createReleaseAssuranceReadback({ sql: tagged(db),
 			now: () => new Date("2026-07-20T10:01:10Z"),
@@ -106,14 +113,14 @@ describe("authenticated agent release readback with isolated Postgres", () => {
 			},
 		});
 
-		await db.query("UPDATE public.agent_release_capability_snapshots SET observed_at='2026-07-20T10:00:11Z'");
+		await db.query("UPDATE public.agent_release_capability_snapshots SET observed_at='2026-07-20T10:00:11Z' WHERE snapshot_digest=$1", [DIGEST]);
 		const temporalMismatch = await app.request(`/api/provisioning/agents/${AGENT}/release-assurance`);
 		expect(await temporalMismatch.json()).toMatchObject({
 			capabilitySnapshotDigest: null,
 			effectiveMcpToolInventory: { status: "missing", names: [] },
 		});
 
-		await db.query("UPDATE public.agent_release_capability_snapshots SET observed_at='2026-07-20T10:00:00Z'");
+		await db.query("UPDATE public.agent_release_capability_snapshots SET observed_at='2026-07-20T10:00:00Z' WHERE snapshot_digest=$1", [DIGEST]);
 		await db.query("UPDATE public.agent_release_applies SET desired_release_id='release-2', desired_release_sequence=2, desired_feed_sequence=8, applied_release_id='release-2', applied_release_sequence=2, applied_feed_sequence=8");
 		const releaseSwitch = await app.request(`/api/provisioning/agents/${AGENT}/release-assurance`);
 		expect(await releaseSwitch.json()).toMatchObject({
