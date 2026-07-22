@@ -344,6 +344,26 @@ describe("signed managed agent release apply", () => {
 		});
 	});
 
+	test("accepts a single-canary rollout gate", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		const policy = request.signedManifest.controlPlanePolicy as Record<
+			string,
+			unknown
+		>;
+		const rolloutPolicy = policy.rolloutPolicy as Record<string, unknown>;
+		const gates = rolloutPolicy.gates as Record<string, unknown>;
+		gates.minimumCanaries = 1;
+		resignLatestRequest(request);
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toMatchObject({
+			baselineVersionId: request.baselineVersionId,
+			drifted: false,
+		});
+	});
+
 	test("rejects an unknown rollout gate while allowing only the signed contract", async () => {
 		const app = await buildApp();
 		const request = personalBaselineApplyRequest();
