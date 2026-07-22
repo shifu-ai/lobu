@@ -1849,7 +1849,7 @@ function parseControlPlanePolicy(value: unknown): ControlPlanePolicy {
 	);
 	if (
 		!Number.isSafeInteger(gates.minimumCanaries) ||
-		Number(gates.minimumCanaries) < 2 ||
+		Number(gates.minimumCanaries) < 1 ||
 		!Number.isSafeInteger(gates.minimumCanaryObservationMinutes) ||
 		Number(gates.minimumCanaryObservationMinutes) < 30 ||
 		Number(gates.minimumCanaryObservationMinutes) > 1440
