@@ -344,6 +344,65 @@ describe("signed managed agent release apply", () => {
 		});
 	});
 
+	test("accepts and preserves the signed post-canary machine policy gate", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		const policy = request.signedManifest.controlPlanePolicy as Record<
+			string,
+			unknown
+		>;
+		const rolloutPolicy = policy.rolloutPolicy as Record<string, unknown>;
+		const gates = rolloutPolicy.gates as Record<string, unknown>;
+		gates.postCanaryMachinePolicy = {
+			schemaVersion: 1,
+			required: true,
+			evidenceTtlMinutes: 15,
+			requiredChecks: [
+				"assignmentReadback",
+				"provisioningTarget",
+				"appliedReleaseReceipt",
+				"baselineDigest",
+				"capabilitySnapshot",
+				"mcpToolInventory",
+				"requiredApiRoutes",
+				"lineRoute",
+			],
+			lineRouteMode: "optional",
+			requiredCapabilityIds: ["sales_battle_report.scheduler.v2"],
+			requiredToolNames: ["shifu-toolbox/sales_battle_report_schedule_list"],
+			requiredApiContracts: ["agent-workbench.provisioning-route.v1"],
+		};
+		resignLatestRequest(request);
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toMatchObject({
+			baselineVersionId: request.baselineVersionId,
+			drifted: false,
+			manifestDigest: digestValue(request.signedManifest),
+			feedDigest: digestValue(request.signedFeed),
+		});
+	});
+
+	test("rejects a malformed post-canary machine policy gate", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		const policy = request.signedManifest.controlPlanePolicy as Record<
+			string,
+			unknown
+		>;
+		const rolloutPolicy = policy.rolloutPolicy as Record<string, unknown>;
+		const gates = rolloutPolicy.gates as Record<string, unknown>;
+		gates.postCanaryMachinePolicy = { schemaVersion: 1, required: "yes" };
+		resignLatestRequest(request);
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_invalid_request",
+		});
+	});
+
 	test("accepts a single-canary rollout gate", async () => {
 		const app = await buildApp();
 		const request = personalBaselineApplyRequest();

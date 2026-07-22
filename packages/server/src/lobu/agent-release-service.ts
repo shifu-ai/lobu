@@ -80,6 +80,16 @@ interface ControlPlanePolicy {
 			minimumCanaryObservationMinutes: number;
 			requiredSmokeNames: string[];
 			postCanarySmokeNames?: string[];
+			postCanaryMachinePolicy?: {
+				schemaVersion: 1;
+				required: true;
+				evidenceTtlMinutes: 15;
+				requiredChecks: string[];
+				lineRouteMode: "optional" | "required";
+				requiredCapabilityIds: string[];
+				requiredToolNames: string[];
+				requiredApiContracts: string[];
+			};
 		};
 	};
 	personalAgentBaseline?: PersonalAgentBaselineContract;
@@ -1844,7 +1854,7 @@ function parseControlPlanePolicy(value: unknown): ControlPlanePolicy {
 			"minimumCanaryObservationMinutes",
 			"requiredSmokeNames",
 		],
-		["postCanarySmokeNames"],
+		["postCanarySmokeNames", "postCanaryMachinePolicy"],
 		"rollout gates",
 	);
 	if (
@@ -1873,6 +1883,9 @@ function parseControlPlanePolicy(value: unknown): ControlPlanePolicy {
 				"Agent release post-canary smoke overlaps required smoke evidence",
 			);
 		}
+	}
+	if (hasOwn(gates, "postCanaryMachinePolicy")) {
+		parsePostCanaryMachinePolicy(gates.postCanaryMachinePolicy);
 	}
 
 	if (
@@ -3027,6 +3040,73 @@ function assertRequiredExactKeys(
 		if (!hasOwn(value, key))
 			throw invalidRequest(`Missing agent release ${label} key: ${key}`);
 	}
+}
+
+// Mirrors the Toolbox signer contract (assertPostCanaryMachinePolicy in
+// agent-release-types.ts): fixed schema, TTL 15, and the exact eight machine
+// checks. Kept fail-closed on both sides so a skewed policy can never apply.
+const POST_CANARY_MACHINE_CHECKS = [
+	"assignmentReadback",
+	"provisioningTarget",
+	"appliedReleaseReceipt",
+	"baselineDigest",
+	"capabilitySnapshot",
+	"mcpToolInventory",
+	"requiredApiRoutes",
+	"lineRoute",
+] as const;
+
+function parsePostCanaryMachinePolicy(value: unknown): void {
+	const policy = requireRecord(value, "post-canary machine policy");
+	assertRequiredExactKeys(
+		policy,
+		[
+			"schemaVersion",
+			"required",
+			"evidenceTtlMinutes",
+			"requiredChecks",
+			"lineRouteMode",
+			"requiredCapabilityIds",
+			"requiredToolNames",
+			"requiredApiContracts",
+		],
+		[],
+		"post-canary machine policy",
+	);
+	if (
+		policy.schemaVersion !== 1 ||
+		policy.required !== true ||
+		policy.evidenceTtlMinutes !== 15 ||
+		(policy.lineRouteMode !== "optional" && policy.lineRouteMode !== "required")
+	) {
+		throw invalidRequest("Agent release post-canary machine policy is invalid");
+	}
+	const requiredChecks = parseStringArray(
+		policy.requiredChecks,
+		"postCanaryMachinePolicy.requiredChecks",
+		1,
+	);
+	if (
+		requiredChecks.length !== POST_CANARY_MACHINE_CHECKS.length ||
+		!POST_CANARY_MACHINE_CHECKS.every((check) => requiredChecks.includes(check))
+	) {
+		throw invalidRequest("Agent release post-canary machine check is invalid");
+	}
+	parseStringArray(
+		policy.requiredCapabilityIds,
+		"postCanaryMachinePolicy.requiredCapabilityIds",
+		1,
+	);
+	parseStringArray(
+		policy.requiredToolNames,
+		"postCanaryMachinePolicy.requiredToolNames",
+		1,
+	);
+	parseStringArray(
+		policy.requiredApiContracts,
+		"postCanaryMachinePolicy.requiredApiContracts",
+		1,
+	);
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
