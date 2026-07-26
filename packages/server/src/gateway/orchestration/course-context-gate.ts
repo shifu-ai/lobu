@@ -1,5 +1,6 @@
 import {
 	createLogger,
+	extractTraceId,
 	type MessagePayload,
 	type TrustedExecutionScope,
 } from "@lobu/core";
@@ -186,7 +187,7 @@ function resolveCourseGateTraceContext(
 	options: CourseContextGateOptions | undefined,
 ): { traceId: string; journeyId: string } {
 	const payloadTrace = parseShifuTraceHeaderValues({
-		"X-Shifu-Trace-Id": data.traceId,
+		"X-Shifu-Trace-Id": extractTraceId(data),
 	});
 	const platformTrace = parseShifuTraceHeaderValues({
 		"X-Shifu-Trace-Id": data.platformMetadata?.traceId,
