@@ -229,7 +229,14 @@ export async function readRuntimeReadModelEvents(
 			candidate.createdAt,
 		);
 		if (!completions) {
-			if (responsePlatform === "line") quarantined += 1;
+			const hasAmbiguousLegacyProof =
+				responsePlatform === "legacy" &&
+				processedMessageIdsForLookup(candidate.row.action_input).some(
+					(messageId) => (inboundProofs.get(messageId)?.matchCount ?? 0) >= 2,
+				);
+			if (responsePlatform === "line" || hasAmbiguousLegacyProof) {
+				quarantined += 1;
+			}
 			continue;
 		}
 		for (const [index, event] of completions.entries()) {

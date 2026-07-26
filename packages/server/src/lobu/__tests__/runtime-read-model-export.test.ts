@@ -363,7 +363,7 @@ describe("durable runtime read-model repair event export", () => {
 		expect(result.quarantined).toBe(2);
 	});
 
-	test("permanently quarantines triplicate LINE message ids", async () => {
+	test("permanently quarantines triplicate LINE message ids and their legacy completion", async () => {
 		const sql = getDb();
 		for (const createdAt of [
 			"2026-07-26T07:00:00.000Z",
@@ -407,7 +407,7 @@ describe("durable runtime read-model repair event export", () => {
 		expect(result.events.map((event) => event.messageId)).not.toContain(
 			"triplicate-line-message",
 		);
-		expect(result.quarantined).toBe(4);
+		expect(result.quarantined).toBe(5);
 	});
 
 	test("uses a bounded keyset source batch and resumes from its cursor", async () => {
