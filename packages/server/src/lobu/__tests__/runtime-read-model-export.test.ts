@@ -40,9 +40,9 @@ beforeEach(async () => {
 describe("durable runtime read-model repair event export", () => {
 	test("pins the bounded LINE message lookup index migration", () => {
 		const migration = fs.readFileSync(LOOKUP_MIGRATION, "utf8");
-		expect(migration).toContain("-- migrate:up");
+		expect(migration).toContain("-- migrate:up transaction:false");
 		expect(migration).toContain(
-			"CREATE INDEX IF NOT EXISTS runs_runtime_read_model_line_message_lookup",
+			"CREATE INDEX CONCURRENTLY IF NOT EXISTS runs_runtime_read_model_line_message_lookup",
 		);
 		expect(migration).toMatch(
 			/organization_id,\s*\(action_input ->> 'agentId'\),\s*\(action_input ->> 'messageId'\),\s*created_at,\s*id/,
@@ -51,9 +51,11 @@ describe("durable runtime read-model repair event export", () => {
 			"queue_name LIKE 'thread_message\\_%' ESCAPE '\\'",
 		);
 		expect(migration).toContain("action_input ->> 'platform' = 'line'");
+		expect(migration).toContain("-- migrate:down transaction:false");
 		expect(migration).toContain(
-			"DROP INDEX IF EXISTS public.runs_runtime_read_model_line_message_lookup",
+			"DROP INDEX CONCURRENTLY IF EXISTS public.runs_runtime_read_model_line_message_lookup",
 		);
+		expect(migration).toMatch(/operational cost:.*not yet measured/i);
 	});
 	test("exports the bounded projection through the organization-scoped admin PAT route", async () => {
 		const app = await buildProvisioningApp();
@@ -290,6 +292,77 @@ describe("durable runtime read-model repair event export", () => {
 		expect(result.quarantined).toBe(2);
 	});
 
+	test("ignores unrelated and legacy-unproven responses but quarantines unmapped LINE responses", async () => {
+		const sql = getDb();
+		await insertRuntimeRun(
+			sql,
+			"thread_response",
+			{
+				platform: "web",
+				processedMessageIds: ["line-message-1"],
+				finalText: "Web response must stay private.",
+				userId: "toolbox-user-1",
+				agentId: AGENT_ID,
+				conversationId: "conv-1",
+			},
+			"2026-07-26T06:10:00.000Z",
+		);
+		await insertRuntimeRun(
+			sql,
+			"thread_response",
+			{
+				platform: "slack",
+				processedMessageIds: ["line-message-1"],
+				finalText: "Slack response must stay private.",
+				userId: "toolbox-user-1",
+				agentId: AGENT_ID,
+				conversationId: "conv-1",
+			},
+			"2026-07-26T06:11:00.000Z",
+		);
+		await insertRuntimeRun(
+			sql,
+			"thread_response",
+			{
+				processedMessageIds: ["legacy-unmatched"],
+				finalText: "Legacy unproven response.",
+				userId: "toolbox-user-1",
+				agentId: AGENT_ID,
+				conversationId: "conv-1",
+			},
+			"2026-07-26T06:12:00.000Z",
+		);
+		await insertRuntimeRun(
+			sql,
+			"thread_response",
+			{
+				platform: "line",
+				processedMessageIds: ["line-unmatched"],
+				finalText: "LINE response without proof.",
+				userId: "toolbox-user-1",
+				agentId: AGENT_ID,
+				conversationId: "conv-1",
+			},
+			"2026-07-26T06:13:00.000Z",
+		);
+
+		const result = await readRuntimeReadModelEvents({
+			organizationId: ORGANIZATION_ID,
+			agentId: AGENT_ID,
+			from: FROM,
+			to: TO,
+			limit: 200,
+		});
+		expect(result.events).toHaveLength(2);
+		expect(result.events.map((event) => event.content)).not.toContain(
+			"Web response must stay private.",
+		);
+		expect(result.events.map((event) => event.content)).not.toContain(
+			"Slack response must stay private.",
+		);
+		expect(result.quarantined).toBe(2);
+	});
+
 	test("permanently quarantines triplicate LINE message ids", async () => {
 		const sql = getDb();
 		for (const createdAt of [
@@ -334,7 +407,7 @@ describe("durable runtime read-model repair event export", () => {
 		expect(result.events.map((event) => event.messageId)).not.toContain(
 			"triplicate-line-message",
 		);
-		expect(result.quarantined).toBe(5);
+		expect(result.quarantined).toBe(4);
 	});
 
 	test("uses a bounded keyset source batch and resumes from its cursor", async () => {

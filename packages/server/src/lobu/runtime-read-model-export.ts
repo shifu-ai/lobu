@@ -90,6 +90,8 @@ interface RuntimeReadModelCursor {
 	s: string;
 }
 
+type ThreadResponsePlatform = "line" | "non_line" | "legacy";
+
 /**
  * Projects only durable queue rows. It keeps no local state, so every replica
  * applies the same organization-scoped ordering and opaque cursor rules.
@@ -131,6 +133,12 @@ export async function readRuntimeReadModelEvents(
 		const createdAt = isoTimestamp(row.created_at);
 		if (!runId || !createdAt) {
 			quarantined += 1;
+			continue;
+		}
+		if (
+			row.queue_name === "thread_response" &&
+			threadResponsePlatform(row.action_input) === "non_line"
+		) {
 			continue;
 		}
 		candidates.push({ row, createdAt, runId });
@@ -212,6 +220,8 @@ export async function readRuntimeReadModelEvents(
 			continue;
 		}
 		if (candidate.row.queue_name !== "thread_response") continue;
+		const responsePlatform = threadResponsePlatform(candidate.row.action_input);
+		if (responsePlatform === "non_line") continue;
 		const completions = parseCompletions(
 			candidate.row.action_input,
 			input.agentId,
@@ -219,7 +229,7 @@ export async function readRuntimeReadModelEvents(
 			candidate.createdAt,
 		);
 		if (!completions) {
-			quarantined += 1;
+			if (responsePlatform === "line") quarantined += 1;
 			continue;
 		}
 		for (const [index, event] of completions.entries()) {
@@ -458,6 +468,11 @@ function processedMessageIdsForLookup(value: unknown): string[] {
 	return ids.every((id) => boundedString(id, MAX_IDENTIFIER_LENGTH))
 		? [...new Set(ids)]
 		: [];
+}
+
+function threadResponsePlatform(value: unknown): ThreadResponsePlatform {
+	if (!isObject(value) || typeof value.platform !== "string") return "legacy";
+	return value.platform === "line" ? "line" : "non_line";
 }
 
 function sourceBoundaryCursor(
