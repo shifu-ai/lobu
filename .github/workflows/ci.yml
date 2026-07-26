@@ -371,15 +371,36 @@ jobs:
         # These bun:test files live outside src/gateway and are also excluded
         # from vitest because they import bun:test directly.
         #
-        # Keep lobu route tests and workspace auth tests in separate Bun
-        # processes: route tests install process-global module mocks for
-        # auth/middleware, while workspace tests intentionally exercise the
-        # real auth provider. Running them in one Bun process lets the first
-        # module evaluation win the cache and makes the other suite observe the
-        # wrong auth implementation.
+        # Bun module mocks are process-global and the first module evaluation
+        # wins the cache. Keep the five files that install shared auth/store
+        # mocks in clean processes; otherwise Linux file-order changes can make
+        # later requests observe a cached production implementation and
+        # cascade into 401s. Keep the remaining tests grouped because some
+        # database-heavy files share the suite's lifecycle assumptions.
         working-directory: packages/server
         run: |
-          bun test src/lobu/__tests__
+          stable_lobu_tests="$(
+            find src/lobu/__tests__ -maxdepth 1 -name '*.test.ts' \
+              ! -name 'agent-routes-apply.test.ts' \
+              ! -name 'memory-routes.test.ts' \
+              ! -name 'onboarding-discovery-job-routes.test.ts' \
+              ! -name 'provisioning-routes.test.ts' \
+              ! -name 'toolbox-mcp-execution-routes.test.ts' \
+              | sort
+          )"
+          test -n "$stable_lobu_tests"
+          # Paths are repository-owned test filenames and cannot contain spaces.
+          # shellcheck disable=SC2086
+          bun test $stable_lobu_tests
+          for route_test in \
+            src/lobu/__tests__/agent-routes-apply.test.ts \
+            src/lobu/__tests__/memory-routes.test.ts \
+            src/lobu/__tests__/onboarding-discovery-job-routes.test.ts \
+            src/lobu/__tests__/provisioning-routes.test.ts \
+            src/lobu/__tests__/toolbox-mcp-execution-routes.test.ts
+          do
+            bun test "$route_test"
+          done
           bun test src/workspace/__tests__
 
   format-lint:
