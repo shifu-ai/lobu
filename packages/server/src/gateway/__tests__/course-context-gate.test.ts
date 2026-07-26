@@ -93,6 +93,54 @@ describe("course context gate", () => {
 		});
 		expect(fetcher).toHaveBeenCalledTimes(3);
 	});
+	test("does not retry an ordinary resolver error", async () => {
+		const fetcher = vi.fn().mockRejectedValue(new Error("toolbox unavailable"));
+
+		await expect(
+			attachCourseContextForReviewedScope(payload("設定課程"), {
+				baseUrl: "https://toolbox.test",
+				secret: "secret",
+				fetcher,
+			}),
+		).resolves.toEqual({
+			status: "context_unavailable",
+			reasonCode: "resolver_unavailable",
+		});
+		expect(fetcher).toHaveBeenCalledTimes(1);
+	});
+	test("stops after two transient resolver failures", async () => {
+		const fetcher = vi
+			.fn()
+			.mockRejectedValueOnce(new DOMException("timed out", "AbortError"))
+			.mockRejectedValueOnce(new DOMException("timed out", "AbortError"));
+
+		await expect(
+			attachCourseContextForReviewedScope(payload("設定課程"), {
+				baseUrl: "https://toolbox.test",
+				secret: "secret",
+				fetcher,
+			}),
+		).resolves.toEqual({
+			status: "context_unavailable",
+			reasonCode: "resolver_unavailable",
+		});
+		expect(fetcher).toHaveBeenCalledTimes(2);
+	});
+	test("does not retry a lookalike AbortError object", async () => {
+		const fetcher = vi.fn().mockRejectedValue({ name: "AbortError" });
+
+		await expect(
+			attachCourseContextForReviewedScope(payload("設定課程"), {
+				baseUrl: "https://toolbox.test",
+				secret: "secret",
+				fetcher,
+			}),
+		).resolves.toEqual({
+			status: "context_unavailable",
+			reasonCode: "resolver_unavailable",
+		});
+		expect(fetcher).toHaveBeenCalledTimes(1);
+	});
 	test("scheduled course A overrides conversation binding B without persisting A", async () => {
 		const data = payload("準備排程課程任務");
 		data.scheduledCourseContext = {
