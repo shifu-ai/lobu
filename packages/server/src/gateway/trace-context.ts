@@ -72,21 +72,6 @@ function normalizeHeaderName(name: string) {
   return name.toLowerCase();
 }
 
-function headerValue(headers: HeadersLike | Record<string, unknown>, name: string): string | undefined {
-  if (typeof headers.get === "function") {
-    const value = headers.get(name);
-    if (typeof value === "string" && value.trim() !== "") return value.trim();
-  }
-
-  const wanted = normalizeHeaderName(name);
-  for (const [key, value] of Object.entries(headers)) {
-    if (normalizeHeaderName(key) === wanted && typeof value === "string" && value.trim() !== "") {
-      return value.trim();
-    }
-  }
-  return undefined;
-}
-
 function isSensitiveKey(key: string) {
   const normalized = key.replace(/[^a-zA-Z0-9_]/g, "").toLowerCase();
   return sensitiveKeyFragments.some((fragment) => normalized.includes(fragment));
@@ -102,27 +87,50 @@ function sanitizeFields(fields: Record<string, unknown> = {}) {
 }
 
 function safeHeaderValue(
-  headers: HeadersLike | Record<string, unknown>,
-  name: string,
-  pattern: RegExp
+	headers: HeadersLike | Record<string, unknown>,
+	name: string,
+	pattern: RegExp
 ): string | undefined {
-  const value = headerValue(headers, name);
-  if (!value) return undefined;
-  return pattern.test(value) ? value : undefined;
+	if (typeof headers.get === "function") {
+		const value = headers.get(name);
+		if (typeof value === "string" && value.trim() !== "") {
+			const trimmed = value.trim();
+			if (pattern.test(trimmed)) return trimmed;
+		}
+	}
+
+	const wanted = normalizeHeaderName(name);
+	for (const [key, value] of Object.entries(headers)) {
+		if (normalizeHeaderName(key) !== wanted || typeof value !== "string")
+			continue;
+		const trimmed = value.trim();
+		if (trimmed && pattern.test(trimmed)) return trimmed;
+	}
+	return undefined;
+}
+
+export function parseShifuTraceHeaderValues(
+	headers: HeadersLike | Record<string, unknown>
+): { traceId?: string; journeyId?: string } {
+	return {
+		traceId: safeHeaderValue(headers, "X-Shifu-Trace-Id", TRACE_ID_PATTERN),
+		journeyId:
+			safeHeaderValue(headers, "X-Shifu-Journey-Id", JOURNEY_ID_PATTERN) ??
+			safeHeaderValue(headers, "X-Shifu-Journey", JOURNEY_ID_PATTERN),
+	};
 }
 
 export function parseShifuTraceHeaders(
   headers: HeadersLike | Record<string, unknown>,
   actor = "api"
 ): ShifuTraceContext {
-  const incomingTraceId = safeHeaderValue(headers, "X-Shifu-Trace-Id", TRACE_ID_PATTERN);
+	const values = parseShifuTraceHeaderValues(headers);
+	const incomingTraceId = values.traceId;
   return {
     traceId: incomingTraceId ?? createId("tr"),
     parentSpanId: safeHeaderValue(headers, "X-Shifu-Span-Id", SPAN_ID_PATTERN),
-    journeyId:
-      safeHeaderValue(headers, "X-Shifu-Journey-Id", JOURNEY_ID_PATTERN) ??
-      safeHeaderValue(headers, "X-Shifu-Journey", JOURNEY_ID_PATTERN) ??
-      "unknown",
+		journeyId:
+			values.journeyId ?? "unknown",
     actor,
     turnId: safeHeaderValue(headers, "X-Shifu-Turn-Id", TURN_ID_PATTERN),
     traceSource: incomingTraceId ? "incoming" : "generated_missing_header",

@@ -1,6 +1,5 @@
 import {
 	createLogger,
-	extractTraceId,
 	type MessagePayload,
 	type TrustedExecutionScope,
 } from "@lobu/core";
@@ -23,6 +22,10 @@ import {
 	emitJourneyEvent,
 	type JourneyEventPayload,
 } from "../services/journey-observability.js";
+import {
+	parseShifuTraceHeaderValues,
+	parseShifuTraceHeaders,
+} from "../trace-context.js";
 import { gradeCourseEvidenceReadiness } from "./course-evidence-readiness.js";
 import type { CourseReadinessField } from "@lobu/core";
 
@@ -151,6 +154,7 @@ function mergeReadiness(
 async function traceCourse(
 	data: MessagePayload,
 	options: CourseContextGateOptions | undefined,
+	traceContext: { traceId: string; journeyId: string },
 	event: string,
 	status: string,
 	fields: Record<string, unknown> = {},
@@ -159,13 +163,8 @@ async function traceCourse(
 	const isMemoryEvent = event.startsWith("context.memory.");
 	try {
 		void emitter({
-			trace_id:
-				extractTraceId(data) ??
-				`tr_${hashIdentity(data.messageId ?? data.conversationId).slice(0, 32)}`,
-			journey_id:
-				typeof data.platformMetadata?.journeyId === "string"
-					? data.platformMetadata.journeyId
-					: "course_context_gate",
+			trace_id: traceContext.traceId,
+			journey_id: traceContext.journeyId,
 			event,
 			service: "lobu",
 			module: "course-context-gate",
@@ -180,6 +179,37 @@ async function traceCourse(
 			...fields,
 		}).catch(() => {});
 	} catch {}
+}
+
+function resolveCourseGateTraceContext(
+	data: MessagePayload,
+	options: CourseContextGateOptions | undefined,
+): { traceId: string; journeyId: string } {
+	const payloadTrace = parseShifuTraceHeaderValues({
+		"X-Shifu-Trace-Id": data.traceId,
+	});
+	const platformTrace = parseShifuTraceHeaderValues({
+		"X-Shifu-Trace-Id": data.platformMetadata?.traceId,
+		"X-Shifu-Journey-Id": data.platformMetadata?.journeyId,
+	});
+	const callerTrace = parseShifuTraceHeaderValues(options?.traceHeaders ?? {});
+	const turnId = typeof data.platformMetadata?.turnId === "string"
+		? data.platformMetadata.turnId
+		: undefined;
+	const stableTurnIdentity = data.messageId ?? turnId;
+	return {
+		traceId:
+			payloadTrace.traceId ??
+			platformTrace.traceId ??
+			callerTrace.traceId ??
+			(stableTurnIdentity
+				? `tr_${hashIdentity(stableTurnIdentity).slice(0, 32)}`
+				: parseShifuTraceHeaders({}).traceId),
+		journeyId:
+			platformTrace.journeyId ??
+			callerTrace.journeyId ??
+			"course_context_gate",
+	};
 }
 
 function requestFailureTraceFields(error: unknown): Record<string, unknown> {
@@ -293,16 +323,11 @@ export async function attachCourseContextForReviewedScope(
 		};
 	if (!scheduled && isExplicitPersonalBypass(data))
 		return { status: "not_required" };
-	const gateStarted = Date.now();
+	const gateNow = options?.scheduler?.now ?? options?.now ?? Date.now;
+	const gateStarted = gateNow();
 	const gateDeadlineAt = gateStarted + 8000;
-	const traceId =
-		extractTraceId(data) ??
-		`tr_${hashIdentity(data.messageId ?? data.conversationId).slice(0, 32)}`;
-	const journeyId =
-		typeof data.platformMetadata?.journeyId === "string"
-			? data.platformMetadata.journeyId
-			: "course_context_gate";
-	await traceCourse(data, options, "context.gate.started", "started", {
+	const traceContext = resolveCourseGateTraceContext(data, options);
+	await traceCourse(data, options, traceContext, "context.gate.started", "started", {
 		gate_mode: process.env.COURSE_CONTEXT_GATE_MODE ?? "enforce",
 	});
 	let session = null;
@@ -509,14 +534,15 @@ export async function attachCourseContextForReviewedScope(
 		gateDeadlineAt,
 		traceHeaders: {
 			...options?.traceHeaders,
-			"X-Shifu-Trace-Id": traceId,
-			"X-Shifu-Journey-Id": journeyId,
+			"X-Shifu-Trace-Id": traceContext.traceId,
+			"X-Shifu-Journey-Id": traceContext.journeyId,
 		},
 		onAttempt: async (attemptEvent) => {
 			await options?.onAttempt?.(attemptEvent);
 			await traceCourse(
 				data,
 				options,
+				traceContext,
 				"context.course.request_attempt",
 				attemptEvent.outcome === "retrying"
 					? "degraded"
@@ -574,10 +600,11 @@ export async function attachCourseContextForReviewedScope(
 		await traceCourse(
 			data,
 			options,
+			traceContext,
 			`context.course.${resolution.status}`,
 			"ok",
 			{
-				duration_ms: Date.now() - gateStarted,
+				duration_ms: gateNow() - gateStarted,
 				...(resolution.status === "resolved"
 					? {
 							course_key: resolution.course.courseKey,
@@ -592,7 +619,7 @@ export async function attachCourseContextForReviewedScope(
 			{ category: "resolver" },
 			"Course context resolver unavailable",
 		);
-		await traceCourse(data, options, "context.course.missing", "failed", {
+		await traceCourse(data, options, traceContext, "context.course.missing", "failed", {
 			reason_code: "resolver_unavailable",
 			...requestFailureTraceFields(error),
 		});
@@ -669,14 +696,14 @@ export async function attachCourseContextForReviewedScope(
 			ownerUserId: data.userId,
 			agentId: data.agentId,
 		});
-		await traceCourse(data, options, "context.bundle.loaded", "ok", {
+		await traceCourse(data, options, traceContext, "context.bundle.loaded", "ok", {
 			course_key: course.courseKey,
 			course_entity_id: course.courseEntityId,
 			context_version: bundle.context.version,
 		});
 	} catch (error) {
 		logger.warn({ category: "bundle" }, "Course context bundle unavailable");
-		await traceCourse(data, options, "context.bundle.failed", "failed", {
+		await traceCourse(data, options, traceContext, "context.bundle.failed", "failed", {
 			course_key: course.courseKey,
 			reason_code: "bundle_unavailable",
 			...requestFailureTraceFields(error),
@@ -758,6 +785,7 @@ export async function attachCourseContextForReviewedScope(
 	await traceCourse(
 		data,
 		options,
+		traceContext,
 		`context.memory.${retrieval.status}`,
 		retrieval.status === "degraded"
 			? "degraded"
@@ -774,6 +802,7 @@ export async function attachCourseContextForReviewedScope(
 	await traceCourse(
 		data,
 		options,
+		traceContext,
 		`context.guard.${retrieval.crossCourseGuard}`,
 		retrieval.crossCourseGuard === "passed" ? "ok" : "failed",
 		{ course_entity_id: course.courseEntityId },
@@ -876,6 +905,7 @@ export async function attachCourseContextForReviewedScope(
 	await traceCourse(
 		data,
 		options,
+		traceContext,
 		`context.binding.${bindingSucceeded ? "updated" : "failed"}`,
 		bindingSucceeded ? "ok" : "failed",
 		{

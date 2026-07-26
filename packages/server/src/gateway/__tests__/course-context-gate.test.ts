@@ -1548,6 +1548,77 @@ describe("course context gate", () => {
 		expect(fetcher).toHaveBeenCalledTimes(1);
 	});
 
+	test("shares one eight-second gate deadline across resolver and bundle", async () => {
+		const scheduler = deterministicScheduler();
+		let calls = 0;
+		const attempts: number[] = [];
+		const fetcher = vi.fn((_url: string, init?: RequestInit) => {
+			calls += 1;
+			if (calls === 2)
+				return new Promise<Response>((resolve) => {
+					scheduler.setTimeout(
+						() => resolve(new Response(JSON.stringify({
+							status: "resolved", confidence: "high",
+							matchedBy: ["single_course_default"],
+							course: { courseKey: "x", courseEntityId: "course:x", displayName: "X" },
+						}))),
+						1900,
+					);
+				});
+			return new Promise<Response>((_resolve, reject) => {
+				(init?.signal as AbortSignal).addEventListener("abort", () =>
+					reject(new DOMException("timed out", "AbortError")),
+				);
+			});
+		});
+		const gate = attachCourseContextForReviewedScope(payload("課程資料"), {
+			baseUrl: "https://toolbox.test",
+			secret: "secret",
+			fetcher,
+			scheduler,
+			random: () => 0,
+			onAttempt: (event) => {
+				attempts.push(event.attempt);
+			},
+		});
+		let settled = false;
+		void gate.finally(() => {
+			settled = true;
+		});
+
+		for (let index = 0; index < 4; index += 1)
+			await scheduler.advanceBy(0);
+		expect(fetcher).toHaveBeenCalledTimes(1);
+		await scheduler.advanceBy(2250);
+		expect(attempts).toEqual([1]);
+		await scheduler.advanceBy(100);
+		for (let index = 0; index < 4; index += 1)
+			await scheduler.advanceBy(0);
+		expect(fetcher).toHaveBeenCalledTimes(2);
+		await scheduler.advanceBy(1900);
+		for (let index = 0; index < 4; index += 1)
+			await scheduler.advanceBy(0);
+		expect(fetcher).toHaveBeenCalledTimes(3);
+		await scheduler.advanceBy(2250);
+		for (let index = 0; index < 4; index += 1)
+			await scheduler.advanceBy(0);
+		await scheduler.advanceBy(100);
+		for (let index = 0; index < 4; index += 1)
+			await scheduler.advanceBy(0);
+		expect(fetcher).toHaveBeenCalledTimes(4);
+		await scheduler.advanceBy(1400);
+		for (let index = 0; index < 4; index += 1)
+			await scheduler.advanceBy(0);
+
+		expect(settled).toBe(true);
+		await expect(gate).resolves.toMatchObject({
+			status: "context_unavailable",
+			reasonCode: "bundle_unavailable",
+		});
+		expect(fetcher).toHaveBeenCalledTimes(4);
+		expect(scheduler.now()).toBe(8000);
+	});
+
 	test("settles an abort-ignoring fetch at the attempt deadline", async () => {
 		const scheduler = deterministicScheduler();
 		const fetcher = vi.fn(() => new Promise<Response>(() => {}));

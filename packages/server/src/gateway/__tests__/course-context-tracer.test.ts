@@ -6,6 +6,21 @@ import { gradeCourseEvidenceReadiness } from '../orchestration/course-evidence-r
 
 process.env.ENCRYPTION_KEY ??= '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
+function canonicalCourseContextResponses() {
+  return [
+    new Response(JSON.stringify({ status: 'resolved', confidence: 'high', matchedBy: ['single_course_default'], course: { courseKey: 'x', courseEntityId: 'course:x', displayName: 'X' } })),
+    new Response(JSON.stringify({ course: { courseKey: 'x', courseEntityId: 'course:x', displayName: 'X', aliases: [], status: 'active' }, profile: { pmRole: null, teacher: null, collaborators: [], audience: null, coursePromise: null, resourceLocations: {} }, context: { agentMd: 'safe', contextPackId: 'p', version: 1, confidence: 'high', generatedAt: '2026-07-11T00:00:00Z', lastIndexedAt: null, stale: false }, evidence: { confirmed: [], candidates: [] } })),
+  ];
+}
+
+async function traceGate(payload: MessagePayload, options: Record<string, unknown> = {}) {
+  const events: Array<Record<string, unknown>> = [];
+  const fetcher = vi.fn();
+  for (const response of canonicalCourseContextResponses()) fetcher.mockResolvedValueOnce(response);
+  await attachCourseContextForReviewedScope(payload, { baseUrl: 'https://toolbox.test', secret: 'secret', fetcher, traceEmitter: async event => { events.push(event); }, ...options });
+  return { events, fetcher };
+}
+
 describe('course context tracer', () => {
   it.each([
     ['personal',{status:'not_required'},'none'],
@@ -106,6 +121,50 @@ describe('course context tracer', () => {
       expect(event).not.toHaveProperty('course_key');
       expect(event).not.toHaveProperty('course_entity_id');
     }
+  });
+
+  it('prefers valid payload trace and journey IDs over caller headers', async () => {
+    const { events, fetcher } = await traceGate({ userId: 'u', agentId: 'a', conversationId: 'c', messageId: 'm', messageText: '課程資料', traceId: 'tr_payload_12345678', platformMetadata: { journeyId: 'line_text_agent_turn' } } as MessagePayload, { traceHeaders: { 'X-Shifu-Trace-Id': 'tr_caller_12345678', 'X-Shifu-Journey-Id': 'caller_journey' } });
+    for (const [, init] of fetcher.mock.calls) {
+      const headers = (init as RequestInit).headers as Headers;
+      expect(headers.get('x-shifu-trace-id')).toBe('tr_payload_12345678');
+      expect(headers.get('x-shifu-journey-id')).toBe('line_text_agent_turn');
+    }
+    expect(events.map(event => [event.trace_id, event.journey_id])).toEqual(expect.arrayContaining([['tr_payload_12345678', 'line_text_agent_turn']]));
+  });
+
+  it('preserves valid mixed-case caller trace headers when payload IDs are absent', async () => {
+    const { events, fetcher } = await traceGate({ userId: 'u', agentId: 'a', conversationId: 'c', messageId: 'm', messageText: '課程資料', platformMetadata: {} } as MessagePayload, { traceHeaders: { 'x-shifu-trace-id': 'unsafe caller value', 'x-sHiFu-tRaCe-Id': 'tr_caller_12345678', 'x-shifu-journey-id': 'unsafe caller journey', 'X-sHiFu-JoUrNeY-Id': 'line_text_agent_turn' } });
+    for (const [, init] of fetcher.mock.calls) {
+      const headers = (init as RequestInit).headers as Headers;
+      expect(headers.get('X-Shifu-Trace-Id')).toBe('tr_caller_12345678');
+      expect(headers.get('X-Shifu-Journey-Id')).toBe('line_text_agent_turn');
+    }
+    expect(events.every(event => event.trace_id === 'tr_caller_12345678' && event.journey_id === 'line_text_agent_turn')).toBe(true);
+  });
+
+  it('never forwards unsafe payload or caller trace values', async () => {
+    const unsafe = 'secret@example.com unsafe value';
+    const { events, fetcher } = await traceGate({ userId: 'u', agentId: 'a', conversationId: 'c', messageId: 'm', messageText: '課程資料', traceId: unsafe, platformMetadata: { journeyId: unsafe } } as MessagePayload, { traceHeaders: { 'x-shifu-trace-id': unsafe, 'X-Shifu-Journey-Id': unsafe } });
+    for (const [, init] of fetcher.mock.calls) {
+      const headers = (init as RequestInit).headers as Headers;
+      expect(headers.get('X-Shifu-Trace-Id')).not.toContain(unsafe);
+      expect(headers.get('X-Shifu-Journey-Id')).toBe('course_context_gate');
+    }
+    expect(JSON.stringify(events)).not.toContain(unsafe);
+    expect(events.every(event => event.journey_id === 'course_context_gate')).toBe(true);
+  });
+
+  it('generates one fresh trace per no-message gate invocation and reuses it within that gate', async () => {
+    const payload = () => ({ userId: 'u', agentId: 'a', conversationId: 'shared-conversation', messageText: '課程資料', platformMetadata: {} } as MessagePayload);
+    const first = await traceGate(payload());
+    const second = await traceGate(payload());
+    const traceIds = (result: Awaited<ReturnType<typeof traceGate>>) => result.fetcher.mock.calls.map(([, init]) => ((init as RequestInit).headers as Headers).get('X-Shifu-Trace-Id'));
+    expect(new Set(traceIds(first)).size).toBe(1);
+    expect(new Set(traceIds(second)).size).toBe(1);
+    expect(traceIds(first)[0]).not.toBe(traceIds(second)[0]);
+    expect(new Set(first.events.map(event => event.trace_id))).toEqual(new Set(traceIds(first)));
+    expect(new Set(second.events.map(event => event.trace_id))).toEqual(new Set(traceIds(second)));
   });
 
   it('enriches the actual MessageConsumer dispatch payload in resolve-arm-send order', async () => {
