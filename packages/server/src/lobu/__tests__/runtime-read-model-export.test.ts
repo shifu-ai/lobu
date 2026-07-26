@@ -13,6 +13,9 @@ import {
 	readRuntimeReadModelEvents,
 } from "../runtime-read-model-export.js";
 import { orgContext } from "../stores/org-context.js";
+import { installRouteAuthTestMock } from "./helpers/route-test-mocks.js";
+
+installRouteAuthTestMock();
 
 const ORGANIZATION_ID = "org-runtime-read-model";
 const OTHER_ORGANIZATION_ID = "org-runtime-read-model-other";
