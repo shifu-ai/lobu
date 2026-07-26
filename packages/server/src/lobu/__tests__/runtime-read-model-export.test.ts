@@ -9,11 +9,14 @@ import {
 	seedAgentRow,
 } from "../../gateway/__tests__/helpers/db-setup.js";
 import {
-  RuntimeReadModelValidationError,
-  readRuntimeReadModelEvents,
+	RuntimeReadModelValidationError,
+	readRuntimeReadModelEvents,
 } from "../runtime-read-model-export.js";
 import { createRuntimeReadModelRoutes } from "../runtime-read-model-routes.js";
 import { orgContext } from "../stores/org-context.js";
+import { installRouteAuthTestMock } from "./helpers/route-test-mocks.js";
+
+installRouteAuthTestMock();
 
 const ORGANIZATION_ID = "org-runtime-read-model";
 const OTHER_ORGANIZATION_ID = "org-runtime-read-model-other";
