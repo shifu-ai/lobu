@@ -9,13 +9,11 @@ import {
 	seedAgentRow,
 } from "../../gateway/__tests__/helpers/db-setup.js";
 import {
-	RuntimeReadModelValidationError,
-	readRuntimeReadModelEvents,
+  RuntimeReadModelValidationError,
+  readRuntimeReadModelEvents,
 } from "../runtime-read-model-export.js";
+import { createRuntimeReadModelRoutes } from "../runtime-read-model-routes.js";
 import { orgContext } from "../stores/org-context.js";
-import { installRouteAuthTestMock } from "./helpers/route-test-mocks.js";
-
-installRouteAuthTestMock();
 
 const ORGANIZATION_ID = "org-runtime-read-model";
 const OTHER_ORGANIZATION_ID = "org-runtime-read-model-other";
@@ -496,22 +494,19 @@ describe("durable runtime read-model repair event export", () => {
 });
 
 async function buildProvisioningApp(
-	scopes: string[] = ["mcp:admin"],
-	organizationId = ORGANIZATION_ID,
+  scopes: string[] = ["mcp:admin"],
+  organizationId = ORGANIZATION_ID,
 ) {
-	const { createProvisioningRoutes } = await import(
-		"../provisioning-routes.js"
-	);
-	const app = new Hono();
+  const app = new Hono();
 	app.use("*", async (c, next) => {
 		c.set("session", { id: "pat:runtime-read-model-test" });
 		c.set("organizationId", organizationId);
 		c.set("authSource", "pat");
 		c.set("mcpAuthInfo", { scopes });
 		return orgContext.run({ organizationId }, next);
-	});
-	app.route("/api/provisioning", createProvisioningRoutes());
-	return app;
+  });
+  app.route("/api/provisioning", createRuntimeReadModelRoutes());
+  return app;
 }
 
 async function seedOrg(organizationId: string): Promise<void> {

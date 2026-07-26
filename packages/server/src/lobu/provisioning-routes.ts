@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 import type { AgentSettings, StoredConnection } from "@lobu/core";
-import { type Context, Hono } from "hono";
+import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { canonicalize } from "json-canonicalize";
 import type { McpConfigService } from "../gateway/auth/mcp/config-service.js";
@@ -50,10 +50,8 @@ import {
   createPostgresEffectiveToolInventoryStore,
   createReleaseAssuranceReadback,
 } from "./release-assurance-readback.js";
-import {
-  readRuntimeReadModelEvents,
-  RuntimeReadModelValidationError,
-} from "./runtime-read-model-export.js";
+import { requireAdminPat } from "./provisioning-auth.js";
+import { createRuntimeReadModelRoutes } from "./runtime-read-model-routes.js";
 
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
 const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
@@ -107,30 +105,6 @@ interface ProvisioningRoutesOptions {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function requireAdminPat(c: Context<{ Bindings: Env }>): Response | null {
-  const session = c.get("session") as { id?: string } | null;
-  const authSource = c.get("authSource") as "pat" | "session" | "oauth" | null;
-  const authInfo = c.get("mcpAuthInfo") as { scopes?: string[] } | null;
-  const scopes = Array.isArray(authInfo?.scopes) ? authInfo.scopes : [];
-
-  if (
-    authSource === "pat" &&
-    session?.id?.startsWith("pat:") &&
-    scopes.includes("mcp:admin")
-  ) {
-    return null;
-  }
-
-  return c.json(
-    {
-      error: "forbidden",
-      error_description:
-        "Provisioning requires an organization-scoped PAT with mcp:admin scope.",
-    },
-    403
-  );
 }
 
 function validateSettings(settings: unknown): Omit<AgentSettings, "updatedAt"> {
@@ -732,45 +706,7 @@ export function createProvisioningRoutes(
     });
   });
 
-  provisioningRoutes.get(
-    "/agents/:agentId/runtime-read-model-events",
-    async (c) => {
-      const denied = requireAdminPat(c);
-      if (denied) return denied;
-
-      const organizationId = c.get("organizationId") as string | null;
-      if (!organizationId)
-        return c.json({ error: "Authentication required" }, 401);
-
-      const agentId = c.req.param("agentId")?.trim() ?? "";
-      const agentIdError = validateShifuAgentId(agentId);
-      if (agentIdError) return c.json({ error: "invalid_agent_id" }, 400);
-
-      const from = c.req.query("from") ?? "";
-      const to = c.req.query("to") ?? "";
-      const rawLimit = c.req.query("limit");
-      const limit = rawLimit === undefined ? Number.NaN : Number(rawLimit);
-      const cursor = c.req.query("cursor");
-      try {
-        return c.json(
-          await readRuntimeReadModelEvents({
-            organizationId,
-            agentId,
-            from,
-            to,
-            limit,
-            cursor: cursor || undefined,
-          }),
-          200,
-        );
-      } catch (error) {
-        if (error instanceof RuntimeReadModelValidationError) {
-          return c.json({ error: error.code }, 400);
-        }
-        throw error;
-      }
-    },
-  );
+  provisioningRoutes.route("/", createRuntimeReadModelRoutes());
 
   provisioningRoutes.put(
     "/agents/:agentId/managed-settings",
