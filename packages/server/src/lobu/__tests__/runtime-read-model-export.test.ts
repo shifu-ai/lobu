@@ -1,4 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import fs from "node:fs";
+import path from "node:path";
 import { Hono } from "hono";
 import { type DbClient, getDb } from "../../db/client.js";
 import {
@@ -18,6 +20,10 @@ const AGENT_ID = "shifu-u-user-1";
 const OTHER_AGENT_ID = "shifu-u-user-2";
 const FROM = "2026-07-26T00:00:00.000Z";
 const TO = "2026-07-27T00:00:00.000Z";
+const LOOKUP_MIGRATION = path.resolve(
+	__dirname,
+	"../../../../../db/migrations/20260727120000_runtime_read_model_line_lookup.sql",
+);
 
 beforeAll(async () => {
 	await ensureDbForGatewayTests();
@@ -32,6 +38,23 @@ beforeEach(async () => {
 });
 
 describe("durable runtime read-model repair event export", () => {
+	test("pins the bounded LINE message lookup index migration", () => {
+		const migration = fs.readFileSync(LOOKUP_MIGRATION, "utf8");
+		expect(migration).toContain("-- migrate:up");
+		expect(migration).toContain(
+			"CREATE INDEX IF NOT EXISTS runs_runtime_read_model_line_message_lookup",
+		);
+		expect(migration).toMatch(
+			/organization_id,\s*\(action_input ->> 'agentId'\),\s*\(action_input ->> 'messageId'\),\s*created_at,\s*id/,
+		);
+		expect(migration).toContain(
+			"queue_name LIKE 'thread_message\\_%' ESCAPE '\\'",
+		);
+		expect(migration).toContain("action_input ->> 'platform' = 'line'");
+		expect(migration).toContain(
+			"DROP INDEX IF EXISTS public.runs_runtime_read_model_line_message_lookup",
+		);
+	});
 	test("exports the bounded projection through the organization-scoped admin PAT route", async () => {
 		const app = await buildProvisioningApp();
 		const response = await app.request(
@@ -346,13 +369,18 @@ describe("durable runtime read-model repair event export", () => {
 		const fakeSql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
 			const text = strings.join("?");
 			calls.push({ text, values });
-			if (text.includes("GROUP BY")) {
+			if (text.includes("LATERAL")) {
 				return Promise.resolve([
-					{ message_id: "batch-message-1", occurrences: 1 },
+					{
+						message_id: "batch-message-1",
+						match_count: 1,
+						run_id: 11,
+						created_at: new Date("2026-07-26T01:00:00.000Z"),
+						queue_name: "thread_message_lobu-worker-1",
+						action_input: rows[0]?.action_input,
+					},
 				]);
 			}
-			if (text.includes("DISTINCT ON"))
-				return Promise.resolve(rows.slice(0, 1));
 			return Promise.resolve(rows);
 		}) as unknown as DbClient;
 
@@ -368,6 +396,9 @@ describe("durable runtime read-model repair event export", () => {
 		const sourceCall = calls[0];
 		expect(sourceCall?.text).toContain("LIMIT ?");
 		expect(sourceCall?.values.at(-1)).toBeGreaterThanOrEqual(1);
+		expect(calls.some((call) => call.text.includes("LATERAL"))).toBe(true);
+		expect(calls.some((call) => call.text.includes("LIMIT 2"))).toBe(true);
+		expect(calls.some((call) => call.text.includes("GROUP BY"))).toBe(false);
 
 		await readRuntimeReadModelEvents({
 			organizationId: ORGANIZATION_ID,
@@ -378,8 +409,10 @@ describe("durable runtime read-model repair event export", () => {
 			cursor: first.nextCursor ?? undefined,
 			sql: fakeSql,
 		});
-		const sourceCalls = calls.filter((call) =>
-			call.text.includes("ORDER BY created_at ASC, id ASC"),
+		const sourceCalls = calls.filter(
+			(call) =>
+				call.text.includes("FROM public.runs") &&
+				!call.text.includes("LATERAL"),
 		);
 		expect(sourceCalls).toHaveLength(2);
 		expect(sourceCalls[1]?.text).toContain("id >= ?");

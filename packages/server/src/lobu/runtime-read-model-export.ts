@@ -13,6 +13,7 @@ const MAX_SOURCE_BATCH_ROWS = 1024;
 const MIN_SOURCE_BATCH_ROWS = 64;
 const SOURCE_ROWS_PER_OUTPUT_EVENT = 8;
 const SOURCE_BOUNDARY_EVENT_INDEX = MAX_PROCESSED_MESSAGE_IDS + 1;
+const MAX_LOOKUP_MESSAGE_IDS = MAX_SOURCE_BATCH_ROWS;
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]{1,51}$/;
 
 export interface RuntimeReadModelRepairEvent {
@@ -60,9 +61,9 @@ interface DurableRunRow {
 	action_input: unknown;
 }
 
-interface InboundCollisionRow {
+interface InboundProofRow extends DurableRunRow {
 	message_id: string;
-	occurrences: number | string;
+	match_count: number | string | null;
 }
 
 interface InboundSource {
@@ -115,7 +116,9 @@ export async function readRuntimeReadModelEvents(
 	);
 
 	const inboundByRunId = new Map<number, InboundSource>();
-	const messageIdsNeedingProof = new Set<string>();
+	const messageIdsNeedingProof: string[] = [];
+	const proofMessageIdSet = new Set<string>();
+	const unprovedInboundRunIds = new Set<number>();
 	const candidates: Array<{
 		row: DurableRunRow;
 		createdAt: string;
@@ -141,49 +144,54 @@ export async function readRuntimeReadModelEvents(
 				continue;
 			}
 			inboundByRunId.set(runId, source);
-			messageIdsNeedingProof.add(source.messageId);
+			if (
+				!addProofMessageId(
+					messageIdsNeedingProof,
+					proofMessageIdSet,
+					source.messageId,
+				)
+			) {
+				unprovedInboundRunIds.add(runId);
+			}
 			continue;
 		}
 		if (row.queue_name === "thread_response") {
 			for (const messageId of processedMessageIdsForLookup(row.action_input)) {
-				messageIdsNeedingProof.add(messageId);
+				addProofMessageId(messageIdsNeedingProof, proofMessageIdSet, messageId);
 			}
 		}
 	}
-	const collisionCounts = await readInboundCollisionCounts(
+	const inboundProofs = await readInboundProofs(
 		sql,
 		input,
 		validated,
-		[...messageIdsNeedingProof],
+		messageIdsNeedingProof,
 	);
 	const inboundByMessageId = new Map<string, InboundSource>();
-	for (const source of inboundByRunId.values()) {
-		if (collisionCounts.get(source.messageId) !== 1) {
+	for (const [runId, source] of inboundByRunId) {
+		if (
+			unprovedInboundRunIds.has(runId) ||
+			inboundProofs.get(source.messageId)?.matchCount !== 1
+		) {
 			quarantined += 1;
 			continue;
 		}
 		inboundByMessageId.set(source.messageId, source);
 	}
-	const missingInboundMessageIds = [...messageIdsNeedingProof].filter(
+	const missingInboundMessageIds = messageIdsNeedingProof.filter(
 		(messageId) =>
-			collisionCounts.get(messageId) === 1 &&
+			inboundProofs.get(messageId)?.matchCount === 1 &&
 			!inboundByMessageId.has(messageId),
 	);
-	if (missingInboundMessageIds.length > 0) {
-		const inbounds = await readInboundSources(
-			sql,
-			input,
-			validated,
-			missingInboundMessageIds,
-		);
-		for (const row of inbounds) {
-			const createdAt = isoTimestamp(row.created_at);
-			const source = createdAt
-				? parseInbound(row.action_input, input.agentId, createdAt)
-				: null;
-			if (!source || collisionCounts.get(source.messageId) !== 1) continue;
-			inboundByMessageId.set(source.messageId, source);
-		}
+	for (const messageId of missingInboundMessageIds) {
+		const proof = inboundProofs.get(messageId);
+		if (!proof) continue;
+		const createdAt = isoTimestamp(proof.created_at);
+		const source = createdAt
+			? parseInbound(proof.action_input, input.agentId, createdAt)
+			: null;
+		if (!source || proof.matchCount !== 1) continue;
+		inboundByMessageId.set(source.messageId, source);
 	}
 
 	const projected: ProjectedEvent[] = [];
@@ -371,49 +379,76 @@ async function readSourceBatch(
 	`;
 }
 
-async function readInboundCollisionCounts(
-	sql: DbClient,
-	input: RuntimeReadModelEventsInput,
-	window: { from: Date; to: Date },
-	messageIds: string[],
-): Promise<Map<string, number>> {
-	if (messageIds.length === 0) return new Map();
-	const rows = await sql<InboundCollisionRow>`
-		SELECT action_input ->> 'messageId' AS message_id, COUNT(*) AS occurrences
-		FROM public.runs
-		WHERE organization_id = ${input.organizationId}
-			AND created_at >= ${window.from.toISOString()}
-			AND created_at < ${window.to.toISOString()}
-			AND action_input ->> 'agentId' = ${input.agentId}
-			AND queue_name LIKE 'thread_message\\_%' ESCAPE '\\'
-			AND action_input ->> 'platform' = 'line'
-			AND action_input ->> 'messageId' = ANY(${pgTextArray(messageIds)}::text[])
-		GROUP BY action_input ->> 'messageId'
-		LIMIT ${messageIds.length}
-	`;
-	return new Map(rows.map((row) => [row.message_id, Number(row.occurrences)]));
+interface InboundProof {
+	matchCount: number;
+	created_at: Date | string;
+	action_input: unknown;
 }
 
-async function readInboundSources(
+async function readInboundProofs(
 	sql: DbClient,
 	input: RuntimeReadModelEventsInput,
 	window: { from: Date; to: Date },
 	messageIds: string[],
-): Promise<DurableRunRow[]> {
-	return sql<DurableRunRow>`
-		SELECT DISTINCT ON (action_input ->> 'messageId')
-			id AS run_id, created_at, queue_name, action_input
-		FROM public.runs
-		WHERE organization_id = ${input.organizationId}
-			AND created_at >= ${window.from.toISOString()}
-			AND created_at < ${window.to.toISOString()}
-			AND action_input ->> 'agentId' = ${input.agentId}
-			AND queue_name LIKE 'thread_message\\_%' ESCAPE '\\'
-			AND action_input ->> 'platform' = 'line'
-			AND action_input ->> 'messageId' = ANY(${pgTextArray(messageIds)}::text[])
-		ORDER BY action_input ->> 'messageId', created_at ASC, id ASC
+): Promise<Map<string, InboundProof>> {
+	if (messageIds.length === 0) return new Map();
+	const rows = await sql<InboundProofRow>`
+		WITH requested(message_id) AS (
+			SELECT unnest(${pgTextArray(messageIds)}::text[])
+		)
+		SELECT requested.message_id,
+			proof.match_count,
+			proof.run_id,
+			proof.created_at,
+			proof.queue_name,
+			proof.action_input
+		FROM requested
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*) OVER () AS match_count,
+				matches.id AS run_id,
+				matches.created_at,
+				matches.queue_name,
+				matches.action_input
+			FROM (
+				SELECT id, created_at, queue_name, action_input
+				FROM public.runs
+				WHERE organization_id = ${input.organizationId}
+					AND created_at >= ${window.from.toISOString()}
+					AND created_at < ${window.to.toISOString()}
+					AND action_input ->> 'agentId' = ${input.agentId}
+					AND action_input ->> 'messageId' = requested.message_id
+					AND queue_name LIKE 'thread_message\\_%' ESCAPE '\\'
+					AND action_input ->> 'platform' = 'line'
+				ORDER BY created_at ASC, id ASC
+				LIMIT 2
+			) AS matches
+			ORDER BY matches.created_at ASC, matches.id ASC
+			LIMIT 1
+		) AS proof ON true
 		LIMIT ${messageIds.length}
 	`;
+	return new Map(
+		rows.map((row) => [
+			row.message_id,
+			{
+				matchCount: Number(row.match_count ?? 0),
+				created_at: row.created_at,
+				action_input: row.action_input,
+			},
+		]),
+	);
+}
+
+function addProofMessageId(
+	messageIds: string[],
+	knownIds: Set<string>,
+	messageId: string,
+): boolean {
+	if (knownIds.has(messageId)) return true;
+	if (messageIds.length >= MAX_LOOKUP_MESSAGE_IDS) return false;
+	knownIds.add(messageId);
+	messageIds.push(messageId);
+	return true;
 }
 
 function processedMessageIdsForLookup(value: unknown): string[] {
