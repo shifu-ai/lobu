@@ -1,7 +1,14 @@
+import {
+	type CourseContextFailureClass,
+	type CourseContextRequestPolicy,
+	DEFAULT_COURSE_CONTEXT_REQUEST_POLICY,
+	retryableCourseContextFailure,
+	ToolboxCourseContextRequestError,
+} from "./course-context-request-policy.js";
+
 type Fetcher = typeof fetch;
 const MAX_ID = 200; const MAX_AGENT_MD = 50000;
 export class ToolboxCourseContextResponseError extends Error { readonly code = 'invalid_toolbox_course_context_response'; }
-function isTransientRequestFailure(error: unknown): boolean { return error instanceof DOMException && error.name === 'AbortError'; }
 function obj(v: unknown): Record<string, unknown> { if (!v || typeof v !== 'object' || Array.isArray(v)) throw new ToolboxCourseContextResponseError(); return v as Record<string, unknown>; }
 function str(v: unknown, max = MAX_ID): string { if (typeof v !== 'string' || !v.trim() || v.length > max) throw new ToolboxCourseContextResponseError(); return v; }
 function course(v: unknown) { const x = obj(v); return { courseKey: str(x.courseKey), courseEntityId: str(x.courseEntityId), displayName: str(x.displayName,500) }; }
@@ -31,39 +38,239 @@ function parseResolution(v: unknown): ValidCourseResolution {
 }
 function parseBundle(v: unknown): ValidBundle { const x=obj(v); const parsedProfile=profile(x.profile); const c=obj(x.context); const evidence=obj(x.evidence); const version=c.version; if(!Number.isInteger(version)||(version as number)<=0||typeof c.stale!=='boolean'||(c.confidence!=='high'&&c.confidence!=='medium'&&c.confidence!=='low')||!Array.isArray(evidence.confirmed)||!Array.isArray(evidence.candidates)||evidence.confirmed.length>100||evidence.candidates.length>100)throw new ToolboxCourseContextResponseError(); const confirmed=evidence.confirmed.map(evidenceRef); const candidates=evidence.candidates.map(evidenceRef); return {course:canonicalCourse(x.course),profile:parsedProfile,context:{agentMd:str(c.agentMd,MAX_AGENT_MD),contextPackId:str(c.contextPackId),version:version as number,confidence:c.confidence,generatedAt:str(c.generatedAt),lastIndexedAt:nullable(c.lastIndexedAt),stale:c.stale},evidence:{confirmed,candidates}}; }
 
-export type ToolboxCourseContextClientOptions = { baseUrl: string; secret: string; timeoutMs?: number; fetcher?: Fetcher };
+class ToolboxCourseContextHttpError extends Error {
+	constructor(readonly status: number) {
+		super(`Toolbox course context request failed (${status})`);
+		this.name = "ToolboxCourseContextHttpError";
+	}
+}
+
+function classifyRequestFailure(error: unknown):
+	| {
+			failureClass: CourseContextFailureClass;
+			upstreamStatus?: number;
+	  }
+	| undefined {
+	if (error instanceof ToolboxCourseContextHttpError) {
+		return {
+			failureClass: error.status >= 500 ? "upstream_5xx" : "upstream_4xx",
+			upstreamStatus: error.status,
+		};
+	}
+	if (error instanceof DOMException && error.name === "AbortError")
+		return { failureClass: "timeout" };
+	if (error instanceof TypeError) return { failureClass: "network" };
+	if (error instanceof ToolboxCourseContextResponseError)
+		return { failureClass: "invalid_contract" };
+	return undefined;
+}
+
+export type CourseContextAttemptEvent = {
+	attempt: number;
+	attemptTimeoutMs: number;
+	totalDurationMs: number;
+	failureClass?: CourseContextFailureClass;
+	upstreamStatus?: number;
+	retrying: boolean;
+};
+
+export type ToolboxCourseContextClientOptions = {
+	baseUrl: string;
+	secret: string;
+	fetcher?: Fetcher;
+	policy?: Partial<CourseContextRequestPolicy>;
+	gateDeadlineAt?: number;
+	traceHeaders?: Record<string, string>;
+	now?: () => number;
+	sleep?: (ms: number) => Promise<void>;
+	random?: () => number;
+	onAttempt?: (event: CourseContextAttemptEvent) => void | Promise<void>;
+};
 
 export class ToolboxCourseContextClient {
-  constructor(private readonly options: ToolboxCourseContextClientOptions) {}
+	private readonly policy: CourseContextRequestPolicy;
+	private readonly now: () => number;
+	private readonly sleep: (ms: number) => Promise<void>;
+	private readonly random: () => number;
 
-  private async request(path: string, init?: RequestInit): Promise<unknown> {
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        return await this.requestAttempt(path, init);
-      } catch (error) {
-        lastError = error;
-        if (attempt === 2 || !isTransientRequestFailure(error)) throw error;
-      }
-    }
-    throw lastError;
-  }
+	constructor(private readonly options: ToolboxCourseContextClientOptions) {
+		this.policy = {
+			...DEFAULT_COURSE_CONTEXT_REQUEST_POLICY,
+			...options.policy,
+		};
+		this.now = options.now ?? Date.now;
+		this.sleep =
+			options.sleep ??
+			((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+		this.random = options.random ?? Math.random;
+	}
 
-  private async requestAttempt(path: string, init?: RequestInit): Promise<unknown> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 1500);
-    try {
-      const response = await (this.options.fetcher ?? fetch)(`${this.options.baseUrl.replace(/\/$/, '')}${path}`, { ...init, signal: controller.signal, headers: { ...init?.headers, 'x-internal-secret': this.options.secret } });
-      if (!response.ok) throw new Error(`Toolbox course context request failed (${response.status})`);
-      try { return JSON.parse(await response.text()); } catch { throw new ToolboxCourseContextResponseError(); }
-    } finally { clearTimeout(timeout); }
-  }
+	private emitAttempt(event: CourseContextAttemptEvent): void {
+		try {
+			void Promise.resolve(this.options.onAttempt?.(event)).catch(() => {});
+		} catch {}
+	}
 
-  async resolve(input: { ownerUserId: string; agentId: string; conversationId: string; message: string; boundCourseKey?: string; explicitCourseKey?: string }) {
-    return parseResolution(await this.request('/internal/resolve', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }));
-  }
-  async bundle(courseKey: string, input: { ownerUserId: string; agentId: string }) {
-    const query = new URLSearchParams(input);
-    return parseBundle(await this.request(`/internal/courses/${encodeURIComponent(courseKey)}?${query}`));
-  }
+	private retryDelayMs(): number {
+		const { retryJitterMinMs: min, retryJitterMaxMs: max } = this.policy;
+		return min + Math.floor(this.random() * (max - min + 1));
+	}
+
+	private async request<T>(
+		path: string,
+		init: RequestInit | undefined,
+		parse: (value: unknown) => T,
+	): Promise<T> {
+		const operationStartedAt = this.now();
+		const operationDeadlineAt =
+			operationStartedAt + this.policy.operationDeadlineMs;
+		const deadlineAt = Math.min(
+			operationDeadlineAt,
+			this.options.gateDeadlineAt ?? Infinity,
+		);
+		for (let attempt = 1; attempt <= this.policy.maxAttempts; attempt += 1) {
+			const remaining = deadlineAt - this.now();
+			if (remaining <= 0) {
+				const totalDurationMs = this.now() - operationStartedAt;
+				const error = new ToolboxCourseContextRequestError(
+					"timeout",
+					attempt - 1,
+					totalDurationMs,
+				);
+				this.emitAttempt({
+					attempt,
+					attemptTimeoutMs: 0,
+					totalDurationMs,
+					failureClass: "timeout",
+					retrying: false,
+				});
+				throw error;
+			}
+			const attemptTimeoutMs = Math.min(
+				this.policy.attemptTimeoutMs,
+				remaining,
+			);
+			try {
+				const value = await this.requestAttempt(
+					path,
+					init,
+					parse,
+					attemptTimeoutMs,
+				);
+				this.emitAttempt({
+					attempt,
+					attemptTimeoutMs,
+					totalDurationMs: this.now() - operationStartedAt,
+					retrying: false,
+				});
+				return value;
+			} catch (error) {
+				const classified = classifyRequestFailure(error);
+				if (!classified) {
+					this.emitAttempt({
+						attempt,
+						attemptTimeoutMs,
+						totalDurationMs: this.now() - operationStartedAt,
+						retrying: false,
+					});
+					throw error;
+				}
+				const totalDurationMs = this.now() - operationStartedAt;
+				const requestError = new ToolboxCourseContextRequestError(
+					classified.failureClass,
+					attempt,
+					totalDurationMs,
+					classified.upstreamStatus,
+					{ cause: error },
+				);
+				const canRetry =
+					attempt < this.policy.maxAttempts &&
+					retryableCourseContextFailure(
+						classified.failureClass,
+						classified.upstreamStatus,
+					);
+				const delayMs = canRetry ? this.retryDelayMs() : 0;
+				const retrying = canRetry && deadlineAt - this.now() > delayMs;
+				this.emitAttempt({
+					attempt,
+					attemptTimeoutMs,
+					totalDurationMs,
+					failureClass: classified.failureClass,
+					upstreamStatus: classified.upstreamStatus,
+					retrying,
+				});
+				if (!retrying) throw requestError;
+				await this.sleep(delayMs);
+			}
+		}
+		throw new ToolboxCourseContextRequestError(
+			"timeout",
+			this.policy.maxAttempts,
+			this.now() - operationStartedAt,
+		);
+	}
+
+	private async requestAttempt<T>(
+		path: string,
+		init: RequestInit | undefined,
+		parse: (value: unknown) => T,
+		attemptTimeoutMs: number,
+	): Promise<T> {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
+		try {
+			const response = await (this.options.fetcher ?? fetch)(
+				`${this.options.baseUrl.replace(/\/$/, "")}${path}`,
+				{
+					...init,
+					signal: controller.signal,
+					headers: {
+						...init?.headers,
+						...this.options.traceHeaders,
+						"x-internal-secret": this.options.secret,
+					},
+				},
+			);
+			if (!response.ok)
+				throw new ToolboxCourseContextHttpError(response.status);
+			try {
+				return parse(JSON.parse(await response.text()));
+			} catch (error) {
+				if (error instanceof ToolboxCourseContextResponseError) throw error;
+				throw new ToolboxCourseContextResponseError();
+			}
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async resolve(input: {
+		ownerUserId: string;
+		agentId: string;
+		conversationId: string;
+		message: string;
+		boundCourseKey?: string;
+		explicitCourseKey?: string;
+	}) {
+		return this.request(
+			"/internal/resolve",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(input),
+			},
+			parseResolution,
+		);
+	}
+	async bundle(
+		courseKey: string,
+		input: { ownerUserId: string; agentId: string },
+	) {
+		const query = new URLSearchParams(input);
+		return this.request(
+			`/internal/courses/${encodeURIComponent(courseKey)}?${query}`,
+			undefined,
+			parseBundle,
+		);
+	}
 }

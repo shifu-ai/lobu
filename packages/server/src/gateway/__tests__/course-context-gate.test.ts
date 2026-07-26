@@ -5,6 +5,8 @@ import {
 	decideCourseTurn,
 	requiresCourseContext,
 } from "../orchestration/course-context-gate.js";
+import { ToolboxCourseContextRequestError } from "../services/course-context-request-policy.js";
+import { ToolboxCourseContextClient } from "../services/toolbox-course-context-client.js";
 const payload = (
 	messageText: string,
 	platformMetadata: Record<string, unknown> = {},
@@ -1362,6 +1364,200 @@ describe("course context gate", () => {
 		});
 		expect(manager.claimPendingCourseSelection).not.toHaveBeenCalled();
 		expect(manager.clearPendingCourseSelection).not.toHaveBeenCalled();
+	});
+	test.each([
+		["network", () => Promise.reject(new TypeError("fetch failed")), 2],
+		[
+			"502",
+			() => Promise.resolve(new Response("bad gateway", { status: 502 })),
+			2,
+		],
+		[
+			"503",
+			() => Promise.resolve(new Response("unavailable", { status: 503 })),
+			2,
+		],
+		["504", () => Promise.resolve(new Response("timeout", { status: 504 })), 2],
+		[
+			"403",
+			() => Promise.resolve(new Response("forbidden", { status: 403 })),
+			1,
+		],
+		[
+			"409",
+			() => Promise.resolve(new Response("conflict", { status: 409 })),
+			1,
+		],
+		[
+			"429",
+			() => Promise.resolve(new Response("rate limited", { status: 429 })),
+			1,
+		],
+		[
+			"invalid-json",
+			() => Promise.resolve(new Response("{", { status: 200 })),
+			1,
+		],
+	] as const)("classifies %s and uses %i attempt(s)", async (_name, response, attempts) => {
+		const fetcher = vi.fn(response);
+		const client = new ToolboxCourseContextClient({
+			baseUrl: "https://toolbox.test",
+			secret: "secret",
+			fetcher,
+			sleep: async () => {},
+			random: () => 0,
+		});
+		await expect(
+			client.resolve({
+				ownerUserId: "u",
+				agentId: "a",
+				conversationId: "c",
+				message: "課程資料",
+			}),
+		).rejects.toBeInstanceOf(ToolboxCourseContextRequestError);
+		expect(fetcher).toHaveBeenCalledTimes(attempts);
+	});
+
+	test("deadline bounds each attempt to 2250ms", async () => {
+		vi.useFakeTimers();
+		try {
+			let now = 0;
+			const attemptDurations: number[] = [];
+			const fetcher = vi.fn(
+				(_url: string, init?: RequestInit) =>
+					new Promise<Response>((_resolve, reject) => {
+						const startedAt = now;
+						(init?.signal as AbortSignal).addEventListener(
+							"abort",
+							() => {
+								attemptDurations.push(now - startedAt);
+								reject(new DOMException("timed out", "AbortError"));
+							},
+							{ once: true },
+						);
+					}),
+			);
+			const client = new ToolboxCourseContextClient({
+				baseUrl: "https://toolbox.test",
+				secret: "secret",
+				fetcher,
+				now: () => now,
+				random: () => 0,
+			});
+			const request = client.resolve({
+				ownerUserId: "u",
+				agentId: "a",
+				conversationId: "c",
+				message: "課程資料",
+			});
+			now = 2250;
+			vi.advanceTimersByTime(2250);
+			await Promise.resolve();
+			now = 2350;
+			vi.advanceTimersByTime(100);
+			await Promise.resolve();
+			now = 4600;
+			vi.advanceTimersByTime(2250);
+			await Promise.resolve();
+			await expect(request).rejects.toBeInstanceOf(
+				ToolboxCourseContextRequestError,
+			);
+			expect(attemptDurations).toEqual([2250, 2250]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("deadline keeps an operation within 5000ms", async () => {
+		vi.useFakeTimers();
+		try {
+			let now = 0;
+			const events: Array<{ totalDurationMs: number }> = [];
+			const fetcher = vi.fn(
+				(_url: string, init?: RequestInit) =>
+					new Promise<Response>((_resolve, reject) => {
+						(init?.signal as AbortSignal).addEventListener(
+							"abort",
+							() => reject(new DOMException("timed out", "AbortError")),
+							{ once: true },
+						);
+					}),
+			);
+			const client = new ToolboxCourseContextClient({
+				baseUrl: "https://toolbox.test",
+				secret: "secret",
+				fetcher,
+				now: () => now,
+				random: () => 0,
+				onAttempt: (event) => {
+					events.push(event);
+				},
+			});
+			const request = client.resolve({
+				ownerUserId: "u",
+				agentId: "a",
+				conversationId: "c",
+				message: "課程資料",
+			});
+			now = 2250;
+			vi.advanceTimersByTime(2250);
+			await Promise.resolve();
+			now = 2350;
+			vi.advanceTimersByTime(100);
+			await Promise.resolve();
+			now = 4600;
+			vi.advanceTimersByTime(2250);
+			await Promise.resolve();
+			await expect(request).rejects.toBeInstanceOf(
+				ToolboxCourseContextRequestError,
+			);
+			expect(events.at(-1)?.totalDurationMs).toBeLessThanOrEqual(5000);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("deadline respects an externally supplied gate deadline for a second operation", async () => {
+		vi.useFakeTimers();
+		try {
+			let now = 0;
+			const fetcher = vi.fn().mockResolvedValue(
+				new Response(
+					JSON.stringify({
+						status: "missing",
+						reason: "no_courses",
+					}),
+					{ status: 200 },
+				),
+			);
+			const client = new ToolboxCourseContextClient({
+				baseUrl: "https://toolbox.test",
+				secret: "secret",
+				fetcher,
+				now: () => now,
+				gateDeadlineAt: 100,
+			});
+			await client.resolve({
+				ownerUserId: "u",
+				agentId: "a",
+				conversationId: "c",
+				message: "課程資料",
+			});
+			now = 100;
+			await expect(
+				client.resolve({
+					ownerUserId: "u",
+					agentId: "a",
+					conversationId: "c",
+					message: "課程資料",
+				}),
+			).rejects.toMatchObject({
+				failureClass: "timeout",
+			});
+			expect(fetcher).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 function canonicalBundle(key: string) {
