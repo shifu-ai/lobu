@@ -1537,6 +1537,73 @@ describe("course context gate", () => {
 		expect(fetcher).toHaveBeenCalledTimes(1);
 	});
 
+	test("settles an abort-ignoring fetch at the attempt deadline", async () => {
+		const scheduler = deterministicScheduler();
+		const fetcher = vi.fn(() => new Promise<Response>(() => {}));
+		const client = new ToolboxCourseContextClient({
+			baseUrl: "https://toolbox.test", secret: "secret", fetcher, scheduler, policy: { maxAttempts: 1 },
+		});
+		const request = client.resolve({ ownerUserId: "u", agentId: "a", conversationId: "c", message: "課程資料" });
+		await scheduler.advanceBy(2250);
+		await expect(request).rejects.toMatchObject({ failureClass: "timeout", attempt: 1, totalDurationMs: 2250 });
+		expect(fetcher).toHaveBeenCalledTimes(1);
+	});
+
+	test("settles a hanging retry sleep at the operation deadline", async () => {
+		const base = deterministicScheduler();
+		const scheduler = { ...base, sleep: () => new Promise<void>(() => {}) };
+		const fetcher = vi.fn(() => Promise.reject(new TypeError("fetch failed")));
+		const client = new ToolboxCourseContextClient({
+			baseUrl: "https://toolbox.test", secret: "secret", fetcher, scheduler, random: () => 0,
+		});
+		const request = client.resolve({ ownerUserId: "u", agentId: "a", conversationId: "c", message: "課程資料" });
+		await scheduler.advanceBy(1);
+		await scheduler.advanceBy(4999);
+		await expect(request).rejects.toMatchObject({ failureClass: "timeout", attempt: 1, totalDurationMs: 5000 });
+		expect(fetcher).toHaveBeenCalledTimes(1);
+	});
+
+	test("preserves only the real secret across mixed-case header collisions", async () => {
+		const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "missing", reason: "no_courses" })));
+		const client = new ToolboxCourseContextClient({
+			baseUrl: "https://toolbox.test", secret: "real-secret", fetcher,
+			traceHeaders: { "X-Internal-Secret": "trace-secret" },
+		});
+		await client.resolve({ ownerUserId: "u", agentId: "a", conversationId: "c", message: "課程資料" });
+		const headers = (fetcher.mock.calls[0]?.[1] as RequestInit).headers as Headers;
+		expect(headers.get("x-internal-secret")).toBe("real-secret");
+		expect([...headers.keys()].filter((name) => name === "x-internal-secret")).toHaveLength(1);
+	});
+
+	test.each([
+		[399, "invalid_contract"], [400, "upstream_4xx"], [499, "upstream_4xx"],
+		[500, "upstream_5xx"], [599, "upstream_5xx"], [600, "invalid_contract"],
+	] as const)("classifies HTTP boundary %i as %s without retry", async (status, failureClass) => {
+		const fetcher = vi.fn().mockResolvedValue({ ok: false, status, text: async () => "" } as Response);
+		const client = new ToolboxCourseContextClient({ baseUrl: "https://toolbox.test", secret: "secret", fetcher, sleep: async () => {} });
+		await expect(client.resolve({ ownerUserId: "u", agentId: "a", conversationId: "c", message: "課程資料" })).rejects.toMatchObject({ failureClass, upstreamStatus: status, attempt: 1 });
+		expect(fetcher).toHaveBeenCalledTimes(1);
+	});
+
+	test("retries a body-read TypeError as a network failure", async () => {
+		const fetcher = vi.fn()
+			.mockResolvedValueOnce({ ok: true, status: 200, text: () => Promise.reject(new TypeError("body failed")) } as Response)
+			.mockResolvedValueOnce({ ok: true, status: 200, text: () => Promise.reject(new TypeError("body failed")) } as Response);
+		const client = new ToolboxCourseContextClient({ baseUrl: "https://toolbox.test", secret: "secret", fetcher, sleep: async () => {} });
+		await expect(client.resolve({ ownerUserId: "u", agentId: "a", conversationId: "c", message: "課程資料" })).rejects.toMatchObject({ failureClass: "network", attempt: 2 });
+		expect(fetcher).toHaveBeenCalledTimes(2);
+	});
+
+	test.each([[-1, 100], [1, 200], [Number.NaN, 100], [Number.POSITIVE_INFINITY, 100]] as const)("normalizes random sample %s to retry delay %i", async (sample, expectedDelay) => {
+		const delays: number[] = [];
+		const fetcher = vi.fn()
+			.mockRejectedValueOnce(new TypeError("fetch failed"))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ status: "missing", reason: "no_courses" })));
+		const client = new ToolboxCourseContextClient({ baseUrl: "https://toolbox.test", secret: "secret", fetcher, random: () => sample, sleep: async (delay) => { delays.push(delay); } });
+		await client.resolve({ ownerUserId: "u", agentId: "a", conversationId: "c", message: "課程資料" });
+		expect(delays).toEqual([expectedDelay]);
+	});
+
 });
 
 function deterministicScheduler() {
@@ -1549,8 +1616,7 @@ function deterministicScheduler() {
 		return id;
 	};
 	const drain = async (): Promise<void> => {
-		await Promise.resolve();
-		await Promise.resolve();
+		for (let index = 0; index < 8; index += 1) await Promise.resolve();
 	};
 	return {
 		now: () => now,

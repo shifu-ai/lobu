@@ -92,6 +92,13 @@ export class ToolboxCourseContextHttpError extends Error {
 	}
 }
 
+export class ToolboxCourseContextTimeoutError extends Error {
+	constructor() {
+		super("Toolbox course context request timed out");
+		this.name = "ToolboxCourseContextTimeoutError";
+	}
+}
+
 export class ToolboxCourseContextInvalidContractError extends Error {
 	constructor(options?: { cause?: unknown }) {
 		super("Toolbox course context response violated its contract", options);
@@ -105,10 +112,16 @@ export function classifyCourseContextRequestFailure(error: unknown): {
 } | undefined {
 	if (error instanceof ToolboxCourseContextHttpError) {
 		return {
-			failureClass: error.status >= 500 ? "upstream_5xx" : "upstream_4xx",
+			failureClass: error.status >= 500 && error.status <= 599
+				? "upstream_5xx"
+				: error.status >= 400 && error.status <= 499
+					? "upstream_4xx"
+					: "invalid_contract",
 			upstreamStatus: error.status,
 		};
 	}
+	if (error instanceof ToolboxCourseContextTimeoutError)
+		return { failureClass: "timeout" };
 	if (error instanceof DOMException && error.name === "AbortError")
 		return { failureClass: "timeout" };
 	if (error instanceof TypeError) return { failureClass: "network" };

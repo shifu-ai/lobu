@@ -8,6 +8,7 @@ import {
 	ToolboxCourseContextHttpError,
 	ToolboxCourseContextInvalidContractError,
 	ToolboxCourseContextRequestError,
+	ToolboxCourseContextTimeoutError,
 } from "./course-context-request-policy.js";
 
 type Fetcher = typeof fetch;
@@ -94,15 +95,73 @@ export class ToolboxCourseContextClient {
 			((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>));
 	}
 
-	private emitAttempt(event: CourseContextAttemptEvent): void {
-		try {
-			void Promise.resolve(this.options.onAttempt?.(event)).catch(() => {});
-		} catch {}
+	private async settleWithin<T>(
+		work: Promise<T>,
+		deadlineMs: number,
+		onTimeout?: () => void,
+	): Promise<T> {
+		return new Promise<T>((resolve, reject) => {
+			let settled = false;
+			const resolveOnce = (value: T) => {
+				if (settled) return;
+				settled = true;
+				this.clearTimeout(timer);
+				resolve(value);
+			};
+			const rejectOnce = (error: unknown) => {
+				if (settled) return;
+				settled = true;
+				this.clearTimeout(timer);
+				reject(error);
+			};
+			const timer = this.setTimeout(() => {
+				try {
+					onTimeout?.();
+				} finally {
+					rejectOnce(new ToolboxCourseContextTimeoutError());
+				}
+			}, Math.max(0, deadlineMs));
+			void work.then(
+				(value) => resolveOnce(value),
+				(error: unknown) => rejectOnce(error),
+			);
+		});
+	}
+
+	private async emitAttempt(
+		event: CourseContextAttemptEvent,
+		remainingMs: number,
+	): Promise<void> {
+		if (!this.options.onAttempt) return;
+		await this.settleWithin(
+			Promise.resolve().then(() => this.options.onAttempt?.(event)),
+			remainingMs,
+		);
 	}
 
 	private retryDelayMs(): number {
 		const { retryJitterMinMs: min, retryJitterMaxMs: max } = this.policy;
-		return min + Math.floor(this.random() * (max - min + 1));
+		const sample = this.random();
+		const normalized = Number.isFinite(sample)
+			? Math.min(Math.max(sample, 0), 1 - Number.EPSILON)
+			: 0;
+		return min + Math.floor(normalized * (max - min + 1));
+	}
+
+	private requestError(
+		failureClass: CourseContextFailureClass,
+		attempt: number,
+		operationStartedAt: number,
+		upstreamStatus?: number,
+		cause?: unknown,
+	): ToolboxCourseContextRequestError {
+		return new ToolboxCourseContextRequestError(
+			failureClass,
+			attempt,
+			this.now() - operationStartedAt,
+			upstreamStatus,
+			cause === undefined ? undefined : { cause },
+		);
 	}
 
 	private async request<T>(
@@ -111,66 +170,27 @@ export class ToolboxCourseContextClient {
 		parse: (value: unknown) => T,
 	): Promise<T> {
 		const operationStartedAt = this.now();
-		const operationDeadlineAt =
-			operationStartedAt + this.policy.operationDeadlineMs;
 		const deadlineAt = Math.min(
-			operationDeadlineAt,
+			operationStartedAt + this.policy.operationDeadlineMs,
 			this.options.gateDeadlineAt ?? Infinity,
 		);
 		for (let attempt = 1; attempt <= this.policy.maxAttempts; attempt += 1) {
 			const remaining = deadlineAt - this.now();
-			if (remaining <= 0) {
-				const totalDurationMs = this.now() - operationStartedAt;
-				const error = new ToolboxCourseContextRequestError(
-					"timeout",
-					attempt - 1,
-					totalDurationMs,
-				);
-				this.emitAttempt({
-					attempt,
-					attemptTimeoutMs: 0,
-					totalDurationMs,
-					failureClass: "timeout",
-					retrying: false,
-				});
-				throw error;
-			}
-			const attemptTimeoutMs = Math.min(
-				this.policy.attemptTimeoutMs,
-				remaining,
-			);
+			if (remaining <= 0)
+				throw this.requestError("timeout", 0, operationStartedAt);
+			const attemptTimeoutMs = Math.min(this.policy.attemptTimeoutMs, remaining);
+			let value: T;
 			try {
-				const value = await this.requestAttempt(
-					path,
-					init,
-					parse,
-					attemptTimeoutMs,
-				);
-				this.emitAttempt({
-					attempt,
-					attemptTimeoutMs,
-					totalDurationMs: this.now() - operationStartedAt,
-					retrying: false,
-				});
-				return value;
+				value = await this.requestAttempt(path, init, parse, attemptTimeoutMs);
 			} catch (error) {
 				const classified = classifyCourseContextRequestFailure(error);
-				if (!classified) {
-					this.emitAttempt({
-						attempt,
-						attemptTimeoutMs,
-						totalDurationMs: this.now() - operationStartedAt,
-						retrying: false,
-					});
-					throw error;
-				}
-				const totalDurationMs = this.now() - operationStartedAt;
-				const requestError = new ToolboxCourseContextRequestError(
+				if (!classified) throw error;
+				const requestError = this.requestError(
 					classified.failureClass,
 					attempt,
-					totalDurationMs,
+					operationStartedAt,
 					classified.upstreamStatus,
-					{ cause: error },
+					error,
 				);
 				const canRetry =
 					attempt < this.policy.maxAttempts &&
@@ -179,24 +199,39 @@ export class ToolboxCourseContextClient {
 						classified.upstreamStatus,
 					);
 				const delayMs = canRetry ? this.retryDelayMs() : 0;
-				const retrying = canRetry && deadlineAt - this.now() > delayMs;
-				this.emitAttempt({
-					attempt,
-					attemptTimeoutMs,
-					totalDurationMs,
-					failureClass: classified.failureClass,
-					upstreamStatus: classified.upstreamStatus,
-					retrying,
-				});
-				if (!retrying) throw requestError;
-				await this.sleep(delayMs);
+				if (!canRetry || deadlineAt - this.now() <= delayMs) {
+					await this.emitAttempt({
+						attempt, attemptTimeoutMs, totalDurationMs: this.now() - operationStartedAt,
+						failureClass: classified.failureClass, upstreamStatus: classified.upstreamStatus, retrying: false,
+					}, Math.max(0, deadlineAt - this.now()));
+					throw requestError;
+				}
+				try {
+					await this.settleWithin(this.sleep(delayMs), deadlineAt - this.now());
+				} catch (sleepError) {
+					const sleepFailure = classifyCourseContextRequestFailure(sleepError);
+					if (!sleepFailure) throw sleepError;
+					throw this.requestError(sleepFailure.failureClass, attempt, operationStartedAt, sleepFailure.upstreamStatus, sleepError);
+				}
+				await this.emitAttempt({
+					attempt, attemptTimeoutMs, totalDurationMs: this.now() - operationStartedAt,
+					failureClass: classified.failureClass, upstreamStatus: classified.upstreamStatus, retrying: true,
+				}, Math.max(0, deadlineAt - this.now()));
+				continue;
 			}
+			try {
+				await this.emitAttempt({
+					attempt, attemptTimeoutMs, totalDurationMs: this.now() - operationStartedAt, retrying: false,
+				}, Math.max(0, deadlineAt - this.now()));
+			} catch (eventError) {
+				const eventFailure = classifyCourseContextRequestFailure(eventError);
+				if (eventFailure?.failureClass === "timeout")
+					throw this.requestError("timeout", attempt, operationStartedAt, undefined, eventError);
+				throw eventError;
+			}
+			return value;
 		}
-		throw new ToolboxCourseContextRequestError(
-			"timeout",
-			this.policy.maxAttempts,
-			this.now() - operationStartedAt,
-		);
+		throw this.requestError("timeout", this.policy.maxAttempts, operationStartedAt);
 	}
 
 	private async requestAttempt<T>(
@@ -206,60 +241,41 @@ export class ToolboxCourseContextClient {
 		attemptTimeoutMs: number,
 	): Promise<T> {
 		const controller = new AbortController();
-		const timeout = this.setTimeout(() => controller.abort(), attemptTimeoutMs);
-		try {
-			const response = await (this.options.fetcher ?? fetch)(
-				`${this.options.baseUrl.replace(/\/$/, "")}${path}`,
-				{
-					...init,
-					signal: controller.signal,
-					headers: {
-						...init?.headers,
-						...this.options.traceHeaders,
-						"x-internal-secret": this.options.secret,
+		return this.settleWithin(
+			(async () => {
+				const response = await (this.options.fetcher ?? fetch)(
+					`${this.options.baseUrl.replace(/\/$/, "")}${path}`,
+					{
+						...init,
+						signal: controller.signal,
+						headers: (() => {
+							const headers = new Headers(init?.headers);
+							for (const [name, value] of Object.entries(this.options.traceHeaders ?? {}))
+								headers.set(name, value);
+							headers.set("x-internal-secret", this.options.secret);
+							return headers;
+						})(),
 					},
-				},
-			);
-			if (!response.ok)
-				throw new ToolboxCourseContextHttpError(response.status);
-			try {
-				return parse(JSON.parse(await response.text()));
-			} catch (error) {
-				if (error instanceof ToolboxCourseContextResponseError) throw error;
-				throw new ToolboxCourseContextResponseError();
-			}
-		} finally {
-			this.clearTimeout(timeout);
-		}
+				);
+				if (!response.ok) throw new ToolboxCourseContextHttpError(response.status);
+				const body = await response.text();
+				try {
+					return parse(JSON.parse(body));
+				} catch (error) {
+					if (error instanceof ToolboxCourseContextResponseError) throw error;
+					throw new ToolboxCourseContextResponseError({ cause: error });
+				}
+			})(),
+			attemptTimeoutMs,
+			() => controller.abort(),
+		);
 	}
 
-	async resolve(input: {
-		ownerUserId: string;
-		agentId: string;
-		conversationId: string;
-		message: string;
-		boundCourseKey?: string;
-		explicitCourseKey?: string;
-	}) {
-		return this.request(
-			"/internal/resolve",
-			{
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify(input),
-			},
-			parseResolution,
-		);
+	async resolve(input: { ownerUserId: string; agentId: string; conversationId: string; message: string; boundCourseKey?: string; explicitCourseKey?: string }) {
+		return this.request("/internal/resolve", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }, parseResolution);
 	}
-	async bundle(
-		courseKey: string,
-		input: { ownerUserId: string; agentId: string },
-	) {
+	async bundle(courseKey: string, input: { ownerUserId: string; agentId: string }) {
 		const query = new URLSearchParams(input);
-		return this.request(
-			`/internal/courses/${encodeURIComponent(courseKey)}?${query}`,
-			undefined,
-			parseBundle,
-		);
+		return this.request(`/internal/courses/${encodeURIComponent(courseKey)}?${query}`, undefined, parseBundle);
 	}
 }
