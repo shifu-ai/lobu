@@ -229,7 +229,7 @@ describe('POST /agents — idempotent same-org create', () => {
     const sql = getDb();
     const rows = await sql`SELECT id FROM agents WHERE id = 'apply-agent'`;
     expect(rows.length).toBe(1);
-  }, 15_000); // First create cold-loads the connector catalog in CI.
+  });
 
   test('idempotent path does not re-inject the Lobu MCP server', async () => {
     const app = await importAgentRoutes();

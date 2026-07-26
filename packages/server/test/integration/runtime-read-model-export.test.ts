@@ -2,21 +2,18 @@ import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import { Hono } from "hono";
-import { type DbClient, getDb } from "../../db/client.js";
+import { type DbClient, getDb } from "../../src/db/client.js";
 import {
 	ensureDbForGatewayTests,
 	resetTestDatabase,
 	seedAgentRow,
-} from "../../gateway/__tests__/helpers/db-setup.js";
+} from "../../src/gateway/__tests__/helpers/db-setup.js";
 import {
 	RuntimeReadModelValidationError,
 	readRuntimeReadModelEvents,
-} from "../runtime-read-model-export.js";
-import { createRuntimeReadModelRoutes } from "../runtime-read-model-routes.js";
-import { orgContext } from "../stores/org-context.js";
-import { installRouteAuthTestMock } from "./helpers/route-test-mocks.js";
-
-installRouteAuthTestMock();
+} from "../../src/lobu/runtime-read-model-export.js";
+import { createRuntimeReadModelRoutes } from "../../src/lobu/runtime-read-model-routes.js";
+import { orgContext } from "../../src/lobu/stores/org-context.js";
 
 const ORGANIZATION_ID = "org-runtime-read-model";
 const OTHER_ORGANIZATION_ID = "org-runtime-read-model-other";
@@ -26,7 +23,7 @@ const FROM = "2026-07-26T00:00:00.000Z";
 const TO = "2026-07-27T00:00:00.000Z";
 const LOOKUP_MIGRATION = path.resolve(
 	__dirname,
-	"../../../../../db/migrations/20260727120000_runtime_read_model_line_lookup.sql",
+	"../../../../db/migrations/20260727120000_runtime_read_model_line_lookup.sql",
 );
 
 beforeAll(async () => {

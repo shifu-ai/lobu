@@ -360,6 +360,13 @@ jobs:
         working-directory: packages/server
         run: bun test src/gateway/__tests__
 
+      - name: runtime read-model export suite (isolated bun:test, needs Postgres)
+        # This suite imports the narrow provisioning sub-router directly.
+        # Keep it in its own Bun process because Lobu's route-test auth mocks
+        # are process-global and module evaluation order is significant.
+        working-directory: packages/server
+        run: bun test test/integration/runtime-read-model-export.test.ts
+
       - name: server lobu route suite (bun:test, needs Postgres)
         # These bun:test files live outside src/gateway and are also excluded
         # from vitest because they import bun:test directly.
