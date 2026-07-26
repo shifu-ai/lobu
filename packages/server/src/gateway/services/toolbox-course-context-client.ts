@@ -1,6 +1,7 @@
 type Fetcher = typeof fetch;
 const MAX_ID = 200; const MAX_AGENT_MD = 50000;
 export class ToolboxCourseContextResponseError extends Error { readonly code = 'invalid_toolbox_course_context_response'; }
+function isTransientRequestFailure(error: unknown): boolean { return error instanceof DOMException && error.name === 'AbortError'; }
 function obj(v: unknown): Record<string, unknown> { if (!v || typeof v !== 'object' || Array.isArray(v)) throw new ToolboxCourseContextResponseError(); return v as Record<string, unknown>; }
 function str(v: unknown, max = MAX_ID): string { if (typeof v !== 'string' || !v.trim() || v.length > max) throw new ToolboxCourseContextResponseError(); return v; }
 function course(v: unknown) { const x = obj(v); return { courseKey: str(x.courseKey), courseEntityId: str(x.courseEntityId), displayName: str(x.displayName,500) }; }
@@ -36,6 +37,19 @@ export class ToolboxCourseContextClient {
   constructor(private readonly options: ToolboxCourseContextClientOptions) {}
 
   private async request(path: string, init?: RequestInit): Promise<unknown> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        return await this.requestAttempt(path, init);
+      } catch (error) {
+        lastError = error;
+        if (attempt === 2 || !isTransientRequestFailure(error)) throw error;
+      }
+    }
+    throw lastError;
+  }
+
+  private async requestAttempt(path: string, init?: RequestInit): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 1500);
     try {

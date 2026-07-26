@@ -57,6 +57,42 @@ describe("course context gate", () => {
 			}),
 		).rejects.toThrow("toolbox timeout");
 	});
+	test("retries one transient resolver failure and attaches canonical context", async () => {
+		const data = payload("我要設定超級 AI 個體戰報");
+		const fetcher = vi
+			.fn()
+			.mockRejectedValueOnce(new DOMException("timed out", "AbortError"))
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						status: "resolved",
+						confidence: "high",
+						matchedBy: ["single_course_default"],
+						course: {
+							courseKey: "super-ai",
+							courseEntityId: "course:super-ai",
+							displayName: "超級 AI 個體",
+						},
+					}),
+					{ status: 200 },
+				),
+			)
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify(canonicalBundle("super-ai")), { status: 200 }),
+			);
+
+		const result = await attachCourseContextForReviewedScope(data, {
+			baseUrl: "https://toolbox.test",
+			secret: "secret",
+			fetcher,
+		});
+
+		expect(result).toMatchObject({
+			status: "ready",
+			context: { course: { courseKey: "super-ai" } },
+		});
+		expect(fetcher).toHaveBeenCalledTimes(3);
+	});
 	test("scheduled course A overrides conversation binding B without persisting A", async () => {
 		const data = payload("準備排程課程任務");
 		data.scheduledCourseContext = {
