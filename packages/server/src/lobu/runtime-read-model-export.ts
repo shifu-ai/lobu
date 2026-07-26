@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { type DbClient, getDb } from "../db/client.js";
+import { type DbClient, getDb, pgTextArray } from "../db/client.js";
 
 const CURSOR_VERSION = 1;
 const MAX_WINDOW_MS = 31 * 24 * 60 * 60 * 1000;
@@ -9,6 +9,10 @@ const MAX_IDENTIFIER_LENGTH = 256;
 const MAX_CONTENT_LENGTH = 16 * 1024;
 const MAX_PROCESSED_MESSAGE_IDS = 64;
 const MAX_CURSOR_LENGTH = 1024;
+const MAX_SOURCE_BATCH_ROWS = 1024;
+const MIN_SOURCE_BATCH_ROWS = 64;
+const SOURCE_ROWS_PER_OUTPUT_EVENT = 8;
+const SOURCE_BOUNDARY_EVENT_INDEX = MAX_PROCESSED_MESSAGE_IDS + 1;
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]{1,51}$/;
 
 export interface RuntimeReadModelRepairEvent {
@@ -56,6 +60,11 @@ interface DurableRunRow {
 	action_input: unknown;
 }
 
+interface InboundCollisionRow {
+	message_id: string;
+	occurrences: number | string;
+}
+
 interface InboundSource {
 	toolboxUserId: string;
 	agentId: string;
@@ -96,27 +105,17 @@ export async function readRuntimeReadModelEvents(
 	);
 	const cursor = input.cursor ? parseCursor(input.cursor, scope) : null;
 	const sql = input.sql ?? getDb();
-	const rows = await sql<DurableRunRow>`
-    SELECT id AS run_id, created_at, queue_name, action_input
-    FROM public.runs
-    WHERE organization_id = ${input.organizationId}
-      AND created_at >= ${validated.from.toISOString()}
-      AND created_at < ${validated.to.toISOString()}
-      AND action_input ->> 'agentId' = ${input.agentId}
-      AND EXISTS (
-        SELECT 1
-        FROM public.agents
-        WHERE agents.id = ${input.agentId}
-          AND agents.organization_id = ${input.organizationId}
-      )
-      AND (
-        queue_name = 'thread_response'
-        OR queue_name LIKE 'thread_message\\_%' ESCAPE '\\'
-      )
-    ORDER BY created_at ASC, id ASC
-  `;
+	const sourceLimit = sourceBatchLimit(input.limit);
+	const rows = await readSourceBatch(
+		sql,
+		input,
+		validated,
+		cursor,
+		sourceLimit,
+	);
 
-	const inboundByMessageId = new Map<string, InboundSource>();
+	const inboundByRunId = new Map<number, InboundSource>();
+	const messageIdsNeedingProof = new Set<string>();
 	const candidates: Array<{
 		row: DurableRunRow;
 		createdAt: string;
@@ -141,11 +140,48 @@ export async function readRuntimeReadModelEvents(
 				quarantined += 1;
 				continue;
 			}
-			if (inboundByMessageId.has(source.messageId)) {
-				quarantined += 1;
-				inboundByMessageId.delete(source.messageId);
-				continue;
+			inboundByRunId.set(runId, source);
+			messageIdsNeedingProof.add(source.messageId);
+			continue;
+		}
+		if (row.queue_name === "thread_response") {
+			for (const messageId of processedMessageIdsForLookup(row.action_input)) {
+				messageIdsNeedingProof.add(messageId);
 			}
+		}
+	}
+	const collisionCounts = await readInboundCollisionCounts(
+		sql,
+		input,
+		validated,
+		[...messageIdsNeedingProof],
+	);
+	const inboundByMessageId = new Map<string, InboundSource>();
+	for (const source of inboundByRunId.values()) {
+		if (collisionCounts.get(source.messageId) !== 1) {
+			quarantined += 1;
+			continue;
+		}
+		inboundByMessageId.set(source.messageId, source);
+	}
+	const missingInboundMessageIds = [...messageIdsNeedingProof].filter(
+		(messageId) =>
+			collisionCounts.get(messageId) === 1 &&
+			!inboundByMessageId.has(messageId),
+	);
+	if (missingInboundMessageIds.length > 0) {
+		const inbounds = await readInboundSources(
+			sql,
+			input,
+			validated,
+			missingInboundMessageIds,
+		);
+		for (const row of inbounds) {
+			const createdAt = isoTimestamp(row.created_at);
+			const source = createdAt
+				? parseInbound(row.action_input, input.agentId, createdAt)
+				: null;
+			if (!source || collisionCounts.get(source.messageId) !== 1) continue;
 			inboundByMessageId.set(source.messageId, source);
 		}
 	}
@@ -193,6 +229,8 @@ export async function readRuntimeReadModelEvents(
 		: projected;
 	const events = resumed.slice(0, input.limit);
 	const last = events.at(-1);
+	const lastSource = rows.at(-1);
+	const sourceExhausted = rows.length < sourceLimit;
 	return {
 		events: events.map(({ event }) => event),
 		nextCursor:
@@ -204,7 +242,9 @@ export async function readRuntimeReadModelEvents(
 						t: last.createdAt,
 						s: scope,
 					})
-				: null,
+				: !sourceExhausted && lastSource
+					? sourceBoundaryCursor(lastSource, scope)
+					: null,
 		quarantined,
 	};
 }
@@ -244,6 +284,161 @@ function validateInput(input: RuntimeReadModelEventsInput): {
 		throw new RuntimeReadModelValidationError("invalid_time_window");
 	}
 	return { from, to };
+}
+
+function sourceBatchLimit(limit: number): number {
+	return Math.min(
+		MAX_SOURCE_BATCH_ROWS,
+		Math.max(MIN_SOURCE_BATCH_ROWS, limit * SOURCE_ROWS_PER_OUTPUT_EVENT),
+	);
+}
+
+async function readSourceBatch(
+	sql: DbClient,
+	input: RuntimeReadModelEventsInput,
+	window: { from: Date; to: Date },
+	cursor: RuntimeReadModelCursor | null,
+	limit: number,
+): Promise<DurableRunRow[]> {
+	const base = {
+		organizationId: input.organizationId,
+		agentId: input.agentId,
+		from: window.from.toISOString(),
+		to: window.to.toISOString(),
+	};
+	if (!cursor) {
+		return sql<DurableRunRow>`
+			SELECT id AS run_id, created_at, queue_name, action_input
+			FROM public.runs
+			WHERE organization_id = ${base.organizationId}
+				AND created_at >= ${base.from}
+				AND created_at < ${base.to}
+				AND action_input ->> 'agentId' = ${base.agentId}
+				AND EXISTS (
+					SELECT 1 FROM public.agents
+					WHERE agents.id = ${base.agentId}
+						AND agents.organization_id = ${base.organizationId}
+				)
+				AND (
+					queue_name = 'thread_response'
+					OR queue_name LIKE 'thread_message\\_%' ESCAPE '\\'
+				)
+			ORDER BY created_at ASC, id ASC
+			LIMIT ${limit}
+		`;
+	}
+	if (cursor.e === SOURCE_BOUNDARY_EVENT_INDEX) {
+		return sql<DurableRunRow>`
+			SELECT id AS run_id, created_at, queue_name, action_input
+			FROM public.runs
+			WHERE organization_id = ${base.organizationId}
+				AND created_at >= ${base.from}
+				AND created_at < ${base.to}
+				AND action_input ->> 'agentId' = ${base.agentId}
+				AND EXISTS (
+					SELECT 1 FROM public.agents
+					WHERE agents.id = ${base.agentId}
+						AND agents.organization_id = ${base.organizationId}
+				)
+				AND (
+					queue_name = 'thread_response'
+					OR queue_name LIKE 'thread_message\\_%' ESCAPE '\\'
+				)
+				AND (created_at > ${cursor.t} OR (created_at = ${cursor.t} AND id > ${cursor.r}))
+			ORDER BY created_at ASC, id ASC
+			LIMIT ${limit}
+		`;
+	}
+	return sql<DurableRunRow>`
+		SELECT id AS run_id, created_at, queue_name, action_input
+		FROM public.runs
+		WHERE organization_id = ${base.organizationId}
+			AND created_at >= ${base.from}
+			AND created_at < ${base.to}
+			AND action_input ->> 'agentId' = ${base.agentId}
+			AND EXISTS (
+				SELECT 1 FROM public.agents
+				WHERE agents.id = ${base.agentId}
+					AND agents.organization_id = ${base.organizationId}
+			)
+			AND (
+				queue_name = 'thread_response'
+				OR queue_name LIKE 'thread_message\\_%' ESCAPE '\\'
+			)
+			AND (created_at > ${cursor.t} OR (created_at = ${cursor.t} AND id >= ${cursor.r}))
+		ORDER BY created_at ASC, id ASC
+		LIMIT ${limit}
+	`;
+}
+
+async function readInboundCollisionCounts(
+	sql: DbClient,
+	input: RuntimeReadModelEventsInput,
+	window: { from: Date; to: Date },
+	messageIds: string[],
+): Promise<Map<string, number>> {
+	if (messageIds.length === 0) return new Map();
+	const rows = await sql<InboundCollisionRow>`
+		SELECT action_input ->> 'messageId' AS message_id, COUNT(*) AS occurrences
+		FROM public.runs
+		WHERE organization_id = ${input.organizationId}
+			AND created_at >= ${window.from.toISOString()}
+			AND created_at < ${window.to.toISOString()}
+			AND action_input ->> 'agentId' = ${input.agentId}
+			AND queue_name LIKE 'thread_message\\_%' ESCAPE '\\'
+			AND action_input ->> 'platform' = 'line'
+			AND action_input ->> 'messageId' = ANY(${pgTextArray(messageIds)}::text[])
+		GROUP BY action_input ->> 'messageId'
+		LIMIT ${messageIds.length}
+	`;
+	return new Map(rows.map((row) => [row.message_id, Number(row.occurrences)]));
+}
+
+async function readInboundSources(
+	sql: DbClient,
+	input: RuntimeReadModelEventsInput,
+	window: { from: Date; to: Date },
+	messageIds: string[],
+): Promise<DurableRunRow[]> {
+	return sql<DurableRunRow>`
+		SELECT DISTINCT ON (action_input ->> 'messageId')
+			id AS run_id, created_at, queue_name, action_input
+		FROM public.runs
+		WHERE organization_id = ${input.organizationId}
+			AND created_at >= ${window.from.toISOString()}
+			AND created_at < ${window.to.toISOString()}
+			AND action_input ->> 'agentId' = ${input.agentId}
+			AND queue_name LIKE 'thread_message\\_%' ESCAPE '\\'
+			AND action_input ->> 'platform' = 'line'
+			AND action_input ->> 'messageId' = ANY(${pgTextArray(messageIds)}::text[])
+		ORDER BY action_input ->> 'messageId', created_at ASC, id ASC
+		LIMIT ${messageIds.length}
+	`;
+}
+
+function processedMessageIdsForLookup(value: unknown): string[] {
+	if (!isObject(value) || !Array.isArray(value.processedMessageIds)) return [];
+	const ids = value.processedMessageIds;
+	if (ids.length === 0 || ids.length > MAX_PROCESSED_MESSAGE_IDS) return [];
+	return ids.every((id) => boundedString(id, MAX_IDENTIFIER_LENGTH))
+		? [...new Set(ids)]
+		: [];
+}
+
+function sourceBoundaryCursor(
+	row: DurableRunRow,
+	scope: string,
+): string | null {
+	const runId = safeRunId(row.run_id);
+	const createdAt = isoTimestamp(row.created_at);
+	if (!runId || !createdAt) return null;
+	return encodeCursor({
+		v: CURSOR_VERSION,
+		r: runId,
+		e: SOURCE_BOUNDARY_EVENT_INDEX,
+		t: createdAt,
+		s: scope,
+	});
 }
 
 function parseTimestamp(value: string): Date | null {
@@ -454,7 +649,7 @@ function parseCursor(
 		typeof eventIndex !== "number" ||
 		!Number.isInteger(eventIndex) ||
 		eventIndex < 0 ||
-		eventIndex > MAX_PROCESSED_MESSAGE_IDS ||
+		eventIndex > SOURCE_BOUNDARY_EVENT_INDEX ||
 		typeof createdAt !== "string" ||
 		!parseTimestamp(createdAt) ||
 		typeof scope !== "string" ||

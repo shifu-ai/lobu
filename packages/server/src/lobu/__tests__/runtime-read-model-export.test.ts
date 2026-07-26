@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { getDb } from "../../db/client.js";
+import { type DbClient, getDb } from "../../db/client.js";
 import {
 	ensureDbForGatewayTests,
 	resetTestDatabase,
@@ -266,6 +266,124 @@ describe("durable runtime read-model repair event export", () => {
 		);
 		expect(result.quarantined).toBe(2);
 	});
+
+	test("permanently quarantines triplicate LINE message ids", async () => {
+		const sql = getDb();
+		for (const createdAt of [
+			"2026-07-26T07:00:00.000Z",
+			"2026-07-26T07:01:00.000Z",
+			"2026-07-26T07:02:00.000Z",
+		]) {
+			await insertRuntimeRun(
+				sql,
+				"thread_message_lobu-worker-1",
+				{
+					messageId: "triplicate-line-message",
+					messageText: "Duplicate source",
+					userId: "toolbox-user-1",
+					agentId: AGENT_ID,
+					conversationId: "conv-1",
+					platform: "line",
+				},
+				createdAt,
+			);
+		}
+		await insertRuntimeRun(
+			sql,
+			"thread_response",
+			{
+				processedMessageIds: ["triplicate-line-message"],
+				finalText: "Must not be projected.",
+				userId: "toolbox-user-1",
+				agentId: AGENT_ID,
+				conversationId: "conv-1",
+			},
+			"2026-07-26T07:03:00.000Z",
+		);
+
+		const result = await readRuntimeReadModelEvents({
+			organizationId: ORGANIZATION_ID,
+			agentId: AGENT_ID,
+			from: FROM,
+			to: TO,
+			limit: 200,
+		});
+		expect(result.events.map((event) => event.messageId)).not.toContain(
+			"triplicate-line-message",
+		);
+		expect(result.quarantined).toBe(5);
+	});
+
+	test("uses a bounded keyset source batch and resumes from its cursor", async () => {
+		const calls: Array<{ text: string; values: unknown[] }> = [];
+		const rows = [
+			{
+				run_id: 11,
+				created_at: new Date("2026-07-26T01:00:00.000Z"),
+				queue_name: "thread_message_lobu-worker-1",
+				action_input: {
+					messageId: "batch-message-1",
+					messageText: "Bounded source",
+					userId: "toolbox-user-1",
+					agentId: AGENT_ID,
+					conversationId: "conv-1",
+					platform: "line",
+				},
+			},
+			{
+				run_id: 12,
+				created_at: new Date("2026-07-26T01:00:01.000Z"),
+				queue_name: "thread_response",
+				action_input: {
+					processedMessageIds: ["batch-message-1"],
+					finalText: "Bounded completion",
+					userId: "toolbox-user-1",
+					agentId: AGENT_ID,
+					conversationId: "conv-1",
+				},
+			},
+		];
+		const fakeSql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+			const text = strings.join("?");
+			calls.push({ text, values });
+			if (text.includes("GROUP BY")) {
+				return Promise.resolve([
+					{ message_id: "batch-message-1", occurrences: 1 },
+				]);
+			}
+			if (text.includes("DISTINCT ON"))
+				return Promise.resolve(rows.slice(0, 1));
+			return Promise.resolve(rows);
+		}) as unknown as DbClient;
+
+		const first = await readRuntimeReadModelEvents({
+			organizationId: ORGANIZATION_ID,
+			agentId: AGENT_ID,
+			from: FROM,
+			to: TO,
+			limit: 1,
+			sql: fakeSql,
+		});
+		expect(first.nextCursor).toEqual(expect.any(String));
+		const sourceCall = calls[0];
+		expect(sourceCall?.text).toContain("LIMIT ?");
+		expect(sourceCall?.values.at(-1)).toBeGreaterThanOrEqual(1);
+
+		await readRuntimeReadModelEvents({
+			organizationId: ORGANIZATION_ID,
+			agentId: AGENT_ID,
+			from: FROM,
+			to: TO,
+			limit: 1,
+			cursor: first.nextCursor ?? undefined,
+			sql: fakeSql,
+		});
+		const sourceCalls = calls.filter((call) =>
+			call.text.includes("ORDER BY created_at ASC, id ASC"),
+		);
+		expect(sourceCalls).toHaveLength(2);
+		expect(sourceCalls[1]?.text).toContain("id >= ?");
+	});
 });
 
 async function buildProvisioningApp(
@@ -381,4 +499,20 @@ async function seedRuns(): Promise<void> {
 		{ agentId: AGENT_ID, platform: "line", messageText: "malformed" },
 		"2026-07-26T05:00:00.000Z",
 	);
+}
+
+async function insertRuntimeRun(
+	sql: DbClient,
+	queueName: string,
+	actionInput: Record<string, unknown>,
+	createdAt: string,
+): Promise<void> {
+	await sql`
+		INSERT INTO public.runs (
+			organization_id, run_type, queue_name, action_input, status, run_at, created_at
+		) VALUES (
+			${ORGANIZATION_ID}, 'chat_message', ${queueName}, ${sql.json(actionInput)},
+			'completed', ${createdAt}, ${createdAt}
+		)
+	`;
 }
