@@ -68,8 +68,44 @@ describe('course context tracer', () => {
     const fetcher=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({status:'resolved',confidence:'high',matchedBy:['single_course_default'],course:{courseKey:'x',courseEntityId:'course:x',displayName:'X',aliases:[],status:'active'}}))).mockResolvedValueOnce(new Response(JSON.stringify({course:{courseKey:'x',courseEntityId:'course:x',displayName:'X',aliases:[],status:'active'},profile:{pmRole:null,teacher:null,collaborators:[],audience:null,coursePromise:null,resourceLocations:{}},context:{agentMd:'SECRET CONTEXT',contextPackId:'p',version:2,confidence:'high',generatedAt:'2026-07-11T00:00:00Z',lastIndexedAt:null,stale:false},evidence:{confirmed:[],candidates:[]}})));
     const payload={userId:'owner-secret',agentId:'agent-key',conversationId:'conversation-secret',messageId:'m1',messageText:'SECRET MESSAGE',platformMetadata:{courseScope:'reviewed'}} as MessagePayload;
     await attachCourseContextForReviewedScope(payload,{baseUrl:'https://toolbox.test',secret:'TOKEN SECRET',fetcher,traceEmitter:async(event)=>{events.push(event);}});
-    expect(events.map(event=>event.event)).toEqual(['context.gate.started','context.course.resolved','context.bundle.loaded','context.memory.degraded','context.guard.passed']);
+    expect(events.map(event=>event.event)).toEqual(['context.gate.started','context.course.request_attempt','context.course.resolved','context.course.request_attempt','context.bundle.loaded','context.memory.degraded','context.guard.passed']);
     const serialized=JSON.stringify(events);expect(serialized).not.toContain('SECRET MESSAGE');expect(serialized).not.toContain('SECRET CONTEXT');expect(serialized).not.toContain('TOKEN SECRET');expect(serialized).not.toContain('owner-secret');expect(serialized).not.toContain('conversation-secret');
+  });
+
+  it('preserves trace continuity and records bounded retry attempts', async () => {
+    const events: Array<Record<string, unknown>> = [];
+    const resolved = { status: 'resolved', confidence: 'high', matchedBy: ['single_course_default'], course: { courseKey: 'super-ai', courseEntityId: 'course:super-ai', displayName: 'Super AI', aliases: [], status: 'active' } };
+    const bundle = { course: { courseKey: 'super-ai', courseEntityId: 'course:super-ai', displayName: 'Super AI', aliases: [], status: 'active' }, profile: { pmRole: null, teacher: null, collaborators: [], audience: null, coursePromise: null, resourceLocations: {} }, context: { agentMd: 'canonical summary', contextPackId: 'pack-super-ai', version: 1, confidence: 'high', generatedAt: '2026-07-11T00:00:00Z', lastIndexedAt: null, stale: false }, evidence: { confirmed: [], candidates: [] } };
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response('', { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(resolved)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(bundle)));
+    const payload = { userId: 'u', agentId: 'a', conversationId: 'c', messageId: 'm', messageText: 'SECRET MESSAGE', traceId: 'tr_course_retry_001', platformMetadata: { courseScope: 'reviewed', journeyId: 'line_text_agent_turn' } } as MessagePayload;
+
+    await attachCourseContextForReviewedScope(payload, { baseUrl: 'https://toolbox.test', secret: 'TOKEN SECRET', fetcher, traceEmitter: async event => { events.push(event); }, random: () => 0 });
+
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    for (const [, init] of fetcher.mock.calls) {
+      const headers = (init as RequestInit).headers as Headers;
+      expect(headers).toBeInstanceOf(Headers);
+      expect(headers.get('x-shifu-trace-id')).toBe('tr_course_retry_001');
+      expect(headers.get('X-Shifu-Journey-Id')).toBe('line_text_agent_turn');
+    }
+    const attempts = events.filter(event => event.event === 'context.course.request_attempt');
+    expect(attempts).toEqual([
+      expect.objectContaining({ trace_id: 'tr_course_retry_001', journey_id: 'line_text_agent_turn', status: 'degraded', operation: 'resolve', attempt: 1, max_attempts: 2, failure_class: 'upstream_5xx', upstream_status: 503 }),
+      expect.objectContaining({ trace_id: 'tr_course_retry_001', journey_id: 'line_text_agent_turn', status: 'ok', operation: 'resolve', attempt: 2, max_attempts: 2 }),
+      expect.objectContaining({ trace_id: 'tr_course_retry_001', journey_id: 'line_text_agent_turn', status: 'ok', operation: 'bundle', attempt: 1, max_attempts: 2 }),
+    ]);
+    for (const event of attempts) {
+      expect(event.attempt_duration_ms).toEqual(expect.any(Number));
+      expect(event.total_duration_ms).toEqual(expect.any(Number));
+      expect(event).not.toHaveProperty('message');
+      expect(event).not.toHaveProperty('body');
+      expect(event).not.toHaveProperty('secret');
+      expect(event).not.toHaveProperty('course_key');
+      expect(event).not.toHaveProperty('course_entity_id');
+    }
   });
 
   it('enriches the actual MessageConsumer dispatch payload in resolve-arm-send order', async () => {

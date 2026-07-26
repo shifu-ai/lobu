@@ -14,6 +14,7 @@ import {
 	ToolboxCourseContextClient,
 	type ToolboxCourseContextClientOptions,
 } from "../services/toolbox-course-context-client.js";
+import { ToolboxCourseContextRequestError } from "../services/course-context-request-policy.js";
 import {
 	retrieveCourseMemory,
 	type CourseMemorySearch,
@@ -76,6 +77,17 @@ const COURSE_INTENT =
 	/(?:銷講|三個秘密|課綱|課程|大課|老師|錄課|會議待辦|戰報|招生|offer)/iu;
 const PERSONAL_REMINDER =
 	/提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話費|水費|電費)/u;
+
+function normalizeCourseIntentText(message: string): string {
+	return message.normalize("NFKC").replaceAll("課成", "課程");
+}
+
+export function isCourseContextStatusIntent(message: string): boolean {
+	const normalized = normalizeCourseIntentText(message.trim());
+	return /(?:有|知道|找到|取得|讀到|建好).{0,12}(?:我的)?課程(?:資料|資訊)?/u.test(normalized) ||
+		/(?:我的)?課程(?:資料|資訊)?.{0,12}(?:有|存在|建好|完成|取得|讀到)/u.test(normalized) ||
+		/知道我是哪一門課/u.test(normalized);
+}
 const logger = createLogger("course-context-gate");
 const STRUCTURED_CONTEXT_FIELDS = new Set([
 	"audience",
@@ -169,6 +181,18 @@ async function traceCourse(
 		}).catch(() => {});
 	} catch {}
 }
+
+function requestFailureTraceFields(error: unknown): Record<string, unknown> {
+	if (!(error instanceof ToolboxCourseContextRequestError)) return {};
+	return {
+		failure_class: error.failureClass,
+		...(error.upstreamStatus === undefined
+			? {}
+			: { upstream_status: error.upstreamStatus }),
+		attempt: error.attempt,
+		duration_ms: error.totalDurationMs,
+	};
+}
 function projectRequiredCourseContext(
 	bundle: Awaited<ReturnType<ToolboxCourseContextClient["bundle"]>>,
 	fields: string[],
@@ -212,6 +236,7 @@ export function decideCourseTurn(
 		courseContextRequired:
 			data.platformMetadata?.courseScope === "reviewed" ||
 			COURSE_INTENT.test(message) ||
+			isCourseContextStatusIntent(message) ||
 			Boolean(
 				options.hasActiveCourse &&
 					/^(?:繼續|接著|然後|再來|照剛才|就這個)/u.test(message),
@@ -269,6 +294,14 @@ export async function attachCourseContextForReviewedScope(
 	if (!scheduled && isExplicitPersonalBypass(data))
 		return { status: "not_required" };
 	const gateStarted = Date.now();
+	const gateDeadlineAt = gateStarted + 8000;
+	const traceId =
+		extractTraceId(data) ??
+		`tr_${hashIdentity(data.messageId ?? data.conversationId).slice(0, 32)}`;
+	const journeyId =
+		typeof data.platformMetadata?.journeyId === "string"
+			? data.platformMetadata.journeyId
+			: "course_context_gate";
 	await traceCourse(data, options, "context.gate.started", "started", {
 		gate_mode: process.env.COURSE_CONTEXT_GATE_MODE ?? "enforce",
 	});
@@ -473,6 +506,32 @@ export async function attachCourseContextForReviewedScope(
 		...options,
 		baseUrl,
 		secret,
+		gateDeadlineAt,
+		traceHeaders: {
+			...options?.traceHeaders,
+			"X-Shifu-Trace-Id": traceId,
+			"X-Shifu-Journey-Id": journeyId,
+		},
+		onAttempt: async (attemptEvent) => {
+			await options?.onAttempt?.(attemptEvent);
+			await traceCourse(
+				data,
+				options,
+				"context.course.request_attempt",
+				attemptEvent.outcome === "retrying"
+					? "degraded"
+					: attemptEvent.outcome,
+				{
+					operation: attemptEvent.operation,
+					attempt: attemptEvent.attempt,
+					max_attempts: attemptEvent.maxAttempts,
+					attempt_duration_ms: attemptEvent.attemptDurationMs,
+					total_duration_ms: attemptEvent.totalDurationMs,
+					failure_class: attemptEvent.failureClass,
+					upstream_status: attemptEvent.upstreamStatus,
+				},
+			);
+		},
 	});
 	if (pending && !choice)
 		return { status: "clarification_required", candidates: pending.candidates };
@@ -535,6 +594,7 @@ export async function attachCourseContextForReviewedScope(
 		);
 		await traceCourse(data, options, "context.course.missing", "failed", {
 			reason_code: "resolver_unavailable",
+			...requestFailureTraceFields(error),
 		});
 		if (options?.propagateInfrastructureErrors) throw error;
 		return {
@@ -619,6 +679,7 @@ export async function attachCourseContextForReviewedScope(
 		await traceCourse(data, options, "context.bundle.failed", "failed", {
 			course_key: course.courseKey,
 			reason_code: "bundle_unavailable",
+			...requestFailureTraceFields(error),
 		});
 		if (options?.propagateInfrastructureErrors) throw error;
 		return {

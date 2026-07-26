@@ -44,11 +44,15 @@ function parseResolution(v: unknown): ValidCourseResolution {
 function parseBundle(v: unknown): ValidBundle { const x=obj(v); const parsedProfile=profile(x.profile); const c=obj(x.context); const evidence=obj(x.evidence); const version=c.version; if(!Number.isInteger(version)||(version as number)<=0||typeof c.stale!=='boolean'||(c.confidence!=='high'&&c.confidence!=='medium'&&c.confidence!=='low')||!Array.isArray(evidence.confirmed)||!Array.isArray(evidence.candidates)||evidence.confirmed.length>100||evidence.candidates.length>100)throw new ToolboxCourseContextResponseError(); const confirmed=evidence.confirmed.map(evidenceRef); const candidates=evidence.candidates.map(evidenceRef); return {course:canonicalCourse(x.course),profile:parsedProfile,context:{agentMd:str(c.agentMd,MAX_AGENT_MD),contextPackId:str(c.contextPackId),version:version as number,confidence:c.confidence,generatedAt:str(c.generatedAt),lastIndexedAt:nullable(c.lastIndexedAt),stale:c.stale},evidence:{confirmed,candidates}}; }
 
 export type CourseContextAttemptEvent = {
+	operation: "resolve" | "bundle";
 	attempt: number;
+	maxAttempts: number;
 	attemptTimeoutMs: number;
+	attemptDurationMs: number;
 	totalDurationMs: number;
 	failureClass?: CourseContextFailureClass;
 	upstreamStatus?: number;
+	outcome: "retrying" | "ok" | "failed";
 	retrying: boolean;
 };
 
@@ -173,6 +177,7 @@ export class ToolboxCourseContextClient {
 	}
 
 	private async request<T>(
+		operation: "resolve" | "bundle",
 		path: string,
 		init: RequestInit | undefined,
 		parse: (value: unknown) => T,
@@ -187,6 +192,7 @@ export class ToolboxCourseContextClient {
 			if (remaining <= 0)
 				throw this.requestError("timeout", 0, operationStartedAt);
 			const attemptTimeoutMs = Math.min(this.policy.attemptTimeoutMs, remaining);
+			const attemptStartedAt = this.now();
 			let value: T;
 			try {
 				value = await this.requestAttempt(path, init, parse, attemptTimeoutMs);
@@ -202,14 +208,20 @@ export class ToolboxCourseContextClient {
 				const delayMs = canRetry ? this.retryDelayMs() : 0;
 				if (!canRetry || deadlineAt - this.now() <= delayMs) {
 					await this.deliverAttempt({
-						attempt, attemptTimeoutMs, totalDurationMs: this.now() - operationStartedAt,
-						failureClass: classified.failureClass, upstreamStatus: classified.upstreamStatus, retrying: false,
+						operation, attempt, maxAttempts: this.policy.maxAttempts, attemptTimeoutMs,
+						attemptDurationMs: this.now() - attemptStartedAt,
+						totalDurationMs: this.now() - operationStartedAt,
+						failureClass: classified.failureClass, upstreamStatus: classified.upstreamStatus,
+						outcome: "failed", retrying: false,
 					}, Math.max(0, deadlineAt - this.now()), attempt, operationStartedAt);
 					throw this.requestError(classified.failureClass, attempt, operationStartedAt, classified.upstreamStatus, error);
 				}
 				await this.deliverAttempt({
-					attempt, attemptTimeoutMs, totalDurationMs: this.now() - operationStartedAt,
-					failureClass: classified.failureClass, upstreamStatus: classified.upstreamStatus, retrying: true,
+					operation, attempt, maxAttempts: this.policy.maxAttempts, attemptTimeoutMs,
+					attemptDurationMs: this.now() - attemptStartedAt,
+					totalDurationMs: this.now() - operationStartedAt,
+					failureClass: classified.failureClass, upstreamStatus: classified.upstreamStatus,
+					outcome: "retrying", retrying: true,
 				}, Math.max(0, deadlineAt - this.now() - delayMs), attempt, operationStartedAt);
 				try {
 					await this.settleWithin(this.sleep(delayMs), deadlineAt - this.now());
@@ -221,7 +233,10 @@ export class ToolboxCourseContextClient {
 				continue;
 			}
 			await this.deliverAttempt({
-					attempt, attemptTimeoutMs, totalDurationMs: this.now() - operationStartedAt, retrying: false,
+					operation, attempt, maxAttempts: this.policy.maxAttempts, attemptTimeoutMs,
+					attemptDurationMs: this.now() - attemptStartedAt,
+					totalDurationMs: this.now() - operationStartedAt,
+					outcome: "ok", retrying: false,
 				}, Math.max(0, deadlineAt - this.now()), attempt, operationStartedAt);
 			return value;
 		}
@@ -266,10 +281,10 @@ export class ToolboxCourseContextClient {
 	}
 
 	async resolve(input: { ownerUserId: string; agentId: string; conversationId: string; message: string; boundCourseKey?: string; explicitCourseKey?: string }) {
-		return this.request("/internal/resolve", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }, parseResolution);
+		return this.request("resolve", "/internal/resolve", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }, parseResolution);
 	}
 	async bundle(courseKey: string, input: { ownerUserId: string; agentId: string }) {
 		const query = new URLSearchParams(input);
-		return this.request(`/internal/courses/${encodeURIComponent(courseKey)}?${query}`, undefined, parseBundle);
+		return this.request("bundle", `/internal/courses/${encodeURIComponent(courseKey)}?${query}`, undefined, parseBundle);
 	}
 }

@@ -427,6 +427,17 @@ describe("course context gate", () => {
 	] as const)("classifies general course context without selecting a skill for %s", (message, courseContextRequired) => {
 		expect(decideCourseTurn(payload(message))).toEqual({ courseContextRequired });
 	});
+	test.each([
+		"你有我的課程資料嗎",
+		"所以你有我的課成資料嗎",
+		"我的課程資料建好了嗎",
+		"你知道我是哪一門課嗎",
+	])("routes course status question through canonical context: %s", (message) => {
+		expect(decideCourseTurn(payload(message)).courseContextRequired).toBe(true);
+	});
+	test("does not treat an unrelated typo as course intent", () => {
+		expect(decideCourseTurn(payload("這個流程不成怎麼辦")).courseContextRequired).toBe(false);
+	});
 	test("reviewed scope requires general course context without activating opp-coach", () => {
 		expect(decideCourseTurn(payload("你好", { courseScope: "reviewed" }))).toEqual({
 			courseContextRequired: true,
