@@ -1,14 +1,18 @@
 import {
 	type CourseContextFailureClass,
 	type CourseContextRequestPolicy,
-	DEFAULT_COURSE_CONTEXT_REQUEST_POLICY,
+	type EffectiveCourseContextRequestPolicy,
+	classifyCourseContextRequestFailure,
+	normalizeCourseContextRequestPolicy,
 	retryableCourseContextFailure,
+	ToolboxCourseContextHttpError,
+	ToolboxCourseContextInvalidContractError,
 	ToolboxCourseContextRequestError,
 } from "./course-context-request-policy.js";
 
 type Fetcher = typeof fetch;
 const MAX_ID = 200; const MAX_AGENT_MD = 50000;
-export class ToolboxCourseContextResponseError extends Error { readonly code = 'invalid_toolbox_course_context_response'; }
+export class ToolboxCourseContextResponseError extends ToolboxCourseContextInvalidContractError { readonly code = 'invalid_toolbox_course_context_response'; }
 function obj(v: unknown): Record<string, unknown> { if (!v || typeof v !== 'object' || Array.isArray(v)) throw new ToolboxCourseContextResponseError(); return v as Record<string, unknown>; }
 function str(v: unknown, max = MAX_ID): string { if (typeof v !== 'string' || !v.trim() || v.length > max) throw new ToolboxCourseContextResponseError(); return v; }
 function course(v: unknown) { const x = obj(v); return { courseKey: str(x.courseKey), courseEntityId: str(x.courseEntityId), displayName: str(x.displayName,500) }; }
@@ -38,33 +42,6 @@ function parseResolution(v: unknown): ValidCourseResolution {
 }
 function parseBundle(v: unknown): ValidBundle { const x=obj(v); const parsedProfile=profile(x.profile); const c=obj(x.context); const evidence=obj(x.evidence); const version=c.version; if(!Number.isInteger(version)||(version as number)<=0||typeof c.stale!=='boolean'||(c.confidence!=='high'&&c.confidence!=='medium'&&c.confidence!=='low')||!Array.isArray(evidence.confirmed)||!Array.isArray(evidence.candidates)||evidence.confirmed.length>100||evidence.candidates.length>100)throw new ToolboxCourseContextResponseError(); const confirmed=evidence.confirmed.map(evidenceRef); const candidates=evidence.candidates.map(evidenceRef); return {course:canonicalCourse(x.course),profile:parsedProfile,context:{agentMd:str(c.agentMd,MAX_AGENT_MD),contextPackId:str(c.contextPackId),version:version as number,confidence:c.confidence,generatedAt:str(c.generatedAt),lastIndexedAt:nullable(c.lastIndexedAt),stale:c.stale},evidence:{confirmed,candidates}}; }
 
-class ToolboxCourseContextHttpError extends Error {
-	constructor(readonly status: number) {
-		super(`Toolbox course context request failed (${status})`);
-		this.name = "ToolboxCourseContextHttpError";
-	}
-}
-
-function classifyRequestFailure(error: unknown):
-	| {
-			failureClass: CourseContextFailureClass;
-			upstreamStatus?: number;
-	  }
-	| undefined {
-	if (error instanceof ToolboxCourseContextHttpError) {
-		return {
-			failureClass: error.status >= 500 ? "upstream_5xx" : "upstream_4xx",
-			upstreamStatus: error.status,
-		};
-	}
-	if (error instanceof DOMException && error.name === "AbortError")
-		return { failureClass: "timeout" };
-	if (error instanceof TypeError) return { failureClass: "network" };
-	if (error instanceof ToolboxCourseContextResponseError)
-		return { failureClass: "invalid_contract" };
-	return undefined;
-}
-
 export type CourseContextAttemptEvent = {
 	attempt: number;
 	attemptTimeoutMs: number;
@@ -85,24 +62,36 @@ export type ToolboxCourseContextClientOptions = {
 	sleep?: (ms: number) => Promise<void>;
 	random?: () => number;
 	onAttempt?: (event: CourseContextAttemptEvent) => void | Promise<void>;
+	scheduler?: CourseContextRequestScheduler;
+};
+
+export type CourseContextRequestScheduler = {
+	now: () => number;
+	sleep: (ms: number) => Promise<void>;
+	setTimeout: (callback: () => void, ms: number) => unknown;
+	clearTimeout: (timer: unknown) => void;
 };
 
 export class ToolboxCourseContextClient {
-	private readonly policy: CourseContextRequestPolicy;
+	private readonly policy: EffectiveCourseContextRequestPolicy;
 	private readonly now: () => number;
 	private readonly sleep: (ms: number) => Promise<void>;
 	private readonly random: () => number;
+	private readonly setTimeout: (callback: () => void, ms: number) => unknown;
+	private readonly clearTimeout: (timer: unknown) => void;
 
 	constructor(private readonly options: ToolboxCourseContextClientOptions) {
-		this.policy = {
-			...DEFAULT_COURSE_CONTEXT_REQUEST_POLICY,
-			...options.policy,
-		};
-		this.now = options.now ?? Date.now;
+		this.policy = normalizeCourseContextRequestPolicy(options.policy);
+		this.now = options.scheduler?.now ?? options.now ?? Date.now;
 		this.sleep =
+			options.scheduler?.sleep ??
 			options.sleep ??
 			((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 		this.random = options.random ?? Math.random;
+		this.setTimeout = options.scheduler?.setTimeout ?? setTimeout;
+		this.clearTimeout =
+			options.scheduler?.clearTimeout ??
+			((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>));
 	}
 
 	private emitAttempt(event: CourseContextAttemptEvent): void {
@@ -165,7 +154,7 @@ export class ToolboxCourseContextClient {
 				});
 				return value;
 			} catch (error) {
-				const classified = classifyRequestFailure(error);
+				const classified = classifyCourseContextRequestFailure(error);
 				if (!classified) {
 					this.emitAttempt({
 						attempt,
@@ -217,7 +206,7 @@ export class ToolboxCourseContextClient {
 		attemptTimeoutMs: number,
 	): Promise<T> {
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
+		const timeout = this.setTimeout(() => controller.abort(), attemptTimeoutMs);
 		try {
 			const response = await (this.options.fetcher ?? fetch)(
 				`${this.options.baseUrl.replace(/\/$/, "")}${path}`,
@@ -240,7 +229,7 @@ export class ToolboxCourseContextClient {
 				throw new ToolboxCourseContextResponseError();
 			}
 		} finally {
-			clearTimeout(timeout);
+			this.clearTimeout(timeout);
 		}
 	}
 
