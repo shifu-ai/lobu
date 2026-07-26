@@ -1552,15 +1552,50 @@ describe("course context gate", () => {
 	test("settles a hanging retry sleep at the operation deadline", async () => {
 		const base = deterministicScheduler();
 		const scheduler = { ...base, sleep: () => new Promise<void>(() => {}) };
+		const events: Array<{ attempt: number; retrying: boolean }> = [];
 		const fetcher = vi.fn(() => Promise.reject(new TypeError("fetch failed")));
 		const client = new ToolboxCourseContextClient({
-			baseUrl: "https://toolbox.test", secret: "secret", fetcher, scheduler, random: () => 0,
+			baseUrl: "https://toolbox.test", secret: "secret", fetcher, scheduler, random: () => 0, onAttempt: (event) => { events.push(event); },
 		});
 		const request = client.resolve({ ownerUserId: "u", agentId: "a", conversationId: "c", message: "課程資料" });
 		await scheduler.advanceBy(1);
 		await scheduler.advanceBy(4999);
 		await expect(request).rejects.toMatchObject({ failureClass: "timeout", attempt: 1, totalDurationMs: 5000 });
 		expect(fetcher).toHaveBeenCalledTimes(1);
+		expect(events).toEqual([expect.objectContaining({ attempt: 1, retrying: true })]);
+	});
+
+	test("bounds a hanging terminal attempt callback as a request timeout", async () => {
+		const scheduler = deterministicScheduler();
+		const fetcher = vi.fn().mockResolvedValue({ ok: false, status: 403, text: async () => "" } as Response);
+		const client = new ToolboxCourseContextClient({ baseUrl: "https://toolbox.test", secret: "secret", fetcher, scheduler, onAttempt: async () => new Promise<void>(() => {}) });
+		const request = client.resolve({ ownerUserId: "u", agentId: "a", conversationId: "c", message: "課程資料" });
+		await scheduler.advanceBy(1);
+		await scheduler.advanceBy(4999);
+		await expect(request).rejects.toMatchObject({ failureClass: "timeout", attempt: 1, totalDurationMs: 5000 });
+	});
+
+	test("includes a slow terminal callback in the outward error duration", async () => {
+		const scheduler = deterministicScheduler();
+		const fetcher = vi.fn().mockResolvedValue({ ok: false, status: 403, text: async () => "" } as Response);
+		const client = new ToolboxCourseContextClient({ baseUrl: "https://toolbox.test", secret: "secret", fetcher, scheduler, onAttempt: () => scheduler.sleep(50) });
+		const request = client.resolve({ ownerUserId: "u", agentId: "a", conversationId: "c", message: "課程資料" });
+		await scheduler.advanceBy(1);
+		await scheduler.advanceBy(50);
+		await expect(request).rejects.toMatchObject({ failureClass: "upstream_4xx", attempt: 1, totalDurationMs: 51 });
+	});
+
+	test("bounds a hanging retrying callback without starting a retry", async () => {
+		const scheduler = deterministicScheduler();
+		const fetcher = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+		const events: Array<{ attempt: number; retrying: boolean }> = [];
+		const client = new ToolboxCourseContextClient({ baseUrl: "https://toolbox.test", secret: "secret", fetcher, scheduler, random: () => 0, onAttempt: async (event) => { events.push(event); await new Promise<void>(() => {}); } });
+		const request = client.resolve({ ownerUserId: "u", agentId: "a", conversationId: "c", message: "課程資料" });
+		await scheduler.advanceBy(1);
+		await scheduler.advanceBy(4899);
+		await expect(request).rejects.toMatchObject({ failureClass: "timeout", attempt: 1, totalDurationMs: 4900 });
+		expect(fetcher).toHaveBeenCalledTimes(1);
+		expect(events).toEqual([expect.objectContaining({ attempt: 1, retrying: true })]);
 	});
 
 	test("preserves only the real secret across mixed-case header collisions", async () => {

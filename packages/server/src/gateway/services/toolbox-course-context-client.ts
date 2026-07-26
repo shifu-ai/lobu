@@ -128,15 +128,23 @@ export class ToolboxCourseContextClient {
 		});
 	}
 
-	private async emitAttempt(
+	private async deliverAttempt(
 		event: CourseContextAttemptEvent,
 		remainingMs: number,
+		attempt: number,
+		operationStartedAt: number,
 	): Promise<void> {
 		if (!this.options.onAttempt) return;
-		await this.settleWithin(
-			Promise.resolve().then(() => this.options.onAttempt?.(event)),
-			remainingMs,
-		);
+		try {
+			await this.settleWithin(
+				Promise.resolve().then(() => this.options.onAttempt?.(event)),
+				remainingMs,
+			);
+		} catch (error) {
+			if (error instanceof ToolboxCourseContextTimeoutError)
+				throw this.requestError("timeout", attempt, operationStartedAt, undefined, error);
+			throw error;
+		}
 	}
 
 	private retryDelayMs(): number {
@@ -185,13 +193,6 @@ export class ToolboxCourseContextClient {
 			} catch (error) {
 				const classified = classifyCourseContextRequestFailure(error);
 				if (!classified) throw error;
-				const requestError = this.requestError(
-					classified.failureClass,
-					attempt,
-					operationStartedAt,
-					classified.upstreamStatus,
-					error,
-				);
 				const canRetry =
 					attempt < this.policy.maxAttempts &&
 					retryableCourseContextFailure(
@@ -200,12 +201,16 @@ export class ToolboxCourseContextClient {
 					);
 				const delayMs = canRetry ? this.retryDelayMs() : 0;
 				if (!canRetry || deadlineAt - this.now() <= delayMs) {
-					await this.emitAttempt({
+					await this.deliverAttempt({
 						attempt, attemptTimeoutMs, totalDurationMs: this.now() - operationStartedAt,
 						failureClass: classified.failureClass, upstreamStatus: classified.upstreamStatus, retrying: false,
-					}, Math.max(0, deadlineAt - this.now()));
-					throw requestError;
+					}, Math.max(0, deadlineAt - this.now()), attempt, operationStartedAt);
+					throw this.requestError(classified.failureClass, attempt, operationStartedAt, classified.upstreamStatus, error);
 				}
+				await this.deliverAttempt({
+					attempt, attemptTimeoutMs, totalDurationMs: this.now() - operationStartedAt,
+					failureClass: classified.failureClass, upstreamStatus: classified.upstreamStatus, retrying: true,
+				}, Math.max(0, deadlineAt - this.now() - delayMs), attempt, operationStartedAt);
 				try {
 					await this.settleWithin(this.sleep(delayMs), deadlineAt - this.now());
 				} catch (sleepError) {
@@ -213,22 +218,11 @@ export class ToolboxCourseContextClient {
 					if (!sleepFailure) throw sleepError;
 					throw this.requestError(sleepFailure.failureClass, attempt, operationStartedAt, sleepFailure.upstreamStatus, sleepError);
 				}
-				await this.emitAttempt({
-					attempt, attemptTimeoutMs, totalDurationMs: this.now() - operationStartedAt,
-					failureClass: classified.failureClass, upstreamStatus: classified.upstreamStatus, retrying: true,
-				}, Math.max(0, deadlineAt - this.now()));
 				continue;
 			}
-			try {
-				await this.emitAttempt({
+			await this.deliverAttempt({
 					attempt, attemptTimeoutMs, totalDurationMs: this.now() - operationStartedAt, retrying: false,
-				}, Math.max(0, deadlineAt - this.now()));
-			} catch (eventError) {
-				const eventFailure = classifyCourseContextRequestFailure(eventError);
-				if (eventFailure?.failureClass === "timeout")
-					throw this.requestError("timeout", attempt, operationStartedAt, undefined, eventError);
-				throw eventError;
-			}
+				}, Math.max(0, deadlineAt - this.now()), attempt, operationStartedAt);
 			return value;
 		}
 		throw this.requestError("timeout", this.policy.maxAttempts, operationStartedAt);
