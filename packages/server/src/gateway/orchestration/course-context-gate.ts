@@ -14,6 +14,7 @@ import {
 	ToolboxCourseContextClient,
 	type ToolboxCourseContextClientOptions,
 } from "../services/toolbox-course-context-client.js";
+import { ToolboxCourseContextRequestError } from "../services/course-context-request-policy.js";
 import {
 	retrieveCourseMemory,
 	type CourseMemorySearch,
@@ -22,6 +23,10 @@ import {
 	emitJourneyEvent,
 	type JourneyEventPayload,
 } from "../services/journey-observability.js";
+import {
+	parseShifuTraceHeaderValues,
+	parseShifuTraceHeaders,
+} from "../trace-context.js";
 import { gradeCourseEvidenceReadiness } from "./course-evidence-readiness.js";
 import type { CourseReadinessField } from "@lobu/core";
 
@@ -76,6 +81,17 @@ const COURSE_INTENT =
 	/(?:銷講|三個秘密|課綱|課程|大課|老師|錄課|會議待辦|戰報|招生|offer)/iu;
 const PERSONAL_REMINDER =
 	/提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話費|水費|電費)/u;
+
+function normalizeCourseIntentText(message: string): string {
+	return message.normalize("NFKC").replaceAll("課成", "課程");
+}
+
+export function isCourseContextStatusIntent(message: string): boolean {
+	const normalized = normalizeCourseIntentText(message.trim());
+	return /(?:有|知道|找到|取得|讀到|建好).{0,12}(?:我的)?課程(?:資料|資訊)?/u.test(normalized) ||
+		/(?:我的)?課程(?:資料|資訊)?.{0,12}(?:有|存在|建好|完成|取得|讀到)/u.test(normalized) ||
+		/知道我是哪一門課/u.test(normalized);
+}
 const logger = createLogger("course-context-gate");
 const STRUCTURED_CONTEXT_FIELDS = new Set([
 	"audience",
@@ -139,6 +155,7 @@ function mergeReadiness(
 async function traceCourse(
 	data: MessagePayload,
 	options: CourseContextGateOptions | undefined,
+	traceContext: { traceId: string; journeyId: string },
 	event: string,
 	status: string,
 	fields: Record<string, unknown> = {},
@@ -147,13 +164,8 @@ async function traceCourse(
 	const isMemoryEvent = event.startsWith("context.memory.");
 	try {
 		void emitter({
-			trace_id:
-				extractTraceId(data) ??
-				`tr_${hashIdentity(data.messageId ?? data.conversationId).slice(0, 32)}`,
-			journey_id:
-				typeof data.platformMetadata?.journeyId === "string"
-					? data.platformMetadata.journeyId
-					: "course_context_gate",
+			trace_id: traceContext.traceId,
+			journey_id: traceContext.journeyId,
 			event,
 			service: "lobu",
 			module: "course-context-gate",
@@ -168,6 +180,49 @@ async function traceCourse(
 			...fields,
 		}).catch(() => {});
 	} catch {}
+}
+
+function resolveCourseGateTraceContext(
+	data: MessagePayload,
+	options: CourseContextGateOptions | undefined,
+): { traceId: string; journeyId: string } {
+	const payloadTrace = parseShifuTraceHeaderValues({
+		"X-Shifu-Trace-Id": extractTraceId(data),
+	});
+	const platformTrace = parseShifuTraceHeaderValues({
+		"X-Shifu-Trace-Id": data.platformMetadata?.traceId,
+		"X-Shifu-Journey-Id": data.platformMetadata?.journeyId,
+	});
+	const callerTrace = parseShifuTraceHeaderValues(options?.traceHeaders ?? {});
+	const turnId = typeof data.platformMetadata?.turnId === "string"
+		? data.platformMetadata.turnId
+		: undefined;
+	const stableTurnIdentity = data.messageId ?? turnId;
+	return {
+		traceId:
+			payloadTrace.traceId ??
+			platformTrace.traceId ??
+			callerTrace.traceId ??
+			(stableTurnIdentity
+				? `tr_${hashIdentity(stableTurnIdentity).slice(0, 32)}`
+				: parseShifuTraceHeaders({}).traceId),
+		journeyId:
+			platformTrace.journeyId ??
+			callerTrace.journeyId ??
+			"course_context_gate",
+	};
+}
+
+function requestFailureTraceFields(error: unknown): Record<string, unknown> {
+	if (!(error instanceof ToolboxCourseContextRequestError)) return {};
+	return {
+		failure_class: error.failureClass,
+		...(error.upstreamStatus === undefined
+			? {}
+			: { upstream_status: error.upstreamStatus }),
+		attempt: error.attempt,
+		duration_ms: error.totalDurationMs,
+	};
 }
 function projectRequiredCourseContext(
 	bundle: Awaited<ReturnType<ToolboxCourseContextClient["bundle"]>>,
@@ -212,6 +267,7 @@ export function decideCourseTurn(
 		courseContextRequired:
 			data.platformMetadata?.courseScope === "reviewed" ||
 			COURSE_INTENT.test(message) ||
+			isCourseContextStatusIntent(message) ||
 			Boolean(
 				options.hasActiveCourse &&
 					/^(?:繼續|接著|然後|再來|照剛才|就這個)/u.test(message),
@@ -268,8 +324,11 @@ export async function attachCourseContextForReviewedScope(
 		};
 	if (!scheduled && isExplicitPersonalBypass(data))
 		return { status: "not_required" };
-	const gateStarted = Date.now();
-	await traceCourse(data, options, "context.gate.started", "started", {
+	const gateNow = options?.scheduler?.now ?? options?.now ?? Date.now;
+	const gateStarted = gateNow();
+	const gateDeadlineAt = gateStarted + 8000;
+	const traceContext = resolveCourseGateTraceContext(data, options);
+	await traceCourse(data, options, traceContext, "context.gate.started", "started", {
 		gate_mode: process.env.COURSE_CONTEXT_GATE_MODE ?? "enforce",
 	});
 	let session = null;
@@ -473,6 +532,33 @@ export async function attachCourseContextForReviewedScope(
 		...options,
 		baseUrl,
 		secret,
+		gateDeadlineAt,
+		traceHeaders: {
+			...options?.traceHeaders,
+			"X-Shifu-Trace-Id": traceContext.traceId,
+			"X-Shifu-Journey-Id": traceContext.journeyId,
+		},
+		onAttempt: async (attemptEvent) => {
+			await options?.onAttempt?.(attemptEvent);
+			await traceCourse(
+				data,
+				options,
+				traceContext,
+				"context.course.request_attempt",
+				attemptEvent.outcome === "retrying"
+					? "degraded"
+					: attemptEvent.outcome,
+				{
+					operation: attemptEvent.operation,
+					attempt: attemptEvent.attempt,
+					max_attempts: attemptEvent.maxAttempts,
+					attempt_duration_ms: attemptEvent.attemptDurationMs,
+					total_duration_ms: attemptEvent.totalDurationMs,
+					failure_class: attemptEvent.failureClass,
+					upstream_status: attemptEvent.upstreamStatus,
+				},
+			);
+		},
 	});
 	if (pending && !choice)
 		return { status: "clarification_required", candidates: pending.candidates };
@@ -515,10 +601,11 @@ export async function attachCourseContextForReviewedScope(
 		await traceCourse(
 			data,
 			options,
+			traceContext,
 			`context.course.${resolution.status}`,
 			"ok",
 			{
-				duration_ms: Date.now() - gateStarted,
+				duration_ms: gateNow() - gateStarted,
 				...(resolution.status === "resolved"
 					? {
 							course_key: resolution.course.courseKey,
@@ -533,8 +620,9 @@ export async function attachCourseContextForReviewedScope(
 			{ category: "resolver" },
 			"Course context resolver unavailable",
 		);
-		await traceCourse(data, options, "context.course.missing", "failed", {
+		await traceCourse(data, options, traceContext, "context.course.missing", "failed", {
 			reason_code: "resolver_unavailable",
+			...requestFailureTraceFields(error),
 		});
 		if (options?.propagateInfrastructureErrors) throw error;
 		return {
@@ -609,16 +697,17 @@ export async function attachCourseContextForReviewedScope(
 			ownerUserId: data.userId,
 			agentId: data.agentId,
 		});
-		await traceCourse(data, options, "context.bundle.loaded", "ok", {
+		await traceCourse(data, options, traceContext, "context.bundle.loaded", "ok", {
 			course_key: course.courseKey,
 			course_entity_id: course.courseEntityId,
 			context_version: bundle.context.version,
 		});
 	} catch (error) {
 		logger.warn({ category: "bundle" }, "Course context bundle unavailable");
-		await traceCourse(data, options, "context.bundle.failed", "failed", {
+		await traceCourse(data, options, traceContext, "context.bundle.failed", "failed", {
 			course_key: course.courseKey,
 			reason_code: "bundle_unavailable",
+			...requestFailureTraceFields(error),
 		});
 		if (options?.propagateInfrastructureErrors) throw error;
 		return {
@@ -697,6 +786,7 @@ export async function attachCourseContextForReviewedScope(
 	await traceCourse(
 		data,
 		options,
+		traceContext,
 		`context.memory.${retrieval.status}`,
 		retrieval.status === "degraded"
 			? "degraded"
@@ -713,6 +803,7 @@ export async function attachCourseContextForReviewedScope(
 	await traceCourse(
 		data,
 		options,
+		traceContext,
 		`context.guard.${retrieval.crossCourseGuard}`,
 		retrieval.crossCourseGuard === "passed" ? "ok" : "failed",
 		{ course_entity_id: course.courseEntityId },
@@ -815,6 +906,7 @@ export async function attachCourseContextForReviewedScope(
 	await traceCourse(
 		data,
 		options,
+		traceContext,
 		`context.binding.${bindingSucceeded ? "updated" : "failed"}`,
 		bindingSucceeded ? "ok" : "failed",
 		{

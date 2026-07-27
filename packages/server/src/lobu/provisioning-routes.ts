@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 import type { AgentSettings, StoredConnection } from "@lobu/core";
-import { type Context, Hono } from "hono";
+import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { canonicalize } from "json-canonicalize";
 import type { McpConfigService } from "../gateway/auth/mcp/config-service.js";
@@ -50,6 +50,8 @@ import {
   createPostgresEffectiveToolInventoryStore,
   createReleaseAssuranceReadback,
 } from "./release-assurance-readback.js";
+import { requireAdminPat } from "./provisioning-auth.js";
+import { createRuntimeReadModelRoutes } from "./runtime-read-model-routes.js";
 
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
 const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
@@ -103,30 +105,6 @@ interface ProvisioningRoutesOptions {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function requireAdminPat(c: Context<{ Bindings: Env }>): Response | null {
-  const session = c.get("session") as { id?: string } | null;
-  const authSource = c.get("authSource") as "pat" | "session" | "oauth" | null;
-  const authInfo = c.get("mcpAuthInfo") as { scopes?: string[] } | null;
-  const scopes = Array.isArray(authInfo?.scopes) ? authInfo.scopes : [];
-
-  if (
-    authSource === "pat" &&
-    session?.id?.startsWith("pat:") &&
-    scopes.includes("mcp:admin")
-  ) {
-    return null;
-  }
-
-  return c.json(
-    {
-      error: "forbidden",
-      error_description:
-        "Provisioning requires an organization-scoped PAT with mcp:admin scope.",
-    },
-    403
-  );
 }
 
 function validateSettings(settings: unknown): Omit<AgentSettings, "updatedAt"> {
@@ -727,6 +705,8 @@ export function createProvisioningRoutes(
       settings,
     });
   });
+
+  provisioningRoutes.route("/", createRuntimeReadModelRoutes());
 
   provisioningRoutes.put(
     "/agents/:agentId/managed-settings",
