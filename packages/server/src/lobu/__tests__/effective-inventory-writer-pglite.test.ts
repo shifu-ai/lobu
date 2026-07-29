@@ -210,7 +210,7 @@ describe("worker effective inventory writer to public release readback", () => {
     const activeClaimExpiresAt = new Date(base.getTime() + 60_000);
     const inventoryObservedAt = new Date(base.getTime() + 10_000);
     const readbackAt = new Date(base.getTime() + 70_000);
-    const inventoryExpiresAt = new Date(base.getTime() + 310_000);
+    const inventoryExpiresAt = new Date(base.getTime() + 10_000 + 20 * 60_000);
 
     await pg.query(
       "UPDATE public.agent_release_capability_snapshots SET observed_at=$1, expires_at=$2 WHERE organization_id=$3 AND agent_id=$4",
@@ -311,7 +311,7 @@ describe("worker effective inventory writer to public release readback", () => {
     expect(stored.rows).toHaveLength(1);
     expect(toIso(stored.rows[0]!.observed_at)).toBe(observedAt.toISOString());
     expect(toIso(stored.rows[0]!.expires_at)).toBe(
-      new Date(observedAt.getTime() + 5 * 60_000).toISOString(),
+      new Date(observedAt.getTime() + 20 * 60_000).toISOString(),
     );
   });
 });

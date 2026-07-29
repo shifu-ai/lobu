@@ -28,6 +28,14 @@ const WEEKDAY_INDEX_ZH: Record<string, number> = {
   星期六: 6,
 };
 
+// 「週三」「周三」與「星期三」同義；LINE 對話實務上短寫佔多數（2026-07-28
+// hualee 截圖的錯誤星期全用「週X」，當時 guard 只認「星期X」而零攔截）。
+const WEEKDAY_PREFIX_RE = /^(星期|週|周)/;
+
+function weekdayIndexOf(label: string): number | undefined {
+  return WEEKDAY_INDEX_ZH[`星期${label.replace(WEEKDAY_PREFIX_RE, "")}`];
+}
+
 export type DateCorrection = {
   reason: "weekday_mismatch" | "relative_date_mismatch";
   original: string;
@@ -246,29 +254,35 @@ const ISO_DATE_RE =
   /(?:^|[^\d])\d{4}-(?:0?[1-9]|1[0-2])-(?:0?[1-9]|[12]\d|3[01])(?:$|[^\d])/;
 const SHORT_DATE_RE =
   /(?:^|[^\d/])(?:0?[1-9]|1[0-2])\/(?:0?[1-9]|[12]\d|3[01])(?:$|[^\d/])/;
+// 排程時刻變更（「改成 18:00」「延到 9:30」）：使用者沒提任何日期詞，但 agent 的
+// 回覆幾乎必然複述排程日曆（含星期）。2026-07-28 事故的觸發訊息正是這一型——
+// 「只改正式版，改成 18:00」不含日期詞，guard 沒跑，整排錯誤的「週X」原樣出門。
+const TIME_OF_DAY_SCHEDULING_RE =
+  /(?:[01]?\d|2[0-3])[:：][0-5]\d|排程|時段|时段/;
 
 export function isDateSensitiveTurn(promptText: string): boolean {
   return (
     CHINESE_DATE_SENSITIVE_RE.test(promptText) ||
     ENGLISH_DATE_SENSITIVE_RE.test(promptText) ||
     ISO_DATE_RE.test(promptText) ||
-    SHORT_DATE_RE.test(promptText)
+    SHORT_DATE_RE.test(promptText) ||
+    TIME_OF_DAY_SCHEDULING_RE.test(promptText)
   );
 }
 
 const EXPLICIT_DATE_WITH_WEEKDAY_RE =
-  /(?<![A-Za-z0-9_./-])(\d{4})-(\d{2})-(\d{2})(\s*[(（])(星期[日天一二三四五六])([)）])/g;
+  /(?<![A-Za-z0-9_./-])(\d{4})-(\d{2})-(\d{2})(\s*[(（])((?:星期|週|周)[日天一二三四五六])([)）])/g;
 const EXPLICIT_ISO_DATE_CLAIM_RE =
   /(?<![A-Za-z0-9_./-])(\d{4})-(\d{2})-(\d{2})(?:T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_])/g;
 const INVALID_CALENDAR_DATE_BLOCK_TEXT =
   "我偵測到無效或無法可靠判定的日期，因此沒有送出猜測結果。請確認日期後再試一次。";
 
 const RELATIVE_WEEK_DATE_RE =
-  /(?<![上下本這大小前後])((上週|本週|這週|下週)\s*(?:(星期)([日天一二三四五六])|([日天一二三四五六])))((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期)?[日天一二三四五六])([)）])/g;
+  /(?<![上下本這大小前後])((上週|本週|這週|下週)\s*(?:(星期)([日天一二三四五六])|([日天一二三四五六])))((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期|週|周)?[日天一二三四五六])([)）])/g;
 const RELATIVE_DAY_DATE_RE =
-  /((今天|昨天|明天))((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期)?[日天一二三四五六])([)）])/g;
+  /((今天|昨天|明天))((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期|週|周)?[日天一二三四五六])([)）])/g;
 const SHORT_DATE_WITH_WEEKDAY_RE =
-  /(?<![A-Za-z0-9_./-])(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期)?[日天一二三四五六])([)）])/g;
+  /(?<![A-Za-z0-9_./-])(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期|週|周)?[日天一二三四五六])([)）])/g;
 
 const RELATIVE_WEEK_REFERENCE: Record<string, RelativeWeekReference> = {
   上週: "previous",
@@ -294,14 +308,13 @@ function weekdayFor(parts: CalendarDate): number {
 }
 
 function weekdayWithStyle(original: string, expectedIndex: number): string {
-  const originalIndex =
-    WEEKDAY_INDEX_ZH[
-      original.startsWith("星期") ? original : `星期${original}`
-    ];
+  const originalIndex = weekdayIndexOf(original);
   if (originalIndex === expectedIndex) return original;
 
   const expected = WEEKDAYS_ZH[expectedIndex] ?? original;
-  if (original.startsWith("星期")) return expected;
+  const prefix = WEEKDAY_PREFIX_RE.exec(original)?.[1];
+  if (prefix === "星期") return expected;
+  if (prefix) return `${prefix}${expected.slice(2)}`;
   return expected.slice(2);
 }
 
@@ -336,9 +349,9 @@ function validUtcDate(year: number, month: number, day: number): Date | null {
 const NEXT_OCCURRENCE_RE =
   /(?:下一場|下次|\bnext\s+(?:event|session|occurrence)\b)/i;
 const FINAL_SHORT_DATE_CLAIM_RE =
-  /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:([\s]*[(（])((?:星期)?[日天一二三四五六])([)）]))?/;
+  /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:([\s]*[(（])((?:星期|週|周)?[日天一二三四五六])([)）]))?/;
 const FINAL_ISO_DATE_CLAIM_RE =
-  /(?<!\d)(\d{4})-(\d{2})-(\d{2})(?:([\s]*[(（])(星期[日天一二三四五六])([)）]))?/;
+  /(?<!\d)(\d{4})-(\d{2})-(\d{2})(?:([\s]*[(（])((?:星期|週|周)[日天一二三四五六])([)）]))?/;
 const NEXT_OCCURRENCE_BLOCK_TEXT =
   "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。";
 const NEXT_OCCURRENCE_ASSOCIATION_LIMIT = 120;
@@ -1239,8 +1252,8 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
       if (!date) return match;
 
       const expectedWeekdayIndex = date.getUTCDay();
-      if (WEEKDAY_INDEX_ZH[weekday] === expectedWeekdayIndex) return match;
-      const expectedWeekday = WEEKDAYS_ZH[expectedWeekdayIndex] ?? weekday;
+      if (weekdayIndexOf(weekday) === expectedWeekdayIndex) return match;
+      const expectedWeekday = weekdayWithStyle(weekday, expectedWeekdayIndex);
 
       corrections.push({
         reason: "weekday_mismatch",
