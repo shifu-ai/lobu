@@ -237,7 +237,11 @@ export async function recordAgentEffectiveToolInventoryTruth(
     throw new Error(
       "effective inventory fingerprint does not match tool names",
     );
-  const expiresAt = new Date(observedAt.getTime() + 5 * 60_000);
+  // 20 分：與 Toolbox 端 healthFreshCutoff / canaryRuntimeFreshness 對齊（三窗一體）。
+  // 5 分曾使 post-canary workflow（全程 5.5-6.5 分）數學上不可能在窗內完成——
+  // canary 最後一個 turn 的 INV 快照在 transition/finalize 前必然過期（promote 競速根因）。
+  // 一致性由 fingerprint/digest 精確比對保證，本值只管時效。
+  const expiresAt = new Date(observedAt.getTime() + 20 * 60_000);
   const rows = await sql`
     INSERT INTO public.agent_effective_tool_inventory_snapshots (
       organization_id, agent_id, release_id, release_sequence, capability_snapshot_digest,

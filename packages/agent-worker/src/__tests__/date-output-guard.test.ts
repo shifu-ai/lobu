@@ -1454,6 +1454,62 @@ describe("guardDateOutput", () => {
     expect(result.text).toBe("日期是 2026-07-16 (星期四)。");
   });
 
+  test("corrects a wrong 週X short-form weekday and keeps the 週 style (2026-07-28 incident shape)", () => {
+    // 7/16 是週四；agent 慣用「週X」短寫，舊 guard 只認「星期X」而零攔截。
+    // userMessage 取自事故原文：不含日期詞、只有 HH:MM，靠時刻變更判定觸發 guard。
+    const finalText = "7/16（週三）銷講 → 7/17 00:05 初版";
+    const result = guardDateOutput({
+      userMessage: "只改正式版，改成 18:00",
+      finalText,
+      now: NOW,
+    });
+
+    expect(result.status).toBe("corrected");
+    expect(result.text).toBe("7/16（週四）銷講 → 7/17 00:05 初版");
+  });
+
+  test("corrects a wrong 周X simplified-prefix weekday and keeps the 周 style", () => {
+    const finalText = "7/16（周三）";
+    const result = guardDateOutput({
+      userMessage: finalText,
+      finalText,
+      now: NOW,
+    });
+
+    expect(result.status).toBe("corrected");
+    expect(result.text).toBe("7/16（周四）");
+  });
+
+  test("leaves a correct 週X short-form weekday unchanged", () => {
+    const finalText = "7/16（週四）";
+
+    expect(
+      guardDateOutput({ userMessage: finalText, finalText, now: NOW })
+    ).toEqual({ status: "unchanged", text: finalText });
+  });
+
+  test("corrects an explicit ISO date with a wrong 週X weekday", () => {
+    const result = guardDateOutput({
+      userMessage: "2026-07-16 是星期幾？",
+      finalText: "日期是 2026-07-16 (週三)。",
+      now: new Date("2026-07-13T10:15:00.000Z"),
+    });
+    expect(result.status).toBe("corrected");
+    expect(result.text).toBe("日期是 2026-07-16 (週四)。");
+  });
+
+  test("corrects stale relative-week dates whose weekday uses the 週X short form", () => {
+    const finalText = "下週三是 7/22（週二）";
+    const result = guardDateOutput({
+      userMessage: finalText,
+      finalText,
+      now: NOW,
+    });
+
+    expect(result.status).toBe("corrected");
+    expect(result.text).toBe("下週三是 7/22（週三）");
+  });
+
   test("does not correct explicit ISO dates embedded in identifier or path tokens", () => {
     for (const finalText of [
       "version_2026-07-16 (星期三)",
