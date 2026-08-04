@@ -8,7 +8,10 @@ import { isCourseEntityId } from '../utils/course-entity-id';
 import { AGENT_ID_PATTERN } from './stores/postgres-stores';
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
-const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,255}$/;
+// idempotencyKey 由呼叫端組裝，而 Toolbox 的 key 把 course key 嵌在裡面，所以它跟
+// COURSE_ENTITY_ID_PATTERN 一樣必須容納 unicode 課名。同樣只加字母數字，仍排除路徑分隔符、
+// 空白、控制與格式字元、引號、百分號。
+const SAFE_ID_PATTERN = /^[\p{L}\p{N}][\p{L}\p{N}:_.-]{0,255}$/u;
 const MAX_CONTENT_LENGTH = 200_000;
 const MAX_METADATA_BYTES = 64_000;
 const RESERVED_METADATA_KEYS = new Set([
