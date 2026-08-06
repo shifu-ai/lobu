@@ -307,6 +307,9 @@ function createToolCallDefinition(params: {
                 ok: false,
                 code: result.code,
                 message: result.message,
+                ...(result.expectedParameters
+                  ? { expectedParameters: result.expectedParameters }
+                  : {}),
                 tool: result.entry
                   ? {
                       mcpId: result.entry.mcpId,

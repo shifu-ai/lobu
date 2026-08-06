@@ -19,6 +19,11 @@ import { isExplicitPersonalReminderAttempt } from "./mcp-execution-contract";
 import type { TurnExecutionIntent } from "./turn-execution-intent";
 import { snapshotToolsByMcp } from "./tool-inventory-snapshot";
 import {
+  type InputSchemaSummary,
+  summarizeInputSchemaForModel,
+  unknownTopLevelKeys,
+} from "./summarize-input-schema";
+import {
   getOrBuildToolRetrievalIndex,
   searchToolRetrievalIndex,
   type ToolCandidateMatch,
@@ -145,6 +150,11 @@ export type RuntimeToolCallResult =
       message: string;
       entry?: RuntimeToolCatalogEntry;
       candidates?: Array<{ mcpId: string; name: string }>;
+      /**
+       * Parameter digest for the model to self-correct against. Present
+       * only on argument-shaped failures — see `withExpectedParameters`.
+       */
+      expectedParameters?: InputSchemaSummary;
     };
 
 export interface DispatchRuntimeToolCallParams {
@@ -451,6 +461,25 @@ function findRuntimeToolCatalogEntry(
   return entry ? { status: "found", entry } : { status: "missing" };
 }
 
+/**
+ * Attach the tool's parameter digest to an argument-shaped failure.
+ *
+ * Deliberately NOT applied to authorization or availability failures: a
+ * caller blocked by policy who is handed a parameter list will read it as
+ * "my arguments were wrong" and retry with different arguments forever.
+ */
+function withExpectedParameters(
+  failure: Extract<RuntimeToolCallResult, { ok: false }>,
+  entry: RuntimeToolCatalogEntry,
+  args: Record<string, unknown>
+): Extract<RuntimeToolCallResult, { ok: false }> {
+  const expectedParameters = summarizeInputSchemaForModel(
+    entry.tool.inputSchema,
+    { argsSent: args }
+  );
+  return expectedParameters ? { ...failure, expectedParameters } : failure;
+}
+
 function validateToolArgs(
   entry: RuntimeToolCatalogEntry,
   args: Record<string, unknown>
@@ -459,15 +488,22 @@ function validateToolArgs(
   try {
     const schema = Type.Unsafe(entry.tool.inputSchema);
     if (Value.Check(schema, args)) return null;
-    return {
-      ok: false,
-      code: "schema_invalid",
-      message: `Arguments failed schema validation for ${externalToolKey(
-        entry.mcpId,
-        entry.name
-      )}.`,
+    // Unreachable until #89: Type.Unsafe() has no typebox checker, so
+    // Value.Check throws and the catch below swallows it. Wiring kept so the
+    // digest flows the moment schema validation actually runs.
+    return withExpectedParameters(
+      {
+        ok: false,
+        code: "schema_invalid",
+        message: `Arguments failed schema validation for ${externalToolKey(
+          entry.mcpId,
+          entry.name
+        )}.`,
+        entry,
+      },
       entry,
-    };
+      args
+    );
   } catch {
     return null;
   }
@@ -607,7 +643,7 @@ export async function dispatchRuntimeToolCall(
     const result = await params.callTool(entry.mcpId, entry.name, params.args);
     const delegatedErrorCode = classifyDelegatedToolError(result);
     if (delegatedErrorCode) {
-      return {
+      const failure: Extract<RuntimeToolCallResult, { ok: false }> = {
         ok: false,
         code: delegatedErrorCode,
         message:
@@ -615,6 +651,21 @@ export async function dispatchRuntimeToolCall(
           `Tool ${externalToolKey(entry.mcpId, entry.name)} failed.`,
         entry,
       };
+      // `classifyDelegatedToolError` funnels every unrecognised isError
+      // result into `tool_error`, and most of those are business-rule
+      // failures with perfectly valid arguments. Undeclared top-level keys
+      // are the signal that separates a shape problem from a rule problem.
+      // A delegated `schema_invalid` (an MCP server setting `errorCode:
+      // "schema_invalid"` on its result — `isStableErrorCode` passes it
+      // straight through) is argument-shaped by definition, so it gets the
+      // digest unconditionally regardless of which keys were sent.
+      const argumentShaped =
+        delegatedErrorCode === "schema_invalid" ||
+        (delegatedErrorCode === "tool_error" &&
+          unknownTopLevelKeys(entry.tool.inputSchema, params.args).length > 0);
+      return argumentShaped
+        ? withExpectedParameters(failure, entry, params.args)
+        : failure;
     }
     return {
       ok: true,
