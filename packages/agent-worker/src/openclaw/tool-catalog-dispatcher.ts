@@ -662,8 +662,7 @@ export async function dispatchRuntimeToolCall(
       const argumentShaped =
         delegatedErrorCode === "schema_invalid" ||
         (delegatedErrorCode === "tool_error" &&
-          unknownTopLevelKeys(entry.tool.inputSchema, params.args).length >
-            0);
+          unknownTopLevelKeys(entry.tool.inputSchema, params.args).length > 0);
       return argumentShaped
         ? withExpectedParameters(failure, entry, params.args)
         : failure;

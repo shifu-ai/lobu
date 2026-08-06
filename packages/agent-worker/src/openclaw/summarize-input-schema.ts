@@ -82,9 +82,7 @@ export function unknownTopLevelKeys(
 ): string[] {
   const properties = schemaProperties(inputSchema);
   if (!properties) return [];
-  return Object.keys(args).filter(
-    (key) => !Object.prototype.hasOwnProperty.call(properties, key)
-  );
+  return Object.keys(args).filter((key) => !Object.hasOwn(properties, key));
 }
 
 export function summarizeInputSchemaForModel(
