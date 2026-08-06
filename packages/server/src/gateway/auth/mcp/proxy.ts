@@ -1,15 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   applyMcpToolFilter,
-  createLogger,
-  emitAgentObsEvent,
-  generateWorkerToken,
-  type GuardrailRegistry,
-  isReservedAutomationToolName,
-  type McpToolFilter,
-  runGuardrailInstances,
-  verifyWorkerToken,
+	createLogger,
+	emitAgentObsEvent,
+	generateWorkerToken,
+	type GuardrailRegistry,
+	type McpToolFilter,
+	runGuardrailInstances,
+	verifyWorkerToken,
 } from "@lobu/core";
+import { isReservedAutomationToolName } from "../../../../../core/src/constants";
 import type { Context } from "hono";
 import { Hono } from "hono";
 

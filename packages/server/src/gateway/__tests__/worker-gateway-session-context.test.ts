@@ -1,15 +1,39 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
 	encrypt,
-	generateWorkerToken,
 	type AgentConnectionStore,
+	type ReleaseCapabilityState,
 	type SecretRef,
 } from "@lobu/core";
+import { generateWorkerToken } from "../../../../core/src/worker/auth";
+import {
+	PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY,
+	PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
+} from "../../../../core/src/constants";
 import { WorkerGateway } from "../gateway/index.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import type { SecretListEntry, WritableSecretStore } from "../secrets/index.js";
 
 const fakeConnections = new Map<string, any>();
+
+function activeRelease(
+	capabilityIds: string[] = [PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY],
+): ReleaseCapabilityState {
+	const expiresAt = new Date(Date.now() + 60_000).toISOString();
+	return {
+		status: "active",
+		claim: {
+			environment: "production",
+			toolboxUserId: "user-1",
+			agentId: "agent-1",
+			releaseId: "release-browser",
+			releaseSequence: 1,
+			snapshotDigest: `sha256:${"b".repeat(64)}`,
+			expiresAt,
+			capabilityIds,
+		},
+	};
+}
 
 function createFakeConnectionStore(): AgentConnectionStore {
 	return {
@@ -494,6 +518,37 @@ describe("WorkerGateway session context", () => {
 				}),
 			]),
 		);
+		expect(shifuToolboxTools?.tools.map((tool) => tool.name)).not.toContain(
+			PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
+		);
+
+		const releaseToken = generateWorkerToken("user-1", "conv-1", "worker-a", {
+			channelId: "channel-1",
+			agentId: "agent-1",
+			organizationId: "org-1",
+			tokenKind: "run",
+			runId: 101,
+			releaseState: activeRelease(),
+		});
+		const releaseResponse = await gateway.getApp().request("/session-context", {
+			headers: {
+				authorization: `Bearer ${releaseToken}`,
+				host: "gateway.example.com",
+			},
+		});
+		const releaseBody = (await releaseResponse.json()) as typeof body;
+		const releaseShifuTools = releaseBody.toolboxPersonalAgentTools?.find(
+			(group) => group.connectorKey === "shifu_toolbox",
+		);
+		expect(releaseShifuTools?.tools).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					name: PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
+					connectorToolName: PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
+					approvalRequired: true,
+				}),
+			]),
+		);
 	});
 
 	test("executes materialized personal-agent tools through worker authentication", async () => {
@@ -570,6 +625,102 @@ describe("WorkerGateway session context", () => {
 			"google_workspace",
 			"gws_drive_search",
 			{ query: "超級AI個體" },
+		);
+	});
+
+	test("gates personal browser local ego execution on active release capability", async () => {
+		fakeConnections.set("toolbox-mcp:browser", {
+			id: "toolbox-mcp:browser",
+			organizationId: "org-1",
+			agentId: "agent-1",
+			platform: "shifu_toolbox",
+			config: {},
+			settings: {},
+			metadata: {
+				source: "toolbox-personal-agent-materialized",
+				ownerUserId: "user-1",
+				connectorKey: "shifu_toolbox",
+				mcpId: "shifu-toolbox",
+			},
+			status: "active",
+		});
+		const executeToolDirect = mock(async () => ({
+			content: [{ type: "text", text: "browser action accepted" }],
+			isError: false,
+		}));
+		const gateway = new WorkerGateway(
+			{ send: async () => undefined } as any,
+			"https://gateway.example.com",
+			{ getWorkerConfig: async () => ({ mcpServers: {} }) } as any,
+			{
+				getSessionContext: async () => ({
+					agentInstructions: "",
+					platformInstructions: "",
+					networkInstructions: "",
+					skillsInstructions: "",
+					mcpStatus: [],
+				}),
+			} as any,
+			{ executeToolDirect } as any,
+			undefined,
+			undefined,
+			undefined,
+			createFakeConnectionStore(),
+		);
+		const request = (token: string) =>
+			gateway.getApp().request("/internal/toolbox-personal-agent-tools/call", {
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${token}`,
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({
+					connectorKey: "shifu_toolbox",
+					connectionRef: "toolbox-mcp:browser",
+					connectorToolName: PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
+					args: { action: "tabs.list" },
+				}),
+			});
+
+		const inactiveToken = generateWorkerToken("user-1", "conv-1", "worker-a", {
+			channelId: "channel-1",
+			agentId: "agent-1",
+			organizationId: "org-1",
+			tokenKind: "run",
+			runId: 102,
+			releaseState: activeRelease(["other.capability.v1"]),
+		});
+		const inactive = await request(inactiveToken);
+		expect(inactive.status).toBe(200);
+		expect(await inactive.json()).toEqual({
+			ok: false,
+			content: null,
+			errorCode: "lobu_mcp_tool_not_allowed",
+			errorMessage:
+				"MCP tool requires an active personal browser release capability",
+		});
+		expect(executeToolDirect).not.toHaveBeenCalled();
+
+		const activeToken = generateWorkerToken("user-1", "conv-1", "worker-a", {
+			channelId: "channel-1",
+			agentId: "agent-1",
+			organizationId: "org-1",
+			tokenKind: "run",
+			runId: 103,
+			releaseState: activeRelease(),
+		});
+		const active = await request(activeToken);
+		expect(active.status).toBe(200);
+		expect(await active.json()).toEqual({
+			ok: true,
+			content: [{ type: "text", text: "browser action accepted" }],
+		});
+		expect(executeToolDirect).toHaveBeenCalledWith(
+			"agent-1",
+			"user-1",
+			"shifu-toolbox",
+			PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
+			{ action: "tabs.list" },
 		);
 	});
 

@@ -1,4 +1,5 @@
-import { isReservedAutomationToolName, type McpToolDef } from "@lobu/core";
+import type { McpToolDef } from "@lobu/core";
+import { isReservedAutomationToolName } from "../../../core/src/constants";
 import { classifyToolIntent, type ToolIntent } from "./tool-intent";
 
 export type ToolDomain =

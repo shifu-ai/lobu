@@ -1,6 +1,11 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { McpToolDef, ReleaseCapabilityState } from "@lobu/core";
 import {
+  PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY,
+  PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
+  SHIFU_TOOLBOX_MCP_ID,
+} from "../../../core/src/constants";
+import {
   buildPersonalReminderDeliveryInstructions,
   buildEffectiveToolInventory,
   PERSONAL_REMINDER_DELIVERY_CAPABILITY,
@@ -100,6 +105,40 @@ describe("effective tool inventory", () => {
     expect(inventory.blocked).toEqual([
       { toolKey: "disconnected/existing", reason: "not_connected" },
       { toolKey: "missing/invented", reason: "not_discovered" },
+    ]);
+  });
+
+  test("gates the personal browser facade on the active release capability", () => {
+    const scopedTools = {
+      [SHIFU_TOOLBOX_MCP_ID]: [tool(PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME)],
+    };
+    const gate = {
+      [`${SHIFU_TOOLBOX_MCP_ID}/${PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME}`]:
+        PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY,
+    };
+
+    const inactive = buildEffectiveToolInventory({
+      scopedTools,
+      releaseState: active([]),
+      connectedMcpIds: [SHIFU_TOOLBOX_MCP_ID],
+      releaseCapabilityByToolKey: gate,
+    });
+    const activeInventory = buildEffectiveToolInventory({
+      scopedTools,
+      releaseState: active([PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY]),
+      connectedMcpIds: [SHIFU_TOOLBOX_MCP_ID],
+      releaseCapabilityByToolKey: gate,
+    });
+
+    expect(inactive.allowedToolKeys).toEqual([]);
+    expect(inactive.blocked).toEqual([
+      {
+        toolKey: `${SHIFU_TOOLBOX_MCP_ID}/${PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME}`,
+        reason: "capability_inactive",
+      },
+    ]);
+    expect(activeInventory.allowedToolKeys).toEqual([
+      `${SHIFU_TOOLBOX_MCP_ID}/${PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME}`,
     ]);
   });
 

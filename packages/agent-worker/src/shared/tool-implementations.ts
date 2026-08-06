@@ -3,11 +3,13 @@ import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
-  type AutomationConfirmationContext,
   createLogger,
   ensureBaseUrl,
-  parseAutomationConfirmationContext,
 } from "@lobu/core";
+import {
+  type AutomationConfirmationContext,
+  parseAutomationConfirmationContext,
+} from "../../../core/src/automation-confirmation-context";
 import FormData from "form-data";
 import { normalizeToolTextForContext } from "../openclaw/context-pressure";
 import { fetchAudioProviderSuggestions } from "./audio-provider-suggestions";
