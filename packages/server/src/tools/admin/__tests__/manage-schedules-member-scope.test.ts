@@ -24,6 +24,17 @@ const ORG = "org-1";
 const MEMBER_USER = "user-me";
 const MEMBER_AGENT = "shifu-u-me";
 
+/**
+ * Never hardcode an absolute date for a schedule that must be in the future.
+ * `handleCreate` rejects a `run_at` more than 30s behind the real `Date.now()`
+ * (manage_schedules.ts, "run_at is in the past"), and there is no injectable
+ * clock to freeze. A literal date passes until that day arrives and then fails
+ * on every run afterwards: a previous `"2026-08-01T00:00:00Z"` took 26 tests in
+ * this file red from 2026-08-01 onward, and it surfaced as unrelated assertion
+ * mismatches rather than as anything mentioning time. See agent-stack #90.
+ */
+const FUTURE_RUN_AT = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
 function memberCtx(overrides: Partial<ToolContext> = {}): ToolContext {
   return {
     organizationId: ORG,
@@ -87,7 +98,7 @@ function fakeJobRow(overrides: Partial<ScheduledJobRow> = {}): ScheduledJobRow {
     action_args: {},
     cron: null,
     until_at: null,
-    next_run_at: "2026-08-01T00:00:00Z",
+    next_run_at: FUTURE_RUN_AT,
     last_fired_at: null,
     last_fired_run_id: null,
     paused: false,
@@ -153,7 +164,7 @@ function wakeCreateArgs(
   return {
     action: "create" as const,
     description: "wake me up",
-    run_at: "2026-08-01T00:00:00Z",
+    run_at: FUTURE_RUN_AT,
 		payload: {
 			type: "wake_agent" as const,
 			agent_id: agentId,
@@ -170,7 +181,7 @@ function notifyCreateArgs(
   return {
     action: "create" as const,
     description: "notify",
-    run_at: "2026-08-01T00:00:00Z",
+    run_at: FUTURE_RUN_AT,
     payload: { type: "send_notification" as const, title: "hi", recipients },
     ...overrides,
   };
