@@ -462,6 +462,75 @@ describe("createOpenClawCustomTools", () => {
     expect(result.content[0]?.text).toContain('"code": "approval_required"');
   });
 
+  test("tool_call surfaces the parameter digest at the top level of its error JSON", async () => {
+    const tools = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "agent-1",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+      runtimeToolCatalog: [
+        {
+          tool: {
+            name: "manage_schedules",
+            description: "Manage scheduled jobs",
+            inputSchema: {
+              type: "object",
+              required: ["action"],
+              properties: {
+                action: { type: "string" },
+                id: { type: "string", description: "Schedule id" },
+              },
+            },
+          },
+          name: "manage_schedules",
+          mcpId: "lobu-memory",
+          domain: "schedules",
+          intent: "schedules",
+          priority: "P2",
+          aliases: [],
+          readOnly: false,
+          mutatesState: true,
+          requiresConfirmation: false,
+          originalIndex: 0,
+          availableThisTurn: false,
+          directVisibleThisTurn: false,
+          callableViaCatalog: true,
+          description: "Manage scheduled jobs",
+        },
+      ],
+      runtimeToolCaller: mock(async () => ({
+        content: [
+          {
+            type: "text" as const,
+            text: "UNDEFINED_VALUE: Undefined values are not allowed",
+          },
+        ],
+        isError: true,
+      })),
+    });
+
+    const toolCall = tools.find((tool) => tool.name === "tool_call");
+    expect(toolCall).toBeDefined();
+
+    const result = await toolCall!.execute("tool-call-digest", {
+      tool_name: "manage_schedules",
+      args: { action: "cancel", schedule_id: "3343ef85" },
+    });
+
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0]!.text as string);
+    // 頂層，不是巢狀在 tool 底下 —— 埋在第二層會降低 model 讀到的機率
+    expect(parsed.expectedParameters).toBeDefined();
+    expect(parsed.tool).not.toHaveProperty("expectedParameters");
+    expect(parsed.expectedParameters.unknownKeysSent).toEqual(["schedule_id"]);
+    expect(
+      parsed.expectedParameters.fields.map((f: { name: string }) => f.name)
+    ).toContain("id");
+  });
+
   test("built-in Lobu tool schemas can be projected for Gemini function declarations", () => {
     const tools = createOpenClawCustomTools({
       gatewayUrl: "http://gateway",
