@@ -12,7 +12,7 @@
  * out the turn's context.
  */
 
-const MAX_SUMMARY_BYTES = 3072;
+const MAX_SUMMARY_BYTES = 2560;
 const MAX_DESCRIPTION_CHARS = 200;
 const MAX_ENUM_VALUES = 12;
 
@@ -126,16 +126,17 @@ export function summarizeInputSchemaForModel(
   ];
 
   const fields: SummarizedField[] = [];
-  let bytes = 0;
   let truncated = false;
   for (const field of ordered) {
-    const size = Buffer.byteLength(JSON.stringify(field), "utf8");
-    if (fields.length > 0 && bytes + size > MAX_SUMMARY_BYTES) {
+    // Check actual serialized array size including JSON overhead (commas, brackets).
+    // Never truncate on the first field — allow a single oversized required field.
+    const candidateFields = [...fields, field];
+    const size = Buffer.byteLength(JSON.stringify(candidateFields), "utf8");
+    if (fields.length > 0 && size > MAX_SUMMARY_BYTES) {
       truncated = true;
       break;
     }
     fields.push(field);
-    bytes += size;
   }
 
   const unknownKeysSent = options.argsSent

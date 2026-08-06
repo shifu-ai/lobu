@@ -85,8 +85,9 @@ describe("summarizeInputSchemaForModel", () => {
     expect(summary!.truncated).toBe(true);
     expect(summary!.fields[0].name).toBe("keepMe");
     expect(summary!.fields.length).toBeLessThan(201);
-    expect(Buffer.byteLength(JSON.stringify(summary!.fields), "utf8")).
-      toBeLessThanOrEqual(3072);
+    // Verify actual serialized array size (including JSON overhead) respects the cap.
+    const serializedSize = Buffer.byteLength(JSON.stringify(summary!.fields), "utf8");
+    expect(serializedSize).toBeLessThanOrEqual(2560);
   });
 
   test("truncates descriptions to 200 chars", () => {
