@@ -567,4 +567,121 @@ describe("tool catalog dispatcher", () => {
     expect(allowedToolKeys).toEqual(["toolbox/request_export"]);
     expect(callTool).toHaveBeenCalledTimes(1);
   });
+
+  function schedulesTool(): McpToolDef {
+    return {
+      name: "manage_schedules",
+      description: "Manage scheduled jobs",
+      inputSchema: {
+        type: "object",
+        required: ["action"],
+        properties: {
+          action: { type: "string", description: "create | list | cancel" },
+          id: { type: "string", description: "Schedule id for cancel/pause" },
+        },
+      },
+    };
+  }
+
+  function schedulesCatalog() {
+    return buildRuntimeToolCatalog({
+      allTools: { "lobu-memory": [schedulesTool()] },
+      selectedTools: {},
+      allowedToolNames: ["lobu-memory/manage_schedules"],
+    });
+  }
+
+  test("tool_error carries the digest when the caller sent an undeclared key", async () => {
+    const catalog = schedulesCatalog();
+    const callTool = mock(async () => ({
+      isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text: "UNDEFINED_VALUE: Undefined values are not allowed",
+        },
+      ],
+    }));
+
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      toolName: "manage_schedules",
+      mcpId: "lobu-memory",
+      args: { action: "cancel", schedule_id: "3343ef85" },
+      callTool,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.code).toBe("tool_error");
+    expect(result.expectedParameters?.unknownKeysSent).toEqual(["schedule_id"]);
+    expect(result.expectedParameters?.fields.map((f) => f.name)).toContain(
+      "id"
+    );
+  });
+
+  test("tool_error stays quiet when every key the caller sent is declared", async () => {
+    const catalog = schedulesCatalog();
+    const callTool = mock(async () => ({
+      isError: true,
+      content: [{ type: "text" as const, text: "Schedule already completed" }],
+    }));
+
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      toolName: "manage_schedules",
+      mcpId: "lobu-memory",
+      args: { action: "cancel", id: "3343ef85" },
+      callTool,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.code).toBe("tool_error");
+    expect(result.expectedParameters).toBeUndefined();
+  });
+
+  test("authorization failures never carry the digest", async () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: { "lobu-memory": [schedulesTool()] },
+      selectedTools: {},
+      allowedToolNames: [],
+    });
+
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      toolName: "manage_schedules",
+      mcpId: "lobu-memory",
+      args: { action: "cancel", schedule_id: "3343ef85" },
+      callTool: mock(async () => ({ content: [] })),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.expectedParameters).toBeUndefined();
+  });
+
+  test("a tool without an inputSchema degrades to no digest", async () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: { "lobu-memory": [{ name: "bare_tool" } as McpToolDef] },
+      selectedTools: {},
+      allowedToolNames: ["lobu-memory/bare_tool"],
+    });
+    const callTool = mock(async () => ({
+      isError: true,
+      content: [{ type: "text" as const, text: "boom" }],
+    }));
+
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      toolName: "bare_tool",
+      mcpId: "lobu-memory",
+      args: { whatever: 1 },
+      callTool,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.expectedParameters).toBeUndefined();
+  });
 });
