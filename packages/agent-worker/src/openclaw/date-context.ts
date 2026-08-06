@@ -111,21 +111,10 @@ function formatDatedWeekday(parts: DateParts): string {
   return `${formatCalendarDate(parts)} (${weekdayLabel(parts)})`;
 }
 
-function formatZonedTime(now: Date, timeZone: string): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  })
-    .format(now)
-    .replace(", ", " ");
-}
-
+// 刻意不取 second：秒級精度對「今天星期幾」毫無幫助，卻讓這一行看起來像即時
+// 時鐘讀數。2026-08-06 實測，模型會把注入內容裡任何時間戳當成「現在時間」的
+// 依據，所以時間形狀的字串越少越好。保留到分鐘是為了支撐本檔結尾
+// 「choose the earliest candidate at or after the current Taipei time」那句 guidance。
 function formatZonedTimestamp(now: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone,
@@ -134,7 +123,6 @@ function formatZonedTimestamp(now: Date, timeZone: string): string {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-    second: "2-digit",
     hourCycle: "h23",
     timeZoneName: "longOffset",
   }).formatToParts(now);
@@ -145,7 +133,7 @@ function formatZonedTimestamp(now: Date, timeZone: string): string {
   };
   const rawOffset = valueFor("timeZoneName");
   const offset = rawOffset === "GMT" ? "+00:00" : rawOffset.replace("GMT", "");
-  return `${valueFor("year")}-${valueFor("month")}-${valueFor("day")}T${valueFor("hour")}:${valueFor("minute")}:${valueFor("second")}${offset}`;
+  return `${valueFor("year")}-${valueFor("month")}-${valueFor("day")}T${valueFor("hour")}:${valueFor("minute")}${offset}`;
 }
 
 function buildSevenDaysFrom(start: CalendarDate): CalendarDate[] {
@@ -212,7 +200,6 @@ export function buildCurrentDateContext(
     const today = getZonedDateParts(now, timeZone);
     const yesterday = addCalendarDays(today, -1);
     const tomorrow = addCalendarDays(today, 1);
-    const currentTime = formatZonedTime(now, timeZone);
     const currentTimestamp = formatZonedTimestamp(now, timeZone);
     const weeks = buildRelativeWeekCalendarForZone(now, timeZone);
 
@@ -226,8 +213,9 @@ export function buildCurrentDateContext(
       ...(invalidInput
         ? ["- Invalid timezone rejected; fail-closed fallback: Asia/Taipei"]
         : []),
-      `- Current time / 現在時間: ${currentTime}`,
-      `- Current timestamp / 現在時間: ${currentTimestamp}`,
+      // 原本這裡有兩行，中文標籤同樣是「現在時間」、只是格式不同——等於給模型
+      // 兩個時間形狀的候選值。合併成一行，減少候選面。
+      `- Current time / 現在時間: ${currentTimestamp}`,
       `- ISO date / 日期: ${formatCalendarDate(today)}`,
       `- Today / 今天: ${formatDatedWeekday(today)}`,
       `- Yesterday / 昨天: ${formatDatedWeekday(yesterday)}`,

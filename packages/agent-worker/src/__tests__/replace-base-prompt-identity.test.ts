@@ -98,9 +98,7 @@ describe("replaceBasePromptIdentity", () => {
     expect(out.startsWith(identity)).toBe(true);
     expect(out).not.toContain("expert coding assistant");
     expect(out).toContain("Available tools:");
-    expect(out).toContain(
-      "Current timestamp / 現在時間: 2026-07-09T10:50:00+08:00"
-    );
+    expect(out).toContain("Current time / 現在時間: 2026-07-09T10:50+08:00");
     expect(out).toContain("Timezone / 時區 (IANA): Asia/Taipei");
     expect(out).toContain("ISO date / 日期: 2026-07-09");
     expect(out).toContain("Today / 今天: 2026-07-09 (星期四)");
@@ -120,9 +118,7 @@ describe("replaceBasePromptIdentity", () => {
     const out = buildCurrentDateContext(new Date("2026-07-09T02:50:00.000Z"));
 
     expect(out).toContain("Timezone / 時區 (IANA): Asia/Taipei");
-    expect(out).toContain(
-      "Current timestamp / 現在時間: 2026-07-09T10:50:00+08:00"
-    );
+    expect(out).toContain("Current time / 現在時間: 2026-07-09T10:50+08:00");
     expect(out).toContain("ISO date / 日期: 2026-07-09");
     expect(out).toContain("Today / 今天: 2026-07-09 (星期四)");
     expect(out).toContain("Yesterday / 昨天: 2026-07-08 (星期三)");
@@ -137,9 +133,7 @@ describe("replaceBasePromptIdentity", () => {
     );
 
     expect(out).toContain("Timezone / 時區 (IANA): America/New_York");
-    expect(out).toContain(
-      "Current timestamp / 現在時間: 2026-07-13T18:15:00-04:00"
-    );
+    expect(out).toContain("Current time / 現在時間: 2026-07-13T18:15-04:00");
     expect(out).toContain("ISO date / 日期: 2026-07-13");
   });
 
@@ -153,9 +147,7 @@ describe("replaceBasePromptIdentity", () => {
     expect(out).toContain(
       "Invalid timezone rejected; fail-closed fallback: Asia/Taipei"
     );
-    expect(out).toContain(
-      "Current timestamp / 現在時間: 2026-07-13T18:15:00+08:00"
-    );
+    expect(out).toContain("Current time / 現在時間: 2026-07-13T18:15+08:00");
   });
 
   test("uses the first valid timezone from platform, agent config, then Taipei", () => {
