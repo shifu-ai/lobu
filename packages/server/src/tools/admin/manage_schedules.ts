@@ -21,7 +21,11 @@
 import { type Static, Type } from "@sinclair/typebox";
 import { TypeCompiler } from "@sinclair/typebox/compiler";
 import type { Env } from "../../index";
-import { isPrivilegedToolContext, routeAction } from "./action-router";
+import {
+  isPrivilegedToolContext,
+  requireField,
+  routeAction,
+} from "./action-router";
 import { getDb } from "../../db/client";
 import {
   activateScheduledJobByExternalKey,
@@ -840,20 +844,21 @@ async function handlePause(
   ctx: ToolContext,
 	deps: ManageSchedulesDeps,
 ): Promise<ToolResult> {
+	const id = requireField(args.id, "id", "pause");
 	const notFound = {
-		error: `Schedule '${args.id}' not found in this organization.`,
+		error: `Schedule '${id}' not found in this organization.`,
 	};
   if (!isPrivilegedToolContext(ctx)) {
-    const existing = await deps.getScheduledJob(ctx.organizationId, args.id);
+    const existing = await deps.getScheduledJob(ctx.organizationId, id);
     if (!memberOwnsJob(existing, ctx)) return notFound;
   }
 	const ok = await deps.pauseScheduledJob(
 		ctx.organizationId,
-		args.id,
+		id,
 		args.paused ?? true,
 	);
   if (!ok) return notFound;
-  const job = await deps.getScheduledJob(ctx.organizationId, args.id);
+  const job = await deps.getScheduledJob(ctx.organizationId, id);
   return { schedule: job ? serializeSchedule(job) : undefined, ok: true };
 }
 
@@ -862,17 +867,18 @@ async function handleCancel(
   ctx: ToolContext,
 	deps: ManageSchedulesDeps,
 ): Promise<ToolResult> {
+	const id = requireField(args.id, "id", "cancel");
 	const notFound = {
-		error: `Schedule '${args.id}' not found in this organization.`,
+		error: `Schedule '${id}' not found in this organization.`,
 	};
   if (!isPrivilegedToolContext(ctx)) {
-    const existing = await deps.getScheduledJob(ctx.organizationId, args.id);
+    const existing = await deps.getScheduledJob(ctx.organizationId, id);
     if (!memberOwnsJob(existing, ctx)) return notFound;
   }
-  const ok = await deps.deleteScheduledJob(ctx.organizationId, args.id);
+  const ok = await deps.deleteScheduledJob(ctx.organizationId, id);
   if (!ok) return notFound;
 	logger.info(
-		{ schedule_id: args.id, org: ctx.organizationId },
+		{ schedule_id: id, org: ctx.organizationId },
 		"[manage_schedules] cancelled",
 	);
   return { ok: true };
