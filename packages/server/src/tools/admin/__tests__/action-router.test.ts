@@ -64,12 +64,15 @@ describe("routeAction unknown action", () => {
   });
 
   test("unknown action is reported before authorization, not after", async () => {
-    // A member ctx with read-only scopes would fail enforceActionAccess for
-    // an admin-tier action. It must still get the "no such action" message.
+    // "delete" on manage_entity is in OWNER_ADMIN_ACTIONS, so authorization
+    // would reject it for a member with mcp:read. The check ordering matters:
+    // unknown-action comes first (get "Unknown action: delete. Valid actions:
+    // create."), or authorization comes first (get "requires admin or owner
+    // access..."). Only the first outcome is correct.
     await expect(
-      routeAction("manage_entity", "nope", memberCtx(), {
+      routeAction("manage_entity", "delete", memberCtx(), {
         create: async () => "created",
       })
-    ).rejects.toThrow("Unknown action: nope");
+    ).rejects.toThrow("Unknown action: delete. Valid actions: create.");
   });
 });
