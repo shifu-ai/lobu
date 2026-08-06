@@ -31,13 +31,13 @@ describe("summarizeInputSchemaForModel", () => {
       required: true,
       description: "What to do",
     });
-    expect(byName.count.type).toBe("integer");
-    expect(byName.flag.type).toBe("boolean");
-    expect(byName.tags.type).toBe("array");
+    expect(byName.count!.type).toBe("integer");
+    expect(byName.flag!.type).toBe("boolean");
+    expect(byName.tags!.type).toBe("array");
     // 巢狀 object 只出第一層，不遞迴展開
-    expect(byName.payload.type).toBe("object");
+    expect(byName.payload!.type).toBe("object");
     expect(byName.payload).not.toHaveProperty("fields");
-    expect(byName.mixed.type).toBe("string|number");
+    expect(byName.mixed!.type).toBe("string|number");
     expect(summary!.required).toEqual(["action"]);
     expect(summary!.truncated).toBe(false);
   });
@@ -83,7 +83,7 @@ describe("summarizeInputSchemaForModel", () => {
     });
 
     expect(summary!.truncated).toBe(true);
-    expect(summary!.fields[0].name).toBe("keepMe");
+    expect(summary!.fields[0]!.name).toBe("keepMe");
     expect(summary!.fields.length).toBeLessThan(201);
     // Verify actual serialized array size (including JSON overhead) respects the cap.
     const serializedSize = Buffer.byteLength(JSON.stringify(summary!.fields), "utf8");
@@ -95,7 +95,7 @@ describe("summarizeInputSchemaForModel", () => {
       type: "object",
       properties: { a: { type: "string", description: "y".repeat(500) } },
     });
-    expect(summary!.fields[0].description!.length).toBeLessThanOrEqual(201);
+    expect(summary!.fields[0]!.description!.length).toBeLessThanOrEqual(201);
   });
 
   test("treats every field as optional when required[] is absent", () => {
@@ -104,7 +104,7 @@ describe("summarizeInputSchemaForModel", () => {
       properties: { a: { type: "string" } },
     });
     expect(summary!.required).toEqual([]);
-    expect(summary!.fields[0].required).toBe(false);
+    expect(summary!.fields[0]!.required).toBe(false);
   });
 
   test("returns undefined for a missing or non-object schema", () => {
