@@ -641,6 +641,84 @@ describe("tool catalog dispatcher", () => {
     expect(result.expectedParameters).toBeUndefined();
   });
 
+  test("delegated schema_invalid carries the digest even with an undeclared key", async () => {
+    const catalog = schedulesCatalog();
+    const callTool = mock(async () => ({
+      isError: true,
+      errorCode: "schema_invalid" as const,
+      content: [
+        { type: "text" as const, text: "Upstream rejected the arguments." },
+      ],
+    }));
+
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      toolName: "manage_schedules",
+      mcpId: "lobu-memory",
+      args: { action: "cancel", schedule_id: "3343ef85" },
+      callTool,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.code).toBe("schema_invalid");
+    expect(result.expectedParameters?.unknownKeysSent).toEqual(["schedule_id"]);
+    expect(result.expectedParameters?.fields.map((f) => f.name)).toContain(
+      "id"
+    );
+  });
+
+  test("delegated schema_invalid carries the digest unconditionally, even with every key declared", async () => {
+    const catalog = schedulesCatalog();
+    const callTool = mock(async () => ({
+      isError: true,
+      errorCode: "schema_invalid" as const,
+      content: [
+        { type: "text" as const, text: "Upstream rejected the arguments." },
+      ],
+    }));
+
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      toolName: "manage_schedules",
+      mcpId: "lobu-memory",
+      args: { action: "cancel", id: "3343ef85" },
+      callTool,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.code).toBe("schema_invalid");
+    expect(result.expectedParameters).toBeDefined();
+    expect(result.expectedParameters?.unknownKeysSent ?? []).toEqual([]);
+  });
+
+  test("a delegated auth_required failure never carries the digest, even with an undeclared key", async () => {
+    const catalog = schedulesCatalog();
+    const callTool = mock(async () => ({
+      isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text: "Error: Authentication required for lobu-memory.",
+        },
+      ],
+    }));
+
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      toolName: "manage_schedules",
+      mcpId: "lobu-memory",
+      args: { action: "cancel", schedule_id: "3343ef85" },
+      callTool,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.code).toBe("auth_required");
+    expect(result.expectedParameters).toBeUndefined();
+  });
+
   test("authorization failures never carry the digest", async () => {
     const catalog = buildRuntimeToolCatalog({
       allTools: { "lobu-memory": [schedulesTool()] },

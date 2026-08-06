@@ -655,9 +655,15 @@ export async function dispatchRuntimeToolCall(
       // result into `tool_error`, and most of those are business-rule
       // failures with perfectly valid arguments. Undeclared top-level keys
       // are the signal that separates a shape problem from a rule problem.
+      // A delegated `schema_invalid` (an MCP server setting `errorCode:
+      // "schema_invalid"` on its result — `isStableErrorCode` passes it
+      // straight through) is argument-shaped by definition, so it gets the
+      // digest unconditionally regardless of which keys were sent.
       const argumentShaped =
-        delegatedErrorCode === "tool_error" &&
-        unknownTopLevelKeys(entry.tool.inputSchema, params.args).length > 0;
+        delegatedErrorCode === "schema_invalid" ||
+        (delegatedErrorCode === "tool_error" &&
+          unknownTopLevelKeys(entry.tool.inputSchema, params.args).length >
+            0);
       return argumentShaped
         ? withExpectedParameters(failure, entry, params.args)
         : failure;
