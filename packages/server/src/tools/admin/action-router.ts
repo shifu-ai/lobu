@@ -79,7 +79,14 @@ export async function routeAction<TResult>(
 ): Promise<TResult> {
   const handler = handlers[action];
   if (!handler) {
-    throw new Error(`Unknown action: ${action}`);
+    // Naming the alternatives is what lets a model self-correct instead of
+    // guessing again (agent-stack #86). Safe to disclose pre-authorization:
+    // every manage_* tool already publishes these names in its own schema.
+    throw new Error(
+      `Unknown action: ${action}. Valid actions: ${Object.keys(handlers)
+        .sort()
+        .join(", ")}.`
+    );
   }
 
   enforceActionAccess(toolName, action, ctx);
