@@ -2171,7 +2171,13 @@ export async function runAISession(
     workerToken: gwParams.workerToken,
     capabilityIds: releaseCapabilityIdsForBrowserTools({
       releaseState: context.releaseState,
-      agentId: agentId || "",
+      // Must resolve identity exactly like the prompt builder in
+      // session-context.ts, which falls back to the verified worker token.
+      // When `agentId` is empty and this side alone drops that fallback, the
+      // claim match fails and no browser tool is registered — while the prompt
+      // still announces the tools. The agent then reports that the tools it was
+      // told it has are "not loaded", which is true and impossible to act on.
+      agentId: agentId || context.agentId || "",
     }),
   });
   let tools = createOpenClawTools(workspaceDir, {
