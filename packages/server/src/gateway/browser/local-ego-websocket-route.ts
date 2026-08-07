@@ -1,7 +1,6 @@
 import type { ReleaseCapabilityState } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
-import { upgradeWebSocket as honoBunUpgradeWebSocket } from "hono/bun";
 import { PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY } from "../../../../core/src/constants";
 import { verifyWorkerToken } from "../../../../core/src/worker/auth";
 import type {
@@ -115,7 +114,7 @@ export function createLocalEgoWebSocketRoute(
 			);
 		}
 
-		const upgrade = options.upgradeWebSocket ?? createHonoBunUpgrade(c);
+			const upgrade = options.upgradeWebSocket ?? (await createHonoBunUpgrade(c));
 		return upgrade({
 			request: c.req.raw,
 			bridge,
@@ -359,9 +358,17 @@ export function acceptLocalEgoBridgeConnection(input: {
 	});
 }
 
-function createHonoBunUpgrade(c: {
+async function createHonoBunUpgrade(c: {
 	req: { raw: Request };
-}): LocalEgoRouteUpgrade {
+}): Promise<LocalEgoRouteUpgrade> {
+	if (typeof process.versions.bun !== "string") {
+		return () =>
+			new Response(JSON.stringify({ error: "bun_websocket_adapter_unavailable" }), {
+				status: 501,
+				headers: { "content-type": "application/json" },
+			});
+	}
+	const { upgradeWebSocket: honoBunUpgradeWebSocket } = await import("hono/bun");
 	return ({ onOpen }) => {
 		let adapter: HonoWebSocketAdapter | undefined;
 		const handler = honoBunUpgradeWebSocket(() => ({
