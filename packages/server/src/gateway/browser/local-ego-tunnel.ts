@@ -41,6 +41,8 @@ export interface RegisteredLocalEgoBridge {
   send(request: LocalEgoBridgeRequest): Promise<LocalEgoBridgeResponse>;
 }
 
+export type LocalEgoTunnelRegistry = ReturnType<typeof createLocalEgoTunnelRegistry>;
+
 export function createLocalEgoTunnelRegistry(input: { now: () => Date }) {
   const inputNow = input.now;
   const bridges = new Map<string, RegisteredLocalEgoBridge>();
@@ -108,3 +110,7 @@ export function createLocalEgoTunnelRegistry(input: { now: () => Date }) {
     },
   };
 }
+
+export const localEgoTunnelRegistry = createLocalEgoTunnelRegistry({
+  now: () => new Date(),
+});
