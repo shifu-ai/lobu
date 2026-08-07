@@ -2166,19 +2166,40 @@ export async function runAISession(
       gw: gwParams,
       mcpExposure,
     });
+  // Must resolve identity exactly like the prompt builder in
+  // session-context.ts, which falls back to the verified worker token (and now
+  // stores that resolved value on the context). When this side alone drops the
+  // fallback, the claim match fails and no browser tool is registered — while
+  // the prompt still announces them. The agent then reports that the tools it
+  // was just told it has are "not loaded", which is true and unactionable.
+  const resolvedBrowserToolAgentId = agentId || context.agentId || "";
   const localBrowserTools = createLocalBrowserAgentTools({
     gatewayUrl: gwParams.gatewayUrl,
     workerToken: gwParams.workerToken,
     capabilityIds: releaseCapabilityIdsForBrowserTools({
       releaseState: context.releaseState,
-      // Must resolve identity exactly like the prompt builder in
-      // session-context.ts, which falls back to the verified worker token.
-      // When `agentId` is empty and this side alone drops that fallback, the
-      // claim match fails and no browser tool is registered — while the prompt
-      // still announces the tools. The agent then reports that the tools it was
-      // told it has are "not loaded", which is true and impossible to act on.
-      agentId: agentId || context.agentId || "",
+      agentId: resolvedBrowserToolAgentId,
     }),
+  });
+  /*
+   * The browser tool surface had no runtime visibility at all, so the first
+   * production failure could only be diagnosed by reading the agent's own
+   * (accurate, but unactionable) complaint that the tools it was told it has
+   * were "not loaded". Log the identity inputs and the outcome so a
+   * registration failure names its own cause.
+   */
+  logger.info("local browser tools registered", {
+    agentIdSource: agentId
+      ? "params"
+      : context.agentId
+        ? "context"
+        : "unresolved",
+    resolvedAgentIdPresent: resolvedBrowserToolAgentId.length > 0,
+    releaseStatus: context.releaseState?.status ?? "absent",
+    claimAgentIdMatches:
+      context.releaseState?.status === "active" &&
+      context.releaseState.claim.agentId === resolvedBrowserToolAgentId,
+    registeredToolCount: localBrowserTools.length,
   });
   let tools = createOpenClawTools(workspaceDir, {
     bashOperations: embeddedBashOps,

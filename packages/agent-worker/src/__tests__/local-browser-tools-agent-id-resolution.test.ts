@@ -79,16 +79,28 @@ describe("local browser tools — agent id resolution", () => {
       "utf8"
     );
 
-    // Registrar: resolves the id inline, at the helper call.
+    // Registrar: resolves the id into a named binding before the helper call.
+    const registrarResolution =
+      runner.match(/const resolvedBrowserToolAgentId =([^\n;]*)/)?.[1] ?? "";
+    expect(
+      registrarResolution,
+      'session-runner.ts must fall back to context.agentId; `agentId || ""` alone silently empties the tool list when the worker param is unset'
+    ).toContain("context.agentId");
     const registrarCall =
       runner.match(
         /releaseCapabilityIdsForBrowserTools\(\{[\s\S]*?\}\)/
       )?.[0] ?? "";
     expect(registrarCall).toContain("releaseState: context.releaseState");
+    expect(registrarCall).toContain("resolvedBrowserToolAgentId");
+
+    // …and context.agentId must itself carry the resolved identity, otherwise
+    // the fallback above resolves to the same empty string it was meant to fix.
+    const contextAgentId =
+      context.match(/\n\s*agentId: data\.agentId([^\n]*)/)?.[1] ?? "";
     expect(
-      registrarCall,
-      'session-runner.ts must fall back to context.agentId; `agentId || ""` alone silently empties the tool list when the worker param is unset'
-    ).toContain("context.agentId");
+      contextAgentId,
+      "session-context.ts must store the verified worker token identity on the context"
+    ).toContain("verifiedToken");
 
     // Prompt builder: resolves the id one level up, at its own call site.
     // `releaseState,` without a type annotation distinguishes the invocation

@@ -636,7 +636,12 @@ export async function getOpenClawSessionContext(
       mcpContext,
       toolboxPersonalAgentTools,
       userId: data.userId || "",
-      agentId: data.agentId || "",
+      // Carry the RESOLVED identity, matching how the prompt builder above
+      // resolves it. Consumers downstream (session-runner) treat
+      // `context.agentId` as the authoritative fallback when their own
+      // optional agentId is unset; leaving the verified worker token out of
+      // this chain makes that fallback useless exactly when it is needed.
+      agentId: data.agentId || verifiedToken?.agentId || "",
       releaseState,
     };
 
