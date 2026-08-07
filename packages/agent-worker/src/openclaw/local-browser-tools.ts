@@ -79,7 +79,13 @@ export async function callLocalBrowserTool(input: {
   );
   try {
     const response = await (input.fetchImpl ?? fetch)(
-      `${gatewayUrl}/lobu/api/browser/local-ego/tools/${input.toolName}`,
+      // `gatewayUrl` is the worker's DISPATCHER_URL, which already ends in the
+      // `/lobu` mount (see getInternalGatewayUrl in @lobu/server). Repeating
+      // the prefix here produced `/lobu/lobu/api/...` — a bare 404 with no
+      // error body, indistinguishable at a glance from the route being absent.
+      // Every other worker→gateway call is relative to the mount the same way
+      // (e.g. `${gatewayUrl}/worker/internal/...`).
+      `${gatewayUrl}/api/browser/local-ego/tools/${input.toolName}`,
       {
         method: "POST",
         headers: {

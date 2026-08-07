@@ -178,7 +178,8 @@ describe("local browser tool registration", () => {
     }) as unknown as typeof fetch;
 
     const [tool] = createLocalBrowserAgentTools({
-      gatewayUrl: "https://lobu.test",
+      // Real DISPATCHER_URL shape — it already carries the /lobu mount.
+      gatewayUrl: "https://lobu.test/lobu",
       workerToken: "worker-token",
       capabilityIds: ["personal_browser.local_ego.v1"],
     });
