@@ -18,6 +18,15 @@ export interface ToolboxBrowserSessionClientOptions {
 	timeoutMs?: number;
 }
 
+export class ToolboxBrowserBridgeExchangeError extends Error {
+	constructor(
+		readonly code: string,
+		readonly upstreamStatus?: number,
+	) {
+		super(code);
+	}
+}
+
 const MAX_EXCHANGE_RESPONSE_BYTES = 16 * 1024;
 const BROWSER_TOOLS = new Set<BrowserToolName>([
 	"browser_read_dom",
@@ -29,14 +38,18 @@ export async function exchangeToolboxBrowserBridgeToken(
 	token: string,
 	options: ToolboxBrowserSessionClientOptions = {},
 ): Promise<ToolboxLocalEgoBridgeExchange> {
-	if (!token.trim()) throw new Error("browser_bridge_token_required");
+	if (!token.trim()) {
+		throw new ToolboxBrowserBridgeExchangeError("browser_bridge_token_required");
+	}
 	const exchangeUrl =
 		options.exchangeUrl ??
 		process.env.TOOLBOX_BROWSER_BRIDGE_TOKEN_EXCHANGE_URL?.trim();
 	const internalSecret =
 		options.internalSecret ?? process.env.TOOLBOX_INTERNAL_SECRET?.trim();
 	if (!exchangeUrl || !internalSecret) {
-		throw new Error("toolbox_browser_bridge_exchange_not_configured");
+		throw new ToolboxBrowserBridgeExchangeError(
+			"toolbox_browser_bridge_exchange_not_configured",
+		);
 	}
 
 	const controller = new AbortController();
@@ -45,17 +58,27 @@ export async function exchangeToolboxBrowserBridgeToken(
 		options.timeoutMs ?? 1_500,
 	);
 	try {
-		const response = await (options.fetchImpl ?? fetch)(exchangeUrl, {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				"x-internal-secret": internalSecret,
-			},
-			body: JSON.stringify({ token }),
-			signal: controller.signal,
-		});
+		let response: Response;
+		try {
+			response = await (options.fetchImpl ?? fetch)(exchangeUrl, {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"x-internal-secret": internalSecret,
+				},
+				body: JSON.stringify({ token }),
+				signal: controller.signal,
+			});
+		} catch {
+			throw new ToolboxBrowserBridgeExchangeError(
+				"toolbox_browser_bridge_exchange_fetch_failed",
+			);
+		}
 		if (!response.ok) {
-			throw new Error(`toolbox_browser_bridge_exchange_failed:${response.status}`);
+			throw new ToolboxBrowserBridgeExchangeError(
+				"toolbox_browser_bridge_exchange_failed",
+				response.status,
+			);
 		}
 		const body = await readBoundedJson(response, MAX_EXCHANGE_RESPONSE_BYTES);
 		return parseExchangeResponse(body);
@@ -71,9 +94,15 @@ async function readBoundedJson(response: Response, maxBytes: number): Promise<un
 		(!/^\d+$/.test(declared) || Number(declared) > maxBytes)
 	) {
 		await response.body?.cancel();
-		throw new Error("toolbox_browser_bridge_exchange_response_too_large");
+		throw new ToolboxBrowserBridgeExchangeError(
+			"toolbox_browser_bridge_exchange_response_too_large",
+		);
 	}
-	if (!response.body) throw new Error("toolbox_browser_bridge_exchange_empty");
+	if (!response.body) {
+		throw new ToolboxBrowserBridgeExchangeError(
+			"toolbox_browser_bridge_exchange_empty",
+		);
+	}
 
 	const reader = response.body.getReader();
 	const chunks: Uint8Array[] = [];
@@ -85,7 +114,9 @@ async function readBoundedJson(response: Response, maxBytes: number): Promise<un
 			bytes += chunk.value.byteLength;
 			if (bytes > maxBytes) {
 				await reader.cancel();
-				throw new Error("toolbox_browser_bridge_exchange_response_too_large");
+				throw new ToolboxBrowserBridgeExchangeError(
+					"toolbox_browser_bridge_exchange_response_too_large",
+				);
 			}
 			chunks.push(chunk.value);
 		}
@@ -96,29 +127,41 @@ async function readBoundedJson(response: Response, maxBytes: number): Promise<un
 	try {
 		return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
 	} catch {
-		throw new Error("toolbox_browser_bridge_exchange_invalid_json");
+		throw new ToolboxBrowserBridgeExchangeError(
+			"toolbox_browser_bridge_exchange_invalid_json",
+		);
 	}
 }
 
 function parseExchangeResponse(value: unknown): ToolboxLocalEgoBridgeExchange {
 	const outer = record(value);
-	if (outer.ok !== true) throw new Error("toolbox_browser_bridge_exchange_rejected");
+	if (outer.ok !== true) {
+		throw new ToolboxBrowserBridgeExchangeError(
+			"toolbox_browser_bridge_exchange_rejected",
+		);
+	}
 	const bridge = record(outer.bridge);
 	const environment = stringField(bridge.environment);
 	if (environment !== "staging" && environment !== "production") {
-		throw new Error("toolbox_browser_bridge_exchange_invalid_environment");
+		throw new ToolboxBrowserBridgeExchangeError(
+			"toolbox_browser_bridge_exchange_invalid_environment",
+		);
 	}
 	const ownerUserId = stringField(bridge.ownerUserId);
 	const agentId = stringField(bridge.agentId);
 	const bridgeId = stringField(bridge.bridgeId);
 	const scopesValue = bridge.scopes;
 	if (!Array.isArray(scopesValue) || scopesValue.length === 0) {
-		throw new Error("toolbox_browser_bridge_exchange_invalid_scopes");
+		throw new ToolboxBrowserBridgeExchangeError(
+			"toolbox_browser_bridge_exchange_invalid_scopes",
+		);
 	}
 	const scopes = scopesValue.map((scope) => {
 		const value = stringField(scope);
 		if (!BROWSER_TOOLS.has(value as BrowserToolName)) {
-			throw new Error("toolbox_browser_bridge_exchange_unknown_scope");
+			throw new ToolboxBrowserBridgeExchangeError(
+				"toolbox_browser_bridge_exchange_unknown_scope",
+			);
 		}
 		return value as BrowserToolName;
 	});
@@ -138,14 +181,18 @@ function parseExchangeResponse(value: unknown): ToolboxLocalEgoBridgeExchange {
 
 function record(value: unknown): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		throw new Error("toolbox_browser_bridge_exchange_invalid_contract");
+		throw new ToolboxBrowserBridgeExchangeError(
+			"toolbox_browser_bridge_exchange_invalid_contract",
+		);
 	}
 	return value as Record<string, unknown>;
 }
 
 function stringField(value: unknown): string {
 	if (typeof value !== "string" || !value.trim() || value.length > 500) {
-		throw new Error("toolbox_browser_bridge_exchange_invalid_contract");
+		throw new ToolboxBrowserBridgeExchangeError(
+			"toolbox_browser_bridge_exchange_invalid_contract",
+		);
 	}
 	return value;
 }

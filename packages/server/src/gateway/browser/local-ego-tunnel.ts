@@ -38,7 +38,10 @@ export interface RegisteredLocalEgoBridge {
   ownerUserId: string;
   agentId: string;
   bridgeId: string;
-  send(request: LocalEgoBridgeRequest): Promise<LocalEgoBridgeResponse>;
+  send(
+    request: LocalEgoBridgeRequest,
+    options: { signal: AbortSignal },
+  ): Promise<LocalEgoBridgeResponse>;
 }
 
 export type LocalEgoTunnelRegistry = ReturnType<typeof createLocalEgoTunnelRegistry>;
@@ -85,17 +88,23 @@ export function createLocalEgoTunnelRegistry(input: { now: () => Date }) {
         },
       };
 
+      const controller = new AbortController();
       let timeout: ReturnType<typeof setTimeout> | undefined;
+      const sendResponse = Promise.resolve(
+        bridge.send(request, { signal: controller.signal }),
+      ).catch((): LocalEgoBridgeResponse => disconnectedResponse(request.id));
       const response = await Promise.race([
-        bridge.send(request),
+        sendResponse,
         new Promise<LocalEgoBridgeResponse>((resolve) => {
           timeout = setTimeout(
-            () =>
+            () => {
+              controller.abort();
               resolve({
                 jsonrpc: '2.0',
                 id: request.id,
                 error: { code: 'timeout', message: 'Browser bridge timed out.' },
-              }),
+              });
+            },
             input.timeoutMs,
           );
         }),
@@ -108,6 +117,14 @@ export function createLocalEgoTunnelRegistry(input: { now: () => Date }) {
       if (!response.result?.ok) throw new Error('tool_failed');
       return response.result;
     },
+  };
+}
+
+function disconnectedResponse(id: LocalEgoBridgeRequest['id']): LocalEgoBridgeResponse {
+  return {
+    jsonrpc: '2.0',
+    id,
+    error: { code: 'bridge_disconnected', message: 'Browser bridge disconnected.' },
   };
 }
 

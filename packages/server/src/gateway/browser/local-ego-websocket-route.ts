@@ -8,6 +8,7 @@ import type {
 import { localEgoTunnelRegistry } from "./local-ego-tunnel";
 import {
 	exchangeToolboxBrowserBridgeToken,
+	ToolboxBrowserBridgeExchangeError,
 	type ToolboxLocalEgoBridgeExchange,
 } from "./toolbox-browser-session-client";
 
@@ -31,13 +32,33 @@ export interface LocalEgoWebSocketRouteOptions {
 	exchangeToken?: LocalEgoBridgeExchangeToken;
 	registry?: LocalEgoTunnelRegistry;
 	upgradeWebSocket?: LocalEgoRouteUpgrade;
+	runtimeEnv?: Record<string, string | undefined>;
 }
 
 type PendingResponse = {
 	resolve: (response: LocalEgoBridgeResponse) => void;
+	cleanup: () => void;
 };
 
 const MAX_BROWSER_MESSAGE_BYTES = 2 * 1024 * 1024;
+const REQUIRED_TUNNEL_MODE = "single_process";
+
+export interface LocalEgoTunnelRuntimeConfig {
+	available: boolean;
+	mode?: string;
+	instanceId?: string;
+}
+
+export function resolveLocalEgoTunnelRuntimeConfig(
+	env: Record<string, string | undefined> = process.env,
+): LocalEgoTunnelRuntimeConfig {
+	const mode = env.LOCAL_EGO_BROWSER_TUNNEL_MODE?.trim();
+	return {
+		available: mode === REQUIRED_TUNNEL_MODE,
+		mode,
+		instanceId: env.LOCAL_EGO_BROWSER_TUNNEL_INSTANCE_ID?.trim() || undefined,
+	};
+}
 
 export function createLocalEgoWebSocketRoute(
 	options: LocalEgoWebSocketRouteOptions = {},
@@ -53,14 +74,30 @@ export function createLocalEgoWebSocketRoute(
 			});
 		}
 
+		const runtimeConfig = resolveLocalEgoTunnelRuntimeConfig(
+			options.runtimeEnv ?? process.env,
+		);
+		/*
+		 * This MVP registry is an in-process Map. It is valid only when Lobu is
+		 * intentionally running a single app instance or an equivalent sticky-routing
+		 * carrier where browser registration and tool calls hit the same process.
+		 * Keep failing closed here until a shared registry/fan-out exists.
+		 */
+		if (!runtimeConfig.available) {
+			return c.json({ error: "local_ego_tunnel_registry_unavailable" }, 503);
+		}
+
 		const token = c.req.query("token")?.trim();
 		if (!token) return c.json({ error: "browser_bridge_token_required" }, 400);
 
 		let bridge: ToolboxLocalEgoBridgeExchange;
 		try {
 			bridge = await exchangeToken(token);
-		} catch {
-			return c.json({ error: "browser_bridge_token_exchange_failed" }, 401);
+		} catch (error) {
+			return c.json(
+				{ error: "browser_bridge_token_exchange_failed" },
+				exchangeFailureStatus(error),
+			);
 		}
 
 		const upgrade = options.upgradeWebSocket ?? createHonoBunUpgrade(c);
@@ -93,8 +130,9 @@ export function acceptLocalEgoBridgeConnection(input: {
 		ownerUserId: bridge.ownerUserId,
 		agentId: bridge.agentId,
 		bridgeId: bridge.bridgeId,
-		send: async (request) => {
+		send: async (request, { signal }) => {
 			if (!connected) return disconnectedResponse(request.id);
+			if (signal.aborted) return timeoutResponse(request.id);
 			if (!allowedScopes.has(request.params.name)) {
 				return {
 					jsonrpc: "2.0",
@@ -103,8 +141,25 @@ export function acceptLocalEgoBridgeConnection(input: {
 				};
 			}
 			return new Promise<LocalEgoBridgeResponse>((resolve) => {
-				pending.set(request.id, { resolve });
-				socket.send(JSON.stringify(request));
+				const cleanup = () => {
+					signal.removeEventListener("abort", onAbort);
+				};
+				const resolveOnce = (response: LocalEgoBridgeResponse) => {
+					cleanup();
+					resolve(response);
+				};
+				const onAbort = () => {
+					if (!pending.delete(request.id)) return;
+					resolveOnce(timeoutResponse(request.id));
+				};
+				signal.addEventListener("abort", onAbort, { once: true });
+				pending.set(request.id, { resolve: resolveOnce, cleanup });
+				try {
+					socket.send(JSON.stringify(request));
+				} catch {
+					pending.delete(request.id);
+					resolveOnce(disconnectedResponse(request.id));
+				}
 			});
 		},
 	});
@@ -134,6 +189,7 @@ export function acceptLocalEgoBridgeConnection(input: {
 			return;
 		}
 		pending.delete(response.id);
+		pendingResponse.cleanup();
 		pendingResponse.resolve(response);
 	});
 
@@ -147,6 +203,7 @@ export function acceptLocalEgoBridgeConnection(input: {
 			bridgeId: bridge.bridgeId,
 		});
 		for (const [id, pendingResponse] of pending) {
+			pendingResponse.cleanup();
 			pendingResponse.resolve(disconnectedResponse(id));
 		}
 		pending.clear();
@@ -264,6 +321,31 @@ function parseBridgeResponse(value: unknown): LocalEgoBridgeResponse | null {
 
 function closeUnexpected(socket: LocalEgoBridgeWebSocket): void {
 	socket.close(1008, "unexpected_browser_message");
+}
+
+function exchangeFailureStatus(error: unknown): 401 | 502 | 503 {
+	if (error instanceof ToolboxBrowserBridgeExchangeError) {
+		if (error.code === "toolbox_browser_bridge_exchange_not_configured") {
+			return 503;
+		}
+		if (
+			error.code === "browser_bridge_token_required" ||
+			error.upstreamStatus === 400 ||
+			error.upstreamStatus === 401 ||
+			error.code === "toolbox_browser_bridge_exchange_rejected"
+		) {
+			return 401;
+		}
+	}
+	return 502;
+}
+
+function timeoutResponse(id: LocalEgoBridgeRequest["id"]): LocalEgoBridgeResponse {
+	return {
+		jsonrpc: "2.0",
+		id,
+		error: { code: "timeout", message: "Browser bridge timed out." },
+	};
 }
 
 function disconnectedResponse(id: LocalEgoBridgeRequest["id"]): LocalEgoBridgeResponse {
