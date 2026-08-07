@@ -2203,7 +2203,6 @@ export async function runAISession(
   });
   let tools = createOpenClawTools(workspaceDir, {
     bashOperations: embeddedBashOps,
-    localBrowserTools,
   }).filter((tool) => isToolAllowedByPolicy(tool.name, toolsPolicy));
 
   if (
@@ -2358,6 +2357,18 @@ Use it when the user references past discussions or you need context.`);
     mcpProvenanceById,
     shifuTrace,
   });
+
+  /*
+   * Local browser tools MUST ride the customTools channel. `tools` is the
+   * built-in channel: pi's createAgentSession() uses it only to derive active
+   * tool NAMES and rebuilds the base tools itself, and buildAgentSession()
+   * then swaps its rebuilt built-ins for these Lobu instances by mapping over
+   * the already-constructed array (see OVERRIDABLE_BUILTIN_NAMES in
+   * session-builder.ts). That map can substitute, never add — so a non-builtin
+   * passed through `tools` is silently dropped and the model answers
+   * "Tool browser_read_dom not found" while the prompt still advertises it.
+   */
+  customTools.push(...localBrowserTools);
 
   // Register first-class MCP tools + auth tools. Skipped entirely in CLI
   // mode — MCP tools are instead reachable via the per-server just-bash CLI
