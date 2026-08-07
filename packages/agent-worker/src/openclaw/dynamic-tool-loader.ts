@@ -673,9 +673,11 @@ export function selectMcpToolsForTurn(
 
   const budget = Math.max(0, Math.floor(params.budget));
   const intentForEligibility = classifyToolIntent(params.message);
-  const calendarAssist =
-    intentForEligibility === "automation" &&
-    hasCalendarDateIntent(params.message.toLowerCase());
+  // A relative date is a sub-step of many requests, not only of automation.
+  // classifyToolIntent only reaches "calendar" when no earlier intent claimed
+  // the message, so battle_report / community_verification turns used to lose
+  // the resolver entirely and had to guess the weekday.
+  const calendarAssist = hasCalendarDateIntent(params.message.toLowerCase());
   const mcpId = params.mcpId ?? "";
   const entries = params.tools
     .map((tool, index) =>
@@ -772,9 +774,11 @@ export function selectMcpToolsByMcpForTurn(
 ): SelectMcpToolsByMcpForTurnResult {
   const budget = Math.max(0, Math.floor(params.budget));
   const intentForEligibility = classifyToolIntent(params.message);
-  const calendarAssist =
-    intentForEligibility === "automation" &&
-    hasCalendarDateIntent(params.message.toLowerCase());
+  // A relative date is a sub-step of many requests, not only of automation.
+  // classifyToolIntent only reaches "calendar" when no earlier intent claimed
+  // the message, so battle_report / community_verification turns used to lose
+  // the resolver entirely and had to guess the weekday.
+  const calendarAssist = hasCalendarDateIntent(params.message.toLowerCase());
   const entries: ToolCatalogEntry[] = [];
   let originalIndex = 0;
 
