@@ -2,10 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import {
-  createLogger,
-  ensureBaseUrl,
-} from "@lobu/core";
+import { createLogger, ensureBaseUrl } from "@lobu/core";
 import {
   type AutomationConfirmationContext,
   parseAutomationConfirmationContext,
