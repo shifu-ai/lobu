@@ -130,7 +130,10 @@ function buildEditSchema() {
 
 export function createOpenClawTools(
   cwd: string,
-  options?: { bashOperations?: BashOperations }
+  options?: {
+    bashOperations?: BashOperations;
+    localBrowserTools?: AgentTool<any>[];
+  }
 ): AgentTool<any>[] {
   const read = wrapToolWithNormalization({
     tool: createReadTool(cwd),
@@ -172,6 +175,7 @@ export function createOpenClawTools(
     createGrepTool(cwd),
     createFindTool(cwd),
     createLsTool(cwd),
+    ...(options?.localBrowserTools ?? []),
   ];
 }
 

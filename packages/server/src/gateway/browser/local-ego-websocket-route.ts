@@ -1,13 +1,21 @@
 import { upgradeWebSocket as honoBunUpgradeWebSocket } from "hono/bun";
 import { Hono } from "hono";
+import type { Context } from "hono";
+import type { ReleaseCapabilityState } from "@lobu/core";
+import { PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY } from "../../../../core/src/constants";
+import { verifyWorkerToken } from "../../../../core/src/worker/auth";
 import type {
+	BrowserToolName,
 	LocalEgoBridgeRequest,
 	LocalEgoBridgeResponse,
 	LocalEgoTunnelRegistry,
 } from "./local-ego-tunnel";
 import { localEgoTunnelRegistry } from "./local-ego-tunnel";
 import {
+	createToolboxBrowserToolLease,
 	exchangeToolboxBrowserBridgeToken,
+	getToolboxBrowserCurrentSession,
+	recordToolboxBrowserToolCall,
 	ToolboxBrowserBridgeExchangeError,
 	type ToolboxLocalEgoBridgeExchange,
 } from "./toolbox-browser-session-client";
@@ -42,6 +50,12 @@ type PendingResponse = {
 
 const MAX_BROWSER_MESSAGE_BYTES = 2 * 1024 * 1024;
 const REQUIRED_TUNNEL_MODE = "single_process";
+const TOOL_CALL_TIMEOUT_MS = 60_000;
+const BROWSER_TOOLS = new Set<BrowserToolName>([
+	"browser_read_dom",
+	"browser_screenshot",
+	"browser_navigate",
+]);
 
 export interface LocalEgoTunnelRuntimeConfig {
 	available: boolean;
@@ -67,7 +81,7 @@ export function createLocalEgoWebSocketRoute(
 	const registry = options.registry ?? localEgoTunnelRegistry;
 	const exchangeToken = options.exchangeToken ?? exchangeToolboxBrowserBridgeToken;
 
-	const handler = async (c: Parameters<Parameters<typeof app.get>[1]>[0]) => {
+	const handler = async (c: Context) => {
 		if ((c.req.header("upgrade") ?? "").toLowerCase() !== "websocket") {
 			return c.json({ error: "websocket_upgrade_required" }, 426, {
 				Upgrade: "websocket",
@@ -111,6 +125,132 @@ export function createLocalEgoWebSocketRoute(
 	};
 
 	app.get("/tunnel", handler);
+	app.post("/tools/:toolName", async (c) => {
+		const runtimeConfig = resolveLocalEgoTunnelRuntimeConfig(
+			options.runtimeEnv ?? process.env,
+		);
+		if (!runtimeConfig.available) {
+			return c.json({ error: "local_ego_tunnel_registry_unavailable" }, 503);
+		}
+
+		const toolName = parseBrowserToolName(c.req.param("toolName"));
+		if (!toolName) return c.json({ error: "unknown_browser_tool" }, 404);
+
+		const authHeader = c.req.header("authorization");
+		if (!authHeader?.startsWith("Bearer ")) {
+			return c.json({ error: "invalid_worker_token" }, 401);
+		}
+		const tokenData = verifyWorkerToken(authHeader.substring(7));
+		if (!tokenData) return c.json({ error: "invalid_worker_token" }, 401);
+
+		const ownerUserId = tokenData.userId;
+		const agentId = tokenData.agentId;
+		const runId = tokenData.runId;
+		if (!ownerUserId || !agentId || !runId) {
+			return c.json({ error: "missing_run_identity" }, 403);
+		}
+		const capabilityIds = activeBrowserCapabilityIds({
+			releaseState: tokenData.releaseState,
+			ownerUserId,
+			agentId,
+		});
+		if (!capabilityIds.includes(PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY)) {
+			await auditBrowserToolCallSafe({
+				ownerUserId,
+				agentId,
+				runId,
+				toolName,
+				result: "denied",
+				errorCode: "missing_release_capability",
+			});
+			return c.json({ error: "missing_release_capability" }, 403);
+		}
+
+		const parsedBody = await parseToolCallBody(c.req.raw);
+		if (!parsedBody.ok) {
+			return c.json({ error: parsedBody.error }, 400);
+		}
+
+		let session:
+			| Awaited<ReturnType<typeof getToolboxBrowserCurrentSession>>
+			| undefined;
+		try {
+			session = await getToolboxBrowserCurrentSession({
+				ownerUserId,
+				agentId,
+				runId,
+				capabilityIds,
+			});
+			if (
+				session.ownerUserId !== ownerUserId ||
+				session.agentId !== agentId
+			) {
+				await auditBrowserToolCallSafe({
+					ownerUserId,
+					agentId,
+					runId,
+					toolName,
+					sessionId: session.sessionId,
+					bridgeId: session.bridgeId,
+					result: "denied",
+					errorCode: "owner_mismatch",
+				});
+				return c.json({ error: "owner_mismatch" }, 403);
+			}
+			const lease = await createToolboxBrowserToolLease({
+				ownerUserId,
+				agentId,
+				runId,
+				toolName,
+				sessionId: session.sessionId,
+				bridgeId: session.bridgeId,
+			});
+			const result = await registry.callTool({
+				environment: session.environment,
+				ownerUserId,
+				agentId,
+				bridgeId: session.bridgeId,
+				toolName,
+				args: parsedBody.arguments,
+				lease: {
+					sessionId: lease.sessionId,
+					leaseToken: lease.leaseToken,
+					runId: lease.runId,
+					expiresAt: lease.expiresAt,
+				},
+				timeoutMs: TOOL_CALL_TIMEOUT_MS,
+			});
+			await auditBrowserToolCallSafe({
+				ownerUserId,
+				agentId,
+				runId,
+				toolName,
+				sessionId: session.sessionId,
+				bridgeId: session.bridgeId,
+				result: "success",
+				metadata: {
+					contentType: result.contentType,
+					url: result.url,
+					title: result.title,
+					...(result.metadata ?? {}),
+				},
+			});
+			return c.json({ ok: true, result });
+		} catch (error) {
+			const code = browserToolErrorCode(error);
+			await auditBrowserToolCallSafe({
+				ownerUserId,
+				agentId,
+				runId,
+				toolName,
+				sessionId: session?.sessionId,
+				bridgeId: session?.bridgeId,
+				result: "failed",
+				errorCode: code,
+			});
+			return c.json({ error: code }, browserToolErrorStatus(code));
+		}
+	});
 
 	return app;
 }
@@ -226,6 +366,87 @@ function createHonoBunUpgrade(c: {
 		}));
 		return handler(c as never, async () => undefined) as Response | Promise<Response>;
 	};
+}
+
+function parseBrowserToolName(value: string | undefined): BrowserToolName | null {
+	if (!value || !BROWSER_TOOLS.has(value as BrowserToolName)) return null;
+	return value as BrowserToolName;
+}
+
+function activeBrowserCapabilityIds(input: {
+	releaseState: ReleaseCapabilityState | undefined;
+	ownerUserId: string;
+	agentId: string;
+	now?: Date;
+}): string[] {
+	if (input.releaseState?.status !== "active") return [];
+	const { claim } = input.releaseState;
+	if (claim.toolboxUserId !== input.ownerUserId) return [];
+	if (claim.agentId !== input.agentId) return [];
+	const expiresAt = Date.parse(claim.expiresAt);
+	if (
+		!Number.isFinite(expiresAt) ||
+		expiresAt <= (input.now ?? new Date()).getTime()
+	) {
+		return [];
+	}
+	return claim.capabilityIds;
+}
+
+async function parseToolCallBody(
+	request: Request,
+): Promise<
+	| { ok: true; arguments: Record<string, unknown> }
+	| { ok: false; error: string }
+> {
+	let body: unknown;
+	try {
+		body = await request.json();
+	} catch {
+		return { ok: false, error: "invalid_json" };
+	}
+	if (!body || typeof body !== "object" || Array.isArray(body)) {
+		return { ok: false, error: "invalid_request" };
+	}
+	const args = (body as Record<string, unknown>).arguments;
+	if (args === undefined) return { ok: true, arguments: {} };
+	if (!args || typeof args !== "object" || Array.isArray(args)) {
+		return { ok: false, error: "invalid_arguments" };
+	}
+	return { ok: true, arguments: args as Record<string, unknown> };
+}
+
+async function auditBrowserToolCallSafe(
+	input: Parameters<typeof recordToolboxBrowserToolCall>[0],
+): Promise<void> {
+	try {
+		await recordToolboxBrowserToolCall(input);
+	} catch {
+		// Audit should be configured in deployed carriers, but a transient audit
+		// failure should not make a completed browser bridge call look like a
+		// browser execution failure to the agent.
+	}
+}
+
+function browserToolErrorCode(error: unknown): string {
+	if (error instanceof Error && error.message) return error.message;
+	return "browser_tool_failed";
+}
+
+function browserToolErrorStatus(code: string): 400 | 403 | 409 | 503 | 504 {
+	switch (code) {
+		case "tool_denied":
+		case "owner_mismatch":
+		case "missing_release_capability":
+			return 403;
+		case "lease_expired":
+			return 409;
+		case "timeout":
+			return 504;
+		case "bridge_disconnected":
+		default:
+			return 503;
+	}
 }
 
 class HonoWebSocketAdapter implements LocalEgoBridgeWebSocket {

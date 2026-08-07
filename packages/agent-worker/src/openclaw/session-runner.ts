@@ -92,6 +92,10 @@ import {
   buildPersonalReminderDeliveryInstructions,
 } from "./effective-tool-inventory";
 import {
+  createLocalBrowserAgentTools,
+  releaseCapabilityIdsForBrowserTools,
+} from "./local-browser-tools";
+import {
   applyCapabilityLimitNotes,
   buildMcpAuthToolNames,
   type McpAuthToolNames,
@@ -2162,8 +2166,17 @@ export async function runAISession(
       gw: gwParams,
       mcpExposure,
     });
+  const localBrowserTools = createLocalBrowserAgentTools({
+    gatewayUrl: gwParams.gatewayUrl,
+    workerToken: gwParams.workerToken,
+    capabilityIds: releaseCapabilityIdsForBrowserTools({
+      releaseState: context.releaseState,
+      agentId: agentId || "",
+    }),
+  });
   let tools = createOpenClawTools(workspaceDir, {
     bashOperations: embeddedBashOps,
+    localBrowserTools,
   }).filter((tool) => isToolAllowedByPolicy(tool.name, toolsPolicy));
 
   if (

@@ -33,6 +33,7 @@ import type {
 import { Type } from "@sinclair/typebox";
 import { createMcpToolDefinitions } from "../openclaw/custom-tools";
 import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
+import { createLocalBrowserAgentTools } from "../openclaw/local-browser-tools";
 import { OpenClawProgressProcessor } from "../openclaw/processor";
 import {
   emitWorkerToolsRegisteredObsEvent,
@@ -162,6 +163,36 @@ afterEach(() => {
     process.env.TOOLBOX_INTERNAL_SECRET = originalObsEnv.toolboxSecret;
   }
   mock.restore();
+});
+
+describe("local browser tool registration", () => {
+  test("released browser tools call Lobu browser gateway route instead of MCP", async () => {
+    let capturedUrl = "";
+
+    globalThis.fetch = mock(async (input) => {
+      capturedUrl = typeof input === "string" ? input : (input as Request).url;
+      return Response.json({
+        text: "Course dashboard",
+        contentType: "dom",
+      });
+    }) as unknown as typeof fetch;
+
+    const [tool] = createLocalBrowserAgentTools({
+      gatewayUrl: "https://lobu.test",
+      workerToken: "worker-token",
+      capabilityIds: ["personal_browser.local_ego.v1"],
+    });
+
+    expect(tool?.name).toBe("browser_read_dom");
+
+    const result = await tool!.execute("browser-call-1", {});
+
+    expect(extractText(result)).toContain("Course dashboard");
+    expect(capturedUrl).toBe(
+      "https://lobu.test/lobu/api/browser/local-ego/tools/browser_read_dom"
+    );
+    expect(capturedUrl).not.toContain("/mcp/");
+  });
 });
 
 // ---------------------------------------------------------------------------

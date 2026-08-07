@@ -7,12 +7,16 @@ export interface ToolboxLocalEgoBridgeExchange {
 	ownerUserId: string;
 	agentId: string;
 	bridgeId: string;
-	scopes: BrowserToolName[];
+	scopes: readonly BrowserToolName[];
 	nonce?: string;
 }
 
 export interface ToolboxBrowserSessionClientOptions {
 	exchangeUrl?: string;
+	currentSessionUrl?: string;
+	leaseUrl?: string;
+	auditUrl?: string;
+	apiBaseUrl?: string;
 	internalSecret?: string;
 	fetchImpl?: typeof fetch;
 	timeoutMs?: number;
@@ -33,6 +37,21 @@ const BROWSER_TOOLS = new Set<BrowserToolName>([
 	"browser_screenshot",
 	"browser_navigate",
 ]);
+
+export interface ToolboxBrowserCurrentSession {
+	environment: LocalEgoBridgeEnvironment;
+	ownerUserId: string;
+	agentId: string;
+	sessionId: string;
+	bridgeId: string;
+}
+
+export interface ToolboxBrowserToolLease {
+	sessionId: string;
+	leaseToken: string;
+	runId: string;
+	expiresAt: string;
+}
 
 export async function exchangeToolboxBrowserBridgeToken(
 	token: string,
@@ -87,6 +106,77 @@ export async function exchangeToolboxBrowserBridgeToken(
 	}
 }
 
+export async function getToolboxBrowserCurrentSession(input: {
+	ownerUserId: string;
+	agentId: string;
+	runId: number;
+	capabilityIds: string[];
+}, options: ToolboxBrowserSessionClientOptions = {}): Promise<ToolboxBrowserCurrentSession> {
+	const body = await postToolboxBrowserSessionRoute(
+		resolveToolboxBrowserSessionUrl(
+			options.currentSessionUrl,
+			options.apiBaseUrl,
+			process.env.TOOLBOX_BROWSER_CURRENT_SESSION_URL,
+			"/agent-workbench/browser-sessions/internal/current",
+		),
+		{
+			ownerUserId: input.ownerUserId,
+			agentId: input.agentId,
+			runId: input.runId,
+			capabilityIds: input.capabilityIds,
+		},
+		options,
+		"toolbox_browser_current_session",
+	);
+	return parseCurrentSessionResponse(body);
+}
+
+export async function createToolboxBrowserToolLease(input: {
+	ownerUserId: string;
+	agentId: string;
+	runId: number;
+	toolName: BrowserToolName;
+	sessionId: string;
+	bridgeId: string;
+}, options: ToolboxBrowserSessionClientOptions = {}): Promise<ToolboxBrowserToolLease> {
+	const body = await postToolboxBrowserSessionRoute(
+		resolveToolboxBrowserSessionUrl(
+			options.leaseUrl,
+			options.apiBaseUrl,
+			process.env.TOOLBOX_BROWSER_TOOL_LEASE_URL,
+			"/agent-workbench/browser-sessions/internal/leases",
+		),
+		input,
+		options,
+		"toolbox_browser_tool_lease",
+	);
+	return parseLeaseResponse(body);
+}
+
+export async function recordToolboxBrowserToolCall(input: {
+	ownerUserId: string;
+	agentId: string;
+	runId: number;
+	toolName: BrowserToolName;
+	sessionId?: string;
+	bridgeId?: string;
+	result: "success" | "denied" | "failed";
+	errorCode?: string;
+	metadata?: Record<string, unknown>;
+}, options: ToolboxBrowserSessionClientOptions = {}): Promise<void> {
+	await postToolboxBrowserSessionRoute(
+		resolveToolboxBrowserSessionUrl(
+			options.auditUrl,
+			options.apiBaseUrl,
+			process.env.TOOLBOX_BROWSER_TOOL_CALL_AUDIT_URL,
+			"/agent-workbench/browser-sessions/internal/tool-calls",
+		),
+		input,
+		options,
+		"toolbox_browser_tool_call_audit",
+	);
+}
+
 async function readBoundedJson(response: Response, maxBytes: number): Promise<unknown> {
 	const declared = response.headers.get("content-length");
 	if (
@@ -133,6 +223,64 @@ async function readBoundedJson(response: Response, maxBytes: number): Promise<un
 	}
 }
 
+async function postToolboxBrowserSessionRoute(
+	url: string,
+	body: Record<string, unknown>,
+	options: ToolboxBrowserSessionClientOptions,
+	errorPrefix: string,
+): Promise<unknown> {
+	const internalSecret =
+		options.internalSecret ?? process.env.TOOLBOX_INTERNAL_SECRET?.trim();
+	if (!url || !internalSecret) {
+		throw new ToolboxBrowserBridgeExchangeError(`${errorPrefix}_not_configured`);
+	}
+	const controller = new AbortController();
+	const timeout = setTimeout(
+		() => controller.abort(),
+		options.timeoutMs ?? 1_500,
+	);
+	try {
+		let response: Response;
+		try {
+			response = await (options.fetchImpl ?? fetch)(url, {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"x-internal-secret": internalSecret,
+				},
+				body: JSON.stringify(body),
+				signal: controller.signal,
+			});
+		} catch {
+			throw new ToolboxBrowserBridgeExchangeError(`${errorPrefix}_fetch_failed`);
+		}
+		if (!response.ok) {
+			throw new ToolboxBrowserBridgeExchangeError(
+				`${errorPrefix}_failed`,
+				response.status,
+			);
+		}
+		return readBoundedJson(response, MAX_EXCHANGE_RESPONSE_BYTES);
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+function resolveToolboxBrowserSessionUrl(
+	explicitUrl: string | undefined,
+	explicitBaseUrl: string | undefined,
+	envUrl: string | undefined,
+	pathname: string,
+): string {
+	const direct = explicitUrl?.trim() || envUrl?.trim();
+	if (direct) return direct;
+	const base =
+		explicitBaseUrl?.trim() ||
+		process.env.TOOLBOX_BROWSER_SESSION_API_BASE_URL?.trim() ||
+		process.env.TOOLBOX_API_BASE_URL?.trim();
+	return base ? `${base.replace(/\/+$/, "")}${pathname}` : "";
+}
+
 function parseExchangeResponse(value: unknown): ToolboxLocalEgoBridgeExchange {
 	const outer = record(value);
 	if (outer.ok !== true) {
@@ -176,6 +324,35 @@ function parseExchangeResponse(value: unknown): ToolboxLocalEgoBridgeExchange {
 			typeof bridge.nonce === "string" && bridge.nonce.trim()
 				? bridge.nonce
 				: undefined,
+	};
+}
+
+function parseCurrentSessionResponse(value: unknown): ToolboxBrowserCurrentSession {
+	const outer = record(value);
+	const session = record(outer.session ?? outer.browserSession ?? outer);
+	const environment = stringField(session.environment);
+	if (environment !== "staging" && environment !== "production") {
+		throw new ToolboxBrowserBridgeExchangeError(
+			"toolbox_browser_current_session_invalid_environment",
+		);
+	}
+	return {
+		environment,
+		ownerUserId: stringField(session.ownerUserId),
+		agentId: stringField(session.agentId),
+		sessionId: stringField(session.sessionId),
+		bridgeId: stringField(session.bridgeId),
+	};
+}
+
+function parseLeaseResponse(value: unknown): ToolboxBrowserToolLease {
+	const outer = record(value);
+	const lease = record(outer.lease ?? outer);
+	return {
+		sessionId: stringField(lease.sessionId),
+		leaseToken: stringField(lease.leaseToken),
+		runId: stringField(lease.runId),
+		expiresAt: stringField(lease.expiresAt),
 	};
 }
 
