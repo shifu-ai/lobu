@@ -83,10 +83,11 @@ export function createLocalEgoTunnelRegistry(input: { now: () => Date }) {
         },
       };
 
+      let timeout: ReturnType<typeof setTimeout> | undefined;
       const response = await Promise.race([
         bridge.send(request),
-        new Promise<LocalEgoBridgeResponse>((resolve) =>
-          setTimeout(
+        new Promise<LocalEgoBridgeResponse>((resolve) => {
+          timeout = setTimeout(
             () =>
               resolve({
                 jsonrpc: '2.0',
@@ -94,11 +95,14 @@ export function createLocalEgoTunnelRegistry(input: { now: () => Date }) {
                 error: { code: 'timeout', message: 'Browser bridge timed out.' },
               }),
             input.timeoutMs,
-          ),
-        ),
-      ]);
+          );
+        }),
+      ]).finally(() => {
+        if (timeout) clearTimeout(timeout);
+      });
 
       if (response.error) throw new Error(response.error.code);
+      if (response.id !== request.id) throw new Error('tool_failed');
       if (!response.result?.ok) throw new Error('tool_failed');
       return response.result;
     },
