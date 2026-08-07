@@ -374,6 +374,65 @@ describe("selectMcpToolsForTurn", () => {
     ]);
   });
 
+  test("keeps the calendar resolver reachable when a battle report asks for a relative weekday", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [
+          calendarResolverTool(),
+          tool("sales_battle_report_preview", {
+            description: "Preview a sales battle report for a given date.",
+          }),
+          tool("trial_sessions_list", {
+            description: "List trial course sessions.",
+          }),
+          tool("search_memory", { description: "Search agent memory." }),
+        ],
+      },
+      message: "給我上週二的戰報",
+      budget: 48,
+      routerMode: "semantic",
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(result.trace.primaryIntent).toBe("battle_report");
+    expect(result.trace.selectedToolNames).toContain(
+      "shifu-toolbox/resolve_calendar_date"
+    );
+    expect(result.trace.selectedToolNames).toContain(
+      "shifu-toolbox/sales_battle_report_preview"
+    );
+    expect(result.trace.selectedToolNames).toContain(
+      "shifu-toolbox/search_memory"
+    );
+    expect(result.trace.pinnedBudgetOverflow).toEqual([]);
+  });
+
+  test("keeps the calendar resolver reachable for a relative-weekday battle report on the single-mcp path", () => {
+    const result = selectMcpToolsForTurn({
+      tools: [
+        calendarResolverTool(),
+        tool("sales_battle_report_preview", {
+          description: "Preview a sales battle report for a given date.",
+        }),
+        tool("search_memory", { description: "Search agent memory." }),
+      ],
+      message: "給我上週二的戰報",
+      budget: 48,
+      mcpId: "shifu-toolbox",
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(result.trace.primaryIntent).toBe("battle_report");
+    expect(result.selected.map((toolDef) => toolDef.name)).toContain(
+      "resolve_calendar_date"
+    );
+    expect(result.trace.selectedToolNames).toContain(
+      "sales_battle_report_preview"
+    );
+  });
+
   test("does not steal ordinary today business queries from their domain", () => {
     const result = selectMcpToolsByMcpForTurn({
       toolsByMcp: {
