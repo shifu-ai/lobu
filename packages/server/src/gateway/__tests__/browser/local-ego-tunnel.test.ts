@@ -3,7 +3,7 @@ import {
   createLocalEgoTunnelRegistry,
   type LocalEgoBridgeRequest,
   type LocalEgoBridgeResponse,
-} from './local-ego-tunnel';
+} from '../../browser/local-ego-tunnel';
 
 const now = () => new Date('2026-08-07T08:00:00.000Z');
 

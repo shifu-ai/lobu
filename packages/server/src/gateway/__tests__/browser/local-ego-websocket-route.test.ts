@@ -1,18 +1,18 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
 import { Hono } from "hono";
-import { __resetEncryptionKeyCacheForTests } from "../../../../core/src/utils/encryption";
-import { createLocalEgoTunnelRegistry } from "./local-ego-tunnel";
+import { __resetEncryptionKeyCacheForTests } from "../../../../../core/src/utils/encryption";
+import { createLocalEgoTunnelRegistry } from "../../browser/local-ego-tunnel";
 import {
 	acceptLocalEgoBridgeConnection,
 	createLocalEgoWebSocketRoute,
 	type LocalEgoBridgeWebSocket,
 	resolveLocalEgoTunnelRuntimeConfig,
-} from "./local-ego-websocket-route";
+} from "../../browser/local-ego-websocket-route";
 import {
 	exchangeToolboxBrowserBridgeToken,
 	type ToolboxBrowserBridgeExchangeError,
-} from "./toolbox-browser-session-client";
+} from "../../browser/toolbox-browser-session-client";
 
 const now = () => new Date("2026-08-07T08:00:00.000Z");
 const singleProcessRuntimeEnv = {
