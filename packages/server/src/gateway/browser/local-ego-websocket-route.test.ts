@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Hono } from "hono";
 import { createLocalEgoTunnelRegistry } from "./local-ego-tunnel";
 import {
 	acceptLocalEgoBridgeConnection,
@@ -40,10 +41,16 @@ const exchangedBridge = {
 	scopes: ["browser_read_dom"],
 } as const;
 
+function mountAsLobuApi(route: ReturnType<typeof createLocalEgoWebSocketRoute>) {
+	const app = new Hono();
+	app.route("/lobu/api/browser/local-ego", route);
+	return app;
+}
+
 describe("local ego browser WebSocket route", () => {
 	test("exchanges a Toolbox bridge token before accepting an upgrade", async () => {
 		const exchanges: unknown[] = [];
-		const route = createLocalEgoWebSocketRoute({
+		const route = mountAsLobuApi(createLocalEgoWebSocketRoute({
 			exchangeToken: async (token) => {
 				exchanges.push(token);
 				return exchangedBridge;
@@ -53,7 +60,7 @@ describe("local ego browser WebSocket route", () => {
 				onOpen(new FakeSocket());
 				return new Response(null, { status: 101 });
 			},
-		});
+		}));
 
 		const response = await route.fetch(
 			new Request(
@@ -69,11 +76,11 @@ describe("local ego browser WebSocket route", () => {
 	});
 
 	test("rejects non-WebSocket requests", async () => {
-		const route = createLocalEgoWebSocketRoute({
+		const route = mountAsLobuApi(createLocalEgoWebSocketRoute({
 			exchangeToken: async () => exchangedBridge,
 			registry: createLocalEgoTunnelRegistry({ now }),
 			upgradeWebSocket: async () => new Response(null, { status: 101 }),
-		});
+		}));
 
 		const response = await route.fetch(
 			new Request("https://lobu.test/lobu/api/browser/local-ego/tunnel?token=abc"),
@@ -83,11 +90,11 @@ describe("local ego browser WebSocket route", () => {
 	});
 
 	test("requires a token query parameter", async () => {
-		const route = createLocalEgoWebSocketRoute({
+		const route = mountAsLobuApi(createLocalEgoWebSocketRoute({
 			exchangeToken: async () => exchangedBridge,
 			registry: createLocalEgoTunnelRegistry({ now }),
 			upgradeWebSocket: async () => new Response(null, { status: 101 }),
-		});
+		}));
 
 		const response = await route.fetch(
 			new Request("https://lobu.test/lobu/api/browser/local-ego/tunnel", {
@@ -96,6 +103,41 @@ describe("local ego browser WebSocket route", () => {
 		);
 
 		expect(response.status).toBe(400);
+	});
+
+	test("does not expose a doubled absolute tunnel path when mounted", async () => {
+		const route = mountAsLobuApi(createLocalEgoWebSocketRoute({
+			exchangeToken: async () => exchangedBridge,
+			registry: createLocalEgoTunnelRegistry({ now }),
+			upgradeWebSocket: async () => new Response(null, { status: 101 }),
+		}));
+
+		const response = await route.fetch(
+			new Request(
+				"https://lobu.test/lobu/api/browser/local-ego/lobu/api/browser/local-ego/tunnel?token=abc",
+				{
+					headers: { upgrade: "websocket" },
+				},
+			),
+		);
+
+		expect(response.status).toBe(404);
+	});
+
+	test("does not expose the tunnel under mcp", async () => {
+		const route = mountAsLobuApi(createLocalEgoWebSocketRoute({
+			exchangeToken: async () => exchangedBridge,
+			registry: createLocalEgoTunnelRegistry({ now }),
+			upgradeWebSocket: async () => new Response(null, { status: 101 }),
+		}));
+
+		const response = await route.fetch(
+			new Request("https://lobu.test/mcp/browser/local-ego/tunnel?token=abc", {
+				headers: { upgrade: "websocket" },
+			}),
+		);
+
+		expect(response.status).toBe(404);
 	});
 
 	test("registers a bridge from the exchanged token and relays matching JSON-RPC responses", async () => {

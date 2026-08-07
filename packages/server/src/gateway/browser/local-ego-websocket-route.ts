@@ -74,7 +74,6 @@ export function createLocalEgoWebSocketRoute(
 	};
 
 	app.get("/tunnel", handler);
-	app.get("/lobu/api/browser/local-ego/tunnel", handler);
 
 	return app;
 }
