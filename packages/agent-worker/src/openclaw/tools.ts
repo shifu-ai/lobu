@@ -130,9 +130,12 @@ function buildEditSchema() {
 
 export function createOpenClawTools(
   cwd: string,
+  // Built-ins only. Non-builtin tools must go through the session's
+  // `customTools` channel — pi rebuilds this array from tool names and
+  // buildAgentSession() can only substitute into it, never add, so anything
+  // that is not an overridable built-in silently disappears.
   options?: {
     bashOperations?: BashOperations;
-    localBrowserTools?: AgentTool<any>[];
   }
 ): AgentTool<any>[] {
   const read = wrapToolWithNormalization({
@@ -175,7 +178,6 @@ export function createOpenClawTools(
     createGrepTool(cwd),
     createFindTool(cwd),
     createLsTool(cwd),
-    ...(options?.localBrowserTools ?? []),
   ];
 }
 
