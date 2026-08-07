@@ -1,17 +1,17 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
-import { __resetEncryptionKeyCacheForTests } from "../../../../core/src/utils/encryption";
 import { Hono } from "hono";
+import { __resetEncryptionKeyCacheForTests } from "../../../../core/src/utils/encryption";
 import { createLocalEgoTunnelRegistry } from "./local-ego-tunnel";
 import {
 	acceptLocalEgoBridgeConnection,
 	createLocalEgoWebSocketRoute,
-	resolveLocalEgoTunnelRuntimeConfig,
 	type LocalEgoBridgeWebSocket,
+	resolveLocalEgoTunnelRuntimeConfig,
 } from "./local-ego-websocket-route";
 import {
 	exchangeToolboxBrowserBridgeToken,
-	ToolboxBrowserBridgeExchangeError,
+	type ToolboxBrowserBridgeExchangeError,
 } from "./toolbox-browser-session-client";
 
 const now = () => new Date("2026-08-07T08:00:00.000Z");
@@ -51,7 +51,10 @@ afterEach(() => {
 class FakeSocket implements LocalEgoBridgeWebSocket {
 	readonly sent: string[] = [];
 	readonly closes: Array<{ code?: number; reason?: string }> = [];
-	private readonly listeners = new Map<string, Array<(event: unknown) => void>>();
+	private readonly listeners = new Map<
+		string,
+		Array<(event: unknown) => void>
+	>();
 
 	constructor(private readonly options: { throwOnSend?: boolean } = {}) {}
 
@@ -83,7 +86,9 @@ const exchangedBridge = {
 	scopes: ["browser_read_dom"],
 } as const;
 
-function mountAsLobuApi(route: ReturnType<typeof createLocalEgoWebSocketRoute>) {
+function mountAsLobuApi(
+	route: ReturnType<typeof createLocalEgoWebSocketRoute>,
+) {
 	const app = new Hono();
 	app.route("/lobu/api/browser/local-ego", route);
 	return app;
@@ -127,6 +132,7 @@ function registerReadDomBridge(input: {
 	registry: ReturnType<typeof createLocalEgoTunnelRegistry>;
 	events: string[];
 	text?: string;
+	errorCode?: string;
 }) {
 	input.registry.register({
 		environment: exchangedBridge.environment,
@@ -135,6 +141,16 @@ function registerReadDomBridge(input: {
 		bridgeId: exchangedBridge.bridgeId,
 		send: async (request) => {
 			input.events.push("bridge");
+			if (input.errorCode) {
+				return {
+					jsonrpc: "2.0",
+					id: request.id,
+					error: {
+						code: input.errorCode,
+						message: input.errorCode,
+					},
+				};
+			}
 			return {
 				jsonrpc: "2.0",
 				id: request.id,
@@ -153,6 +169,7 @@ function registerReadDomBridge(input: {
 function mockToolboxBrowserSessionFetch(input: {
 	events: string[];
 	auditStatus?: number;
+	auditBodies?: unknown[];
 }) {
 	globalThis.fetch = mock(async (url, init) => {
 		const parsed = new URL(String(url));
@@ -200,6 +217,7 @@ function mockToolboxBrowserSessionFetch(input: {
 		}
 		if (parsed.pathname.endsWith("/internal/tool-calls")) {
 			input.events.push("audit");
+			input.auditBodies?.push(body);
 			return Response.json(
 				input.auditStatus && input.auditStatus >= 400
 					? { error: "audit down" }
@@ -216,14 +234,26 @@ async function postReadDomTool(input: {
 	token?: string;
 	body?: unknown;
 }) {
-	return input.app.request("/lobu/api/browser/local-ego/tools/browser_read_dom", {
-		method: "POST",
-		headers: {
-			...(input.token ? { authorization: `Bearer ${input.token}` } : {}),
-			"content-type": "application/json",
+	return postBrowserTool({ ...input, toolName: "browser_read_dom" });
+}
+
+async function postBrowserTool(input: {
+	app: Hono;
+	toolName: "browser_read_dom" | "browser_screenshot" | "browser_navigate";
+	token?: string;
+	body?: unknown;
+}) {
+	return input.app.request(
+		`/lobu/api/browser/local-ego/tools/${input.toolName}`,
+		{
+			method: "POST",
+			headers: {
+				...(input.token ? { authorization: `Bearer ${input.token}` } : {}),
+				"content-type": "application/json",
+			},
+			body: JSON.stringify(input.body ?? { arguments: {} }),
 		},
-		body: JSON.stringify(input.body ?? { arguments: {} }),
-	});
+	);
 }
 
 describe("local ego browser WebSocket route", () => {
@@ -231,18 +261,20 @@ describe("local ego browser WebSocket route", () => {
 		const exchanges: unknown[] = [];
 		let upgrades = 0;
 		const registry = createLocalEgoTunnelRegistry({ now });
-		const route = mountAsLobuApi(createLocalEgoWebSocketRoute({
-			exchangeToken: async (token) => {
-				exchanges.push(token);
-				return exchangedBridge;
-			},
-			registry,
-			runtimeEnv: {},
-			upgradeWebSocket: async () => {
-				upgrades += 1;
-				return new Response(null, { status: 101 });
-			},
-		}));
+		const route = mountAsLobuApi(
+			createLocalEgoWebSocketRoute({
+				exchangeToken: async (token) => {
+					exchanges.push(token);
+					return exchangedBridge;
+				},
+				registry,
+				runtimeEnv: {},
+				upgradeWebSocket: async () => {
+					upgrades += 1;
+					return new Response(null, { status: 101 });
+				},
+			}),
+		);
 
 		const response = await route.fetch(
 			new Request(
@@ -280,17 +312,19 @@ describe("local ego browser WebSocket route", () => {
 
 	test("exchanges a Toolbox bridge token before accepting an upgrade", async () => {
 		const exchanges: unknown[] = [];
-		const route = mountAsLobuApi(createEnabledRoute({
-			exchangeToken: async (token) => {
-				exchanges.push(token);
-				return exchangedBridge;
-			},
-			registry: createLocalEgoTunnelRegistry({ now }),
-			upgradeWebSocket: async ({ onOpen }) => {
-				onOpen(new FakeSocket());
-				return new Response(null, { status: 101 });
-			},
-		}));
+		const route = mountAsLobuApi(
+			createEnabledRoute({
+				exchangeToken: async (token) => {
+					exchanges.push(token);
+					return exchangedBridge;
+				},
+				registry: createLocalEgoTunnelRegistry({ now }),
+				upgradeWebSocket: async ({ onOpen }) => {
+					onOpen(new FakeSocket());
+					return new Response(null, { status: 101 });
+				},
+			}),
+		);
 
 		const response = await route.fetch(
 			new Request(
@@ -306,25 +340,31 @@ describe("local ego browser WebSocket route", () => {
 	});
 
 	test("rejects non-WebSocket requests", async () => {
-		const route = mountAsLobuApi(createEnabledRoute({
-			exchangeToken: async () => exchangedBridge,
-			registry: createLocalEgoTunnelRegistry({ now }),
-			upgradeWebSocket: async () => new Response(null, { status: 101 }),
-		}));
+		const route = mountAsLobuApi(
+			createEnabledRoute({
+				exchangeToken: async () => exchangedBridge,
+				registry: createLocalEgoTunnelRegistry({ now }),
+				upgradeWebSocket: async () => new Response(null, { status: 101 }),
+			}),
+		);
 
 		const response = await route.fetch(
-			new Request("https://lobu.test/lobu/api/browser/local-ego/tunnel?token=abc"),
+			new Request(
+				"https://lobu.test/lobu/api/browser/local-ego/tunnel?token=abc",
+			),
 		);
 
 		expect(response.status).toBe(426);
 	});
 
 	test("requires a token query parameter", async () => {
-		const route = mountAsLobuApi(createEnabledRoute({
-			exchangeToken: async () => exchangedBridge,
-			registry: createLocalEgoTunnelRegistry({ now }),
-			upgradeWebSocket: async () => new Response(null, { status: 101 }),
-		}));
+		const route = mountAsLobuApi(
+			createEnabledRoute({
+				exchangeToken: async () => exchangedBridge,
+				registry: createLocalEgoTunnelRegistry({ now }),
+				upgradeWebSocket: async () => new Response(null, { status: 101 }),
+			}),
+		);
 
 		const response = await route.fetch(
 			new Request("https://lobu.test/lobu/api/browser/local-ego/tunnel", {
@@ -336,11 +376,13 @@ describe("local ego browser WebSocket route", () => {
 	});
 
 	test("does not expose a doubled absolute tunnel path when mounted", async () => {
-		const route = mountAsLobuApi(createEnabledRoute({
-			exchangeToken: async () => exchangedBridge,
-			registry: createLocalEgoTunnelRegistry({ now }),
-			upgradeWebSocket: async () => new Response(null, { status: 101 }),
-		}));
+		const route = mountAsLobuApi(
+			createEnabledRoute({
+				exchangeToken: async () => exchangedBridge,
+				registry: createLocalEgoTunnelRegistry({ now }),
+				upgradeWebSocket: async () => new Response(null, { status: 101 }),
+			}),
+		);
 
 		const response = await route.fetch(
 			new Request(
@@ -355,11 +397,13 @@ describe("local ego browser WebSocket route", () => {
 	});
 
 	test("does not expose the tunnel under mcp", async () => {
-		const route = mountAsLobuApi(createEnabledRoute({
-			exchangeToken: async () => exchangedBridge,
-			registry: createLocalEgoTunnelRegistry({ now }),
-			upgradeWebSocket: async () => new Response(null, { status: 101 }),
-		}));
+		const route = mountAsLobuApi(
+			createEnabledRoute({
+				exchangeToken: async () => exchangedBridge,
+				registry: createLocalEgoTunnelRegistry({ now }),
+				upgradeWebSocket: async () => new Response(null, { status: 101 }),
+			}),
+		);
 
 		const response = await route.fetch(
 			new Request("https://lobu.test/mcp/browser/local-ego/tunnel?token=abc", {
@@ -708,6 +752,87 @@ describe("local ego browser tool route", () => {
 		expect(JSON.stringify(body)).not.toContain("Course dashboard secret");
 		expect(events).toEqual(["current-session", "lease", "bridge", "audit"]);
 	});
+
+	test("sanitizes browser-controlled bridge error codes before response and audit", async () => {
+		const events: string[] = [];
+		const auditBodies: unknown[] = [];
+		const registry = createLocalEgoTunnelRegistry({ now });
+		registerReadDomBridge({
+			registry,
+			events,
+			errorCode: "SECRET PAGE TEXT",
+		});
+		mockToolboxBrowserSessionFetch({ events, auditBodies });
+		const app = mountAsLobuApi(createEnabledRoute({ registry }));
+
+		const response = await postReadDomTool({
+			app,
+			token: activeReleaseToken(),
+		});
+		const body = await response.json();
+
+		expect(response.status).toBe(503);
+		expect(body).toEqual({ error: "tool_failed" });
+		expect(JSON.stringify(body)).not.toContain("SECRET PAGE TEXT");
+		expect(auditBodies).toHaveLength(1);
+		expect(auditBodies[0]).toMatchObject({
+			result: "failed",
+			errorCode: "tool_failed",
+		});
+		expect(JSON.stringify(auditBodies[0])).not.toContain("SECRET PAGE TEXT");
+		expect(events).toEqual(["current-session", "lease", "bridge", "audit"]);
+	});
+
+	test.each([
+		{
+			toolName: "browser_read_dom" as const,
+			body: { arguments: { maxTextBytes: 200_001 } },
+		},
+		{
+			toolName: "browser_read_dom" as const,
+			body: { arguments: { maxTextBytes: 1000, extra: true } },
+		},
+		{
+			toolName: "browser_screenshot" as const,
+			body: { arguments: { maxImageBase64Bytes: 2_000_001 } },
+		},
+		{
+			toolName: "browser_screenshot" as const,
+			body: { arguments: { maxImageBase64Bytes: 1000, extra: true } },
+		},
+		{
+			toolName: "browser_navigate" as const,
+			body: { arguments: {} },
+		},
+		{
+			toolName: "browser_navigate" as const,
+			body: { arguments: { url: "https://course.example", extra: true } },
+		},
+	])("rejects invalid %s arguments before Toolbox lease or bridge", async ({
+		toolName,
+		body,
+	}) => {
+		const events: string[] = [];
+		const registry = createLocalEgoTunnelRegistry({ now });
+		registerReadDomBridge({ registry, events });
+		const app = mountAsLobuApi(createEnabledRoute({ registry }));
+		globalThis.fetch = mock(async () => {
+			throw new Error("fetch should not be called");
+		}) as unknown as typeof fetch;
+
+		const response = await postBrowserTool({
+			app,
+			toolName,
+			token: activeReleaseToken(),
+			body,
+		});
+
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toEqual({
+			error: "invalid_browser_tool_arguments",
+		});
+		expect(events).toEqual([]);
+	});
 });
 
 describe("local ego tunnel runtime config", () => {
@@ -722,11 +847,13 @@ describe("local ego tunnel runtime config", () => {
 				LOCAL_EGO_BROWSER_TUNNEL_MODE: "multi_replica",
 			}),
 		).toMatchObject({ available: false, mode: "multi_replica" });
-		expect(resolveLocalEgoTunnelRuntimeConfig(singleProcessRuntimeEnv)).toEqual({
-			available: true,
-			mode: "single_process",
-			instanceId: "test-instance-1",
-		});
+		expect(resolveLocalEgoTunnelRuntimeConfig(singleProcessRuntimeEnv)).toEqual(
+			{
+				available: true,
+				mode: "single_process",
+				instanceId: "test-instance-1",
+			},
+		);
 	});
 });
 
@@ -734,7 +861,8 @@ describe("toolbox browser session client", () => {
 	test("sends the internal secret header and token body", async () => {
 		let captured: { url: string; init?: RequestInit } | undefined;
 		const bridge = await exchangeToolboxBrowserBridgeToken("token-1", {
-			exchangeUrl: "https://toolbox.test/agent-workbench/browser-sessions/internal/bridge-token/exchange",
+			exchangeUrl:
+				"https://toolbox.test/agent-workbench/browser-sessions/internal/bridge-token/exchange",
 			internalSecret: "internal-secret",
 			fetchImpl: async (url, init) => {
 				captured = { url: String(url), init };
@@ -746,8 +874,12 @@ describe("toolbox browser session client", () => {
 		expect(captured?.url).toBe(
 			"https://toolbox.test/agent-workbench/browser-sessions/internal/bridge-token/exchange",
 		);
-		expect((captured?.init?.headers as Record<string, string>)["x-internal-secret"]).toBe("internal-secret");
-		expect(JSON.parse(String(captured?.init?.body))).toEqual({ token: "token-1" });
+		expect(
+			(captured?.init?.headers as Record<string, string>)["x-internal-secret"],
+		).toBe("internal-secret");
+		expect(JSON.parse(String(captured?.init?.body))).toEqual({
+			token: "token-1",
+		});
 	});
 
 	test("maps non-ok exchange responses to a typed error", async () => {
@@ -755,7 +887,8 @@ describe("toolbox browser session client", () => {
 			exchangeToolboxBrowserBridgeToken("token-1", {
 				exchangeUrl: "https://toolbox.test/exchange",
 				internalSecret: "internal-secret",
-				fetchImpl: async () => Response.json({ error: "denied" }, { status: 401 }),
+				fetchImpl: async () =>
+					Response.json({ error: "denied" }, { status: 401 }),
 			}),
 		).rejects.toMatchObject({
 			code: "toolbox_browser_bridge_exchange_failed",
@@ -776,7 +909,11 @@ describe("toolbox browser session client", () => {
 			exchangeToolboxBrowserBridgeToken("token-1", {
 				exchangeUrl: "https://toolbox.test/exchange",
 				internalSecret: "internal-secret",
-				fetchImpl: async () => Response.json({ ok: true, bridge: { ...exchangedBridge, ownerUserId: "" } }),
+				fetchImpl: async () =>
+					Response.json({
+						ok: true,
+						bridge: { ...exchangedBridge, ownerUserId: "" },
+					}),
 			}),
 		).rejects.toThrow("toolbox_browser_bridge_exchange_invalid_contract");
 	});
@@ -786,10 +923,11 @@ describe("toolbox browser session client", () => {
 			exchangeToolboxBrowserBridgeToken("token-1", {
 				exchangeUrl: "https://toolbox.test/exchange",
 				internalSecret: "internal-secret",
-				fetchImpl: async () => Response.json({
-					ok: true,
-					bridge: { ...exchangedBridge, environment: "dev" },
-				}),
+				fetchImpl: async () =>
+					Response.json({
+						ok: true,
+						bridge: { ...exchangedBridge, environment: "dev" },
+					}),
 			}),
 		).rejects.toThrow("toolbox_browser_bridge_exchange_invalid_environment");
 
@@ -797,10 +935,11 @@ describe("toolbox browser session client", () => {
 			exchangeToolboxBrowserBridgeToken("token-1", {
 				exchangeUrl: "https://toolbox.test/exchange",
 				internalSecret: "internal-secret",
-				fetchImpl: async () => Response.json({
-					ok: true,
-					bridge: { ...exchangedBridge, scopes: ["browser_click"] },
-				}),
+				fetchImpl: async () =>
+					Response.json({
+						ok: true,
+						bridge: { ...exchangedBridge, scopes: ["browser_click"] },
+					}),
 			}),
 		).rejects.toThrow("toolbox_browser_bridge_exchange_unknown_scope");
 	});

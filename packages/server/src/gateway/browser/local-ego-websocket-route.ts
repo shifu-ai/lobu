@@ -1,7 +1,7 @@
-import { upgradeWebSocket as honoBunUpgradeWebSocket } from "hono/bun";
-import { Hono } from "hono";
-import type { Context } from "hono";
 import type { ReleaseCapabilityState } from "@lobu/core";
+import type { Context } from "hono";
+import { Hono } from "hono";
+import { upgradeWebSocket as honoBunUpgradeWebSocket } from "hono/bun";
 import { PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY } from "../../../../core/src/constants";
 import { verifyWorkerToken } from "../../../../core/src/worker/auth";
 import type {
@@ -79,7 +79,8 @@ export function createLocalEgoWebSocketRoute(
 ): Hono {
 	const app = new Hono();
 	const registry = options.registry ?? localEgoTunnelRegistry;
-	const exchangeToken = options.exchangeToken ?? exchangeToolboxBrowserBridgeToken;
+	const exchangeToken =
+		options.exchangeToken ?? exchangeToolboxBrowserBridgeToken;
 
 	const handler = async (c: Context) => {
 		if ((c.req.header("upgrade") ?? "").toLowerCase() !== "websocket") {
@@ -170,6 +171,13 @@ export function createLocalEgoWebSocketRoute(
 		if (!parsedBody.ok) {
 			return c.json({ error: parsedBody.error }, 400);
 		}
+		const validatedArgs = validateBrowserToolArguments(
+			toolName,
+			parsedBody.arguments,
+		);
+		if (!validatedArgs.ok) {
+			return c.json({ error: "invalid_browser_tool_arguments" }, 400);
+		}
 
 		let session:
 			| Awaited<ReturnType<typeof getToolboxBrowserCurrentSession>>
@@ -181,10 +189,7 @@ export function createLocalEgoWebSocketRoute(
 				runId,
 				capabilityIds,
 			});
-			if (
-				session.ownerUserId !== ownerUserId ||
-				session.agentId !== agentId
-			) {
+			if (session.ownerUserId !== ownerUserId || session.agentId !== agentId) {
 				await auditBrowserToolCallSafe({
 					ownerUserId,
 					agentId,
@@ -211,7 +216,7 @@ export function createLocalEgoWebSocketRoute(
 				agentId,
 				bridgeId: session.bridgeId,
 				toolName,
-				args: parsedBody.arguments,
+				args: validatedArgs.arguments,
 				lease: {
 					sessionId: lease.sessionId,
 					leaseToken: lease.leaseToken,
@@ -368,13 +373,87 @@ function createHonoBunUpgrade(c: {
 			onClose: (event) => adapter?.dispatch("close", event),
 			onError: (event) => adapter?.dispatch("close", event),
 		}));
-		return handler(c as never, async () => undefined) as Response | Promise<Response>;
+		return handler(c as never, async () => undefined) as
+			| Response
+			| Promise<Response>;
 	};
 }
 
-function parseBrowserToolName(value: string | undefined): BrowserToolName | null {
+function parseBrowserToolName(
+	value: string | undefined,
+): BrowserToolName | null {
 	if (!value || !BROWSER_TOOLS.has(value as BrowserToolName)) return null;
 	return value as BrowserToolName;
+}
+
+const MAX_BROWSER_DOM_TEXT_BYTES = 200_000;
+const MAX_BROWSER_SCREENSHOT_BASE64_BYTES = 2_000_000;
+
+function validateBrowserToolArguments(
+	toolName: BrowserToolName,
+	args: Record<string, unknown>,
+): { ok: true; arguments: Record<string, unknown> } | { ok: false } {
+	switch (toolName) {
+		case "browser_read_dom": {
+			if (!hasOnlyKeys(args, ["maxTextBytes"])) return { ok: false };
+			if (
+				args.maxTextBytes !== undefined &&
+				!isBoundedPositiveInteger(args.maxTextBytes, MAX_BROWSER_DOM_TEXT_BYTES)
+			) {
+				return { ok: false };
+			}
+			return { ok: true, arguments: args };
+		}
+		case "browser_screenshot": {
+			if (!hasOnlyKeys(args, ["maxImageBase64Bytes"])) return { ok: false };
+			if (
+				args.maxImageBase64Bytes !== undefined &&
+				!isBoundedPositiveInteger(
+					args.maxImageBase64Bytes,
+					MAX_BROWSER_SCREENSHOT_BASE64_BYTES,
+				)
+			) {
+				return { ok: false };
+			}
+			return { ok: true, arguments: args };
+		}
+		case "browser_navigate": {
+			if (!hasOnlyKeys(args, ["url"])) return { ok: false };
+			if (
+				typeof args.url !== "string" ||
+				!isAllowedBrowserNavigateUrl(args.url)
+			) {
+				return { ok: false };
+			}
+			return { ok: true, arguments: { url: args.url } };
+		}
+	}
+}
+
+function hasOnlyKeys(
+	args: Record<string, unknown>,
+	allowedKeys: readonly string[],
+): boolean {
+	const allowed = new Set(allowedKeys);
+	return Object.keys(args).every((key) => allowed.has(key));
+}
+
+function isBoundedPositiveInteger(value: unknown, max: number): boolean {
+	return (
+		typeof value === "number" &&
+		Number.isInteger(value) &&
+		value > 0 &&
+		value <= max
+	);
+}
+
+function isAllowedBrowserNavigateUrl(value: string): boolean {
+	try {
+		const parsed = new URL(value);
+		return parsed.protocol === "https:" || parsed.protocol === "http:";
+	} catch {
+		return false;
+	}
 }
 
 function activeBrowserCapabilityIds(input: {
@@ -437,7 +516,9 @@ function browserToolErrorCode(error: unknown): string {
 	return "browser_tool_failed";
 }
 
-function browserToolErrorStatus(code: string): 400 | 403 | 409 | 503 | 504 {
+function browserToolErrorStatus(
+	code: string,
+): 400 | 403 | 409 | 413 | 503 | 504 {
 	switch (code) {
 		case "tool_denied":
 		case "owner_mismatch":
@@ -445,18 +526,27 @@ function browserToolErrorStatus(code: string): 400 | 403 | 409 | 503 | 504 {
 			return 403;
 		case "lease_expired":
 			return 409;
+		case "payload_too_large":
+			return 413;
 		case "timeout":
 			return 504;
-		case "bridge_disconnected":
 		default:
 			return 503;
 	}
 }
 
 class HonoWebSocketAdapter implements LocalEgoBridgeWebSocket {
-	private readonly listeners = new Map<string, Array<(event: unknown) => void>>();
+	private readonly listeners = new Map<
+		string,
+		Array<(event: unknown) => void>
+	>();
 
-	constructor(private readonly ws: { send(data: string): void; close(code?: number, reason?: string): void }) {}
+	constructor(
+		private readonly ws: {
+			send(data: string): void;
+			close(code?: number, reason?: string): void;
+		},
+	) {}
 
 	send(message: string): void {
 		this.ws.send(message);
@@ -493,7 +583,8 @@ function parseBridgeResponse(value: unknown): LocalEgoBridgeResponse | null {
 	if (hasResult === hasError) return null;
 	if (hasError) {
 		const error = record.error;
-		if (!error || typeof error !== "object" || Array.isArray(error)) return null;
+		if (!error || typeof error !== "object" || Array.isArray(error))
+			return null;
 		const errorRecord = error as Record<string, unknown>;
 		if (
 			typeof errorRecord.code !== "string" ||
@@ -509,7 +600,8 @@ function parseBridgeResponse(value: unknown): LocalEgoBridgeResponse | null {
 	}
 
 	const result = record.result;
-	if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+	if (!result || typeof result !== "object" || Array.isArray(result))
+		return null;
 	const resultRecord = result as Record<string, unknown>;
 	if (
 		resultRecord.ok !== true ||
@@ -529,7 +621,8 @@ function parseBridgeResponse(value: unknown): LocalEgoBridgeResponse | null {
 			title:
 				typeof resultRecord.title === "string" ? resultRecord.title : undefined,
 			contentType: resultRecord.contentType,
-			text: typeof resultRecord.text === "string" ? resultRecord.text : undefined,
+			text:
+				typeof resultRecord.text === "string" ? resultRecord.text : undefined,
 			imageBase64:
 				typeof resultRecord.imageBase64 === "string"
 					? resultRecord.imageBase64
@@ -565,7 +658,9 @@ function exchangeFailureStatus(error: unknown): 401 | 502 | 503 {
 	return 502;
 }
 
-function timeoutResponse(id: LocalEgoBridgeRequest["id"]): LocalEgoBridgeResponse {
+function timeoutResponse(
+	id: LocalEgoBridgeRequest["id"],
+): LocalEgoBridgeResponse {
 	return {
 		jsonrpc: "2.0",
 		id,
@@ -573,10 +668,15 @@ function timeoutResponse(id: LocalEgoBridgeRequest["id"]): LocalEgoBridgeRespons
 	};
 }
 
-function disconnectedResponse(id: LocalEgoBridgeRequest["id"]): LocalEgoBridgeResponse {
+function disconnectedResponse(
+	id: LocalEgoBridgeRequest["id"],
+): LocalEgoBridgeResponse {
 	return {
 		jsonrpc: "2.0",
 		id,
-		error: { code: "bridge_disconnected", message: "Browser bridge disconnected." },
+		error: {
+			code: "bridge_disconnected",
+			message: "Browser bridge disconnected.",
+		},
 	};
 }
