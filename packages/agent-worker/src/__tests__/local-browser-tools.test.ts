@@ -45,7 +45,10 @@ describe("callLocalBrowserTool", () => {
     ) as unknown as typeof fetch;
 
     const result = await callLocalBrowserTool({
-      gatewayUrl: "https://lobu.test",
+      // Shaped like the real DISPATCHER_URL, which already carries the /lobu
+      // mount. The previous fixture dropped it and let the implementation
+      // double-prefix the path unnoticed; production answered a bare 404.
+      gatewayUrl: "https://lobu.test/lobu",
       workerToken: "worker-token",
       toolName: "browser_read_dom",
       args: {},
