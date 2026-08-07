@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { generateWorkerToken } from "@lobu/core";
+import { __resetEncryptionKeyCacheForTests } from "../../../../core/src/utils/encryption";
 import { Hono } from "hono";
 import { createLocalEgoTunnelRegistry } from "./local-ego-tunnel";
 import {
@@ -17,6 +19,34 @@ const singleProcessRuntimeEnv = {
 	LOCAL_EGO_BROWSER_TUNNEL_MODE: "single_process",
 	LOCAL_EGO_BROWSER_TUNNEL_INSTANCE_ID: "test-instance-1",
 };
+const TEST_ENCRYPTION_KEY =
+	"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const originalFetch = globalThis.fetch;
+const ENV_KEYS = [
+	"ENCRYPTION_KEY",
+	"TOOLBOX_INTERNAL_SECRET",
+	"TOOLBOX_BROWSER_SESSION_API_BASE_URL",
+] as const;
+let savedEnv: Record<(typeof ENV_KEYS)[number], string | undefined>;
+
+beforeEach(() => {
+	savedEnv = {} as Record<(typeof ENV_KEYS)[number], string | undefined>;
+	for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
+	process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
+	process.env.TOOLBOX_INTERNAL_SECRET = "internal-secret";
+	process.env.TOOLBOX_BROWSER_SESSION_API_BASE_URL = "https://toolbox.test";
+	__resetEncryptionKeyCacheForTests();
+});
+
+afterEach(() => {
+	globalThis.fetch = originalFetch;
+	mock.restore();
+	for (const key of ENV_KEYS) {
+		if (savedEnv[key] === undefined) delete process.env[key];
+		else process.env[key] = savedEnv[key];
+	}
+	__resetEncryptionKeyCacheForTests();
+});
 
 class FakeSocket implements LocalEgoBridgeWebSocket {
 	readonly sent: string[] = [];
@@ -65,6 +95,134 @@ function createEnabledRoute(
 	return createLocalEgoWebSocketRoute({
 		runtimeEnv: singleProcessRuntimeEnv,
 		...options,
+	});
+}
+
+function activeReleaseToken(
+	capabilityIds: string[] = ["personal_browser.local_ego.v1"],
+) {
+	return generateWorkerToken("user-1", "conv-1", "worker-a", {
+		channelId: "channel-1",
+		agentId: "shifu-u-user-1",
+		organizationId: "org-1",
+		tokenKind: "run",
+		runId: 101,
+		releaseState: {
+			status: "active",
+			claim: {
+				environment: "staging",
+				toolboxUserId: "user-1",
+				agentId: "shifu-u-user-1",
+				releaseId: "release-browser-1",
+				releaseSequence: 1,
+				snapshotDigest: `sha256:${"b".repeat(64)}`,
+				expiresAt: new Date(Date.now() + 60_000).toISOString(),
+				capabilityIds,
+			},
+		},
+	});
+}
+
+function registerReadDomBridge(input: {
+	registry: ReturnType<typeof createLocalEgoTunnelRegistry>;
+	events: string[];
+	text?: string;
+}) {
+	input.registry.register({
+		environment: exchangedBridge.environment,
+		ownerUserId: exchangedBridge.ownerUserId,
+		agentId: exchangedBridge.agentId,
+		bridgeId: exchangedBridge.bridgeId,
+		send: async (request) => {
+			input.events.push("bridge");
+			return {
+				jsonrpc: "2.0",
+				id: request.id,
+				result: {
+					ok: true,
+					url: "https://course.example/dashboard",
+					title: "Course dashboard",
+					contentType: "dom",
+					text: input.text ?? "Course dashboard",
+				},
+			};
+		},
+	});
+}
+
+function mockToolboxBrowserSessionFetch(input: {
+	events: string[];
+	auditStatus?: number;
+}) {
+	globalThis.fetch = mock(async (url, init) => {
+		const parsed = new URL(String(url));
+		const body = JSON.parse(String(init?.body ?? "{}"));
+		expect(new Headers(init?.headers).get("x-internal-secret")).toBe(
+			"internal-secret",
+		);
+		if (parsed.pathname.endsWith("/internal/current")) {
+			input.events.push("current-session");
+			expect(body).toMatchObject({
+				ownerUserId: "user-1",
+				agentId: "shifu-u-user-1",
+				runId: 101,
+			});
+			return Response.json({
+				ok: true,
+				session: {
+					environment: exchangedBridge.environment,
+					ownerUserId: exchangedBridge.ownerUserId,
+					agentId: exchangedBridge.agentId,
+					sessionId: "browser_session_1",
+					bridgeId: exchangedBridge.bridgeId,
+				},
+			});
+		}
+		if (parsed.pathname.endsWith("/internal/leases")) {
+			input.events.push("lease");
+			expect(body).toMatchObject({
+				ownerUserId: "user-1",
+				agentId: "shifu-u-user-1",
+				runId: 101,
+				toolName: "browser_read_dom",
+				sessionId: "browser_session_1",
+				bridgeId: exchangedBridge.bridgeId,
+			});
+			return Response.json({
+				ok: true,
+				lease: {
+					sessionId: "browser_session_1",
+					leaseToken: "lease-token",
+					runId: "101",
+					expiresAt: "2026-08-07T08:05:00.000Z",
+				},
+			});
+		}
+		if (parsed.pathname.endsWith("/internal/tool-calls")) {
+			input.events.push("audit");
+			return Response.json(
+				input.auditStatus && input.auditStatus >= 400
+					? { error: "audit down" }
+					: { ok: true },
+				{ status: input.auditStatus ?? 200 },
+			);
+		}
+		throw new Error(`unexpected toolbox URL: ${parsed.pathname}`);
+	}) as unknown as typeof fetch;
+}
+
+async function postReadDomTool(input: {
+	app: Hono;
+	token?: string;
+	body?: unknown;
+}) {
+	return input.app.request("/lobu/api/browser/local-ego/tools/browser_read_dom", {
+		method: "POST",
+		headers: {
+			...(input.token ? { authorization: `Bearer ${input.token}` } : {}),
+			"content-type": "application/json",
+		},
+		body: JSON.stringify(input.body ?? { arguments: {} }),
 	});
 }
 
@@ -454,6 +612,101 @@ describe("local ego browser WebSocket route", () => {
 				timeoutMs: 1,
 			}),
 		).rejects.toThrow("bridge_disconnected");
+	});
+});
+
+describe("local ego browser tool route", () => {
+	test("rejects missing or invalid worker token before Toolbox or bridge calls", async () => {
+		const events: string[] = [];
+		const registry = createLocalEgoTunnelRegistry({ now });
+		registerReadDomBridge({ registry, events });
+		const app = mountAsLobuApi(createEnabledRoute({ registry }));
+		globalThis.fetch = mock(async () => {
+			throw new Error("fetch should not be called");
+		}) as unknown as typeof fetch;
+
+		const missing = await postReadDomTool({ app });
+		expect(missing.status).toBe(401);
+		await expect(missing.json()).resolves.toEqual({
+			error: "invalid_worker_token",
+		});
+
+		const invalid = await postReadDomTool({ app, token: "not-a-token" });
+		expect(invalid.status).toBe(401);
+		await expect(invalid.json()).resolves.toEqual({
+			error: "invalid_worker_token",
+		});
+		expect(events).toEqual([]);
+	});
+
+	test("denies missing release capability before current session, lease, or bridge", async () => {
+		const events: string[] = [];
+		const registry = createLocalEgoTunnelRegistry({ now });
+		registerReadDomBridge({ registry, events });
+		const app = mountAsLobuApi(createEnabledRoute({ registry }));
+		globalThis.fetch = mock(async (url) => {
+			events.push(`audit:${new URL(String(url)).pathname}`);
+			return Response.json({ ok: true });
+		}) as unknown as typeof fetch;
+
+		const response = await postReadDomTool({
+			app,
+			token: activeReleaseToken(["other.capability.v1"]),
+		});
+
+		expect(response.status).toBe(403);
+		await expect(response.json()).resolves.toEqual({
+			error: "missing_release_capability",
+		});
+		expect(events).toEqual([
+			"audit:/agent-workbench/browser-sessions/internal/tool-calls",
+		]);
+	});
+
+	test("calls current session, lease, bridge, and audit before returning success", async () => {
+		const events: string[] = [];
+		const registry = createLocalEgoTunnelRegistry({ now });
+		registerReadDomBridge({ registry, events });
+		mockToolboxBrowserSessionFetch({ events });
+		const app = mountAsLobuApi(createEnabledRoute({ registry }));
+
+		const response = await postReadDomTool({
+			app,
+			token: activeReleaseToken(),
+		});
+
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toMatchObject({
+			ok: true,
+			result: {
+				ok: true,
+				text: "Course dashboard",
+			},
+		});
+		expect(events).toEqual(["current-session", "lease", "bridge", "audit"]);
+	});
+
+	test("fails closed when audit write fails after bridge success", async () => {
+		const events: string[] = [];
+		const registry = createLocalEgoTunnelRegistry({ now });
+		registerReadDomBridge({
+			registry,
+			events,
+			text: "Course dashboard secret page content",
+		});
+		mockToolboxBrowserSessionFetch({ events, auditStatus: 503 });
+		const app = mountAsLobuApi(createEnabledRoute({ registry }));
+
+		const response = await postReadDomTool({
+			app,
+			token: activeReleaseToken(),
+		});
+		const body = await response.json();
+
+		expect(response.status).toBe(502);
+		expect(body).toEqual({ error: "browser_audit_failed" });
+		expect(JSON.stringify(body)).not.toContain("Course dashboard secret");
+		expect(events).toEqual(["current-session", "lease", "bridge", "audit"]);
 	});
 });
 

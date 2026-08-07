@@ -220,21 +220,25 @@ export function createLocalEgoWebSocketRoute(
 				},
 				timeoutMs: TOOL_CALL_TIMEOUT_MS,
 			});
-			await auditBrowserToolCallSafe({
-				ownerUserId,
-				agentId,
-				runId,
-				toolName,
-				sessionId: session.sessionId,
-				bridgeId: session.bridgeId,
-				result: "success",
-				metadata: {
-					contentType: result.contentType,
-					url: result.url,
-					title: result.title,
-					...(result.metadata ?? {}),
-				},
-			});
+			try {
+				await recordToolboxBrowserToolCall({
+					ownerUserId,
+					agentId,
+					runId,
+					toolName,
+					sessionId: session.sessionId,
+					bridgeId: session.bridgeId,
+					result: "success",
+					metadata: {
+						contentType: result.contentType,
+						url: result.url,
+						title: result.title,
+						...(result.metadata ?? {}),
+					},
+				});
+			} catch {
+				return c.json({ error: "browser_audit_failed" }, 502);
+			}
 			return c.json({ ok: true, result });
 		} catch (error) {
 			const code = browserToolErrorCode(error);
