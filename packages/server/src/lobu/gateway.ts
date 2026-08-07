@@ -33,6 +33,7 @@ import {
 import { orgContext } from './stores/org-context';
 import { toolboxMcpRoutes } from './agent-routes';
 import { createProvisioningRoutes } from '../gateway/routes/provisioning';
+import { createLocalEgoWebSocketRoute } from '../gateway/browser/local-ego-websocket-route';
 import { createCourseAwareWakeRoutes } from './course-aware-wake-routes';
 import { resolveWakeThreadId } from '../scheduled/wake-target';
 import { PostgresSecretStore } from './stores/postgres-secret-store';
@@ -471,6 +472,7 @@ export async function initLobuGateway(): Promise<Hono | null> {
         publicGatewayUrl: coreServices.getPublicGatewayUrl(),
       })
     );
+    lobuApp.route('/api/browser/local-ego', createLocalEgoWebSocketRoute());
     lobuApp.route('/api/internal/course-aware-wakes', createCourseAwareWakeRoutes({
       inspectConversationBinding: async ({ organizationId, ownerUserId, agentId }) => {
         const sessionManager = coreServices.getSessionManager();

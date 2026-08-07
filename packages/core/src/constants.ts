@@ -47,6 +47,14 @@ export function isReservedAutomationToolName(name: string): boolean {
   return RESERVED_AUTOMATION_TOOL_NAME_SET.has(name);
 }
 
+export const PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY =
+  "personal_browser.local_ego.v1";
+
+export const SHIFU_TOOLBOX_MCP_ID = "shifu-toolbox";
+
+export const PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME =
+  "personal_browser_local_ego";
+
 // Default configuration values
 export const DEFAULTS = {
   /** Default session TTL in milliseconds */

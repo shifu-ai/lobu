@@ -4,10 +4,19 @@ import type {
 	AgentConnectionStore,
 	ConfigProviderMeta,
 	InstructionContext,
+	ReleaseCapabilityState,
 	StoredConnection,
 	WorkerTokenData,
 } from "@lobu/core";
-import { createLogger, encrypt, verifyWorkerToken } from "@lobu/core";
+import {
+	createLogger,
+	encrypt,
+} from "@lobu/core";
+import { verifyWorkerToken } from "../../../../core/src/worker/auth";
+import {
+	PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY,
+	PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
+} from "../../../../core/src/constants";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { stream } from "hono/streaming";
@@ -434,6 +443,21 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			},
 		},
 		{
+			name: PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
+			connectorToolName: PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
+			description:
+				"Use the ShiFu-owned local browser bridge facade for explicitly approved personal browser actions.",
+			approvalRequired: true,
+			inputSchema: {
+				type: "object",
+				properties: {
+					action: { type: "string" },
+					params: { type: "object" },
+				},
+				required: ["action"],
+			},
+		},
+		{
 			name: "submit_course_pm_profile",
 			connectorToolName: "submit_course_pm_profile",
 			description:
@@ -544,6 +568,24 @@ function isToolboxPersonalAgentConnectorToolAllowed(
 	return TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG[connectorKey].some(
 		(tool) => tool.connectorToolName === connectorToolName,
 	);
+}
+
+function hasActiveReleaseCapability(
+	releaseState: ReleaseCapabilityState | undefined,
+	capabilityId: string,
+	now = Date.now(),
+): boolean {
+	if (releaseState?.status !== "active") return false;
+	const expiresAt = Date.parse(releaseState.claim.expiresAt);
+	return (
+		Number.isFinite(expiresAt) &&
+		expiresAt > now &&
+		releaseState.claim.capabilityIds.includes(capabilityId)
+	);
+}
+
+function isPersonalBrowserLocalEgoTool(connectorToolName: string): boolean {
+	return connectorToolName === PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME;
 }
 
 function mcpIdForToolboxPersonalAgentConnection(
@@ -729,10 +771,15 @@ export class WorkerGateway {
 		organizationId?: string;
 		agentId?: string;
 		ownerUserId?: string;
+		releaseState?: ReleaseCapabilityState;
 	}): Promise<ToolboxPersonalAgentToolGroup[]> {
 		if (!params.organizationId || !params.agentId || !params.ownerUserId) {
 			return [];
 		}
+		const personalBrowserAllowed = hasActiveReleaseCapability(
+			params.releaseState,
+			PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY,
+		);
 
 		let connections: StoredConnection[];
 		try {
@@ -770,7 +817,13 @@ export class WorkerGateway {
 						connectionRef: connection.id,
 						tools: TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG[
 							metadata.connectorKey
-						].map((tool) => ({ ...tool })),
+						]
+							.filter(
+								(tool) =>
+									!isPersonalBrowserLocalEgoTool(tool.connectorToolName) ||
+									personalBrowserAllowed,
+							)
+							.map((tool) => ({ ...tool })),
 					},
 				];
 			})
@@ -879,6 +932,21 @@ export class WorkerGateway {
 					safeToolboxPersonalAgentToolError(
 						"lobu_mcp_tool_not_allowed",
 						"MCP tool is not allowed for personal-agent execution",
+					),
+					200,
+				);
+			}
+			if (
+				isPersonalBrowserLocalEgoTool(connectorToolName) &&
+				!hasActiveReleaseCapability(
+					auth.tokenData.releaseState,
+					PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY,
+				)
+			) {
+				return c.json(
+					safeToolboxPersonalAgentToolError(
+						"lobu_mcp_tool_not_allowed",
+						"MCP tool requires an active personal browser release capability",
 					),
 					200,
 				);
@@ -1411,6 +1479,7 @@ export class WorkerGateway {
 						organizationId: auth.tokenData.organizationId,
 						agentId,
 						ownerUserId: userId,
+						releaseState: auth.tokenData.releaseState,
 					});
 
 				// Fetch tool lists and instructions for ALL MCPs (unauthenticated ones

@@ -21,6 +21,11 @@ import {
   type ToolsConfig,
   type TrustedExecutionScope,
 } from "@lobu/core";
+import {
+  PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY,
+  PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
+  SHIFU_TOOLBOX_MCP_ID,
+} from "../../../core/src/constants";
 import { getModel, type ImageContent } from "@mariozechner/pi-ai";
 import {
   AuthStorage,
@@ -86,6 +91,10 @@ import {
   buildEffectiveToolInventory,
   buildPersonalReminderDeliveryInstructions,
 } from "./effective-tool-inventory";
+import {
+  createLocalBrowserAgentTools,
+  releaseCapabilityIdsForBrowserTools,
+} from "./local-browser-tools";
 import {
   applyCapabilityLimitNotes,
   buildMcpAuthToolNames,
@@ -1835,18 +1844,27 @@ export async function runAISession(
     }
     return { names, keys };
   };
-  const connectedMcpIds = new Set(
-    Object.keys(context.mcpTools).filter((mcpId) => {
-      const status = context.mcpStatus.find(
-        (candidate) => candidate.id === mcpId
-      );
-      return (
-        !status ||
-        ((!status.requiresAuth || status.authenticated) &&
-          (!status.requiresInput || status.configured))
-      );
-    })
-  );
+  const releaseGatedMcpToolCapabilities = {
+    [`${SHIFU_TOOLBOX_MCP_ID}/${PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME}`]:
+      PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY,
+  } as const;
+  const collectConnectedMcpIds = (snapshot: {
+    mcpTools: Record<string, McpToolDef[]>;
+    mcpStatus: typeof context.mcpStatus;
+  }): Set<string> =>
+    new Set(
+      Object.keys(snapshot.mcpTools).filter((mcpId) => {
+        const status = snapshot.mcpStatus.find(
+          (candidate) => candidate.id === mcpId
+        );
+        return (
+          !status ||
+          ((!status.requiresAuth || status.authenticated) &&
+            (!status.requiresInput || status.configured))
+        );
+      })
+    );
+  const connectedMcpIds = collectConnectedMcpIds(context);
   const mcpProvenanceById = provenanceFromStatuses(context.mcpStatus);
   const untrustedProvenanceToolKeys: string[] = [];
   for (const [mcpId, tools] of Object.entries(context.mcpTools)) {
@@ -1868,6 +1886,7 @@ export async function runAISession(
     releaseState: context.releaseState ?? { status: "legacy_unenrolled" },
     connectedMcpIds,
     untrustedProvenanceToolKeys,
+    releaseCapabilityByToolKey: releaseGatedMcpToolCapabilities,
     isPolicyAllowed: (_toolKey, toolName) =>
       isToolAllowedByPolicy(toolName, toolsPolicy),
   });
@@ -2043,12 +2062,22 @@ export async function runAISession(
               ? verifiedRunTokenClaims
               : undefined,
           });
+          const freshEffectiveTools = buildEffectiveToolInventory({
+            scopedTools: fresh.mcpTools,
+            releaseState: fresh.releaseState ?? {
+              status: "legacy_unenrolled",
+            },
+            connectedMcpIds: collectConnectedMcpIds(fresh),
+            releaseCapabilityByToolKey: releaseGatedMcpToolCapabilities,
+            isPolicyAllowed: (_toolKey, toolName) =>
+              isToolAllowedByPolicy(toolName, toolsPolicy),
+          });
           const refreshedAllowedMcpTools = collectAllowedMcpTools(
-            fresh.mcpTools
+            freshEffectiveTools.toolsByMcp
           );
           return {
             ...buildCliRuntimeState({
-              mcpTools: fresh.mcpTools,
+              mcpTools: freshEffectiveTools.toolsByMcp,
               mcpStatus: fresh.mcpStatus,
               mcpContext: fresh.mcpContext,
             }),
@@ -2137,8 +2166,17 @@ export async function runAISession(
       gw: gwParams,
       mcpExposure,
     });
+  const localBrowserTools = createLocalBrowserAgentTools({
+    gatewayUrl: gwParams.gatewayUrl,
+    workerToken: gwParams.workerToken,
+    capabilityIds: releaseCapabilityIdsForBrowserTools({
+      releaseState: context.releaseState,
+      agentId: agentId || "",
+    }),
+  });
   let tools = createOpenClawTools(workspaceDir, {
     bashOperations: embeddedBashOps,
+    localBrowserTools,
   }).filter((tool) => isToolAllowedByPolicy(tool.name, toolsPolicy));
 
   if (

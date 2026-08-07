@@ -2,6 +2,10 @@ import {
   buildMcpAuthToolNames,
   requiresProviderSafeToolNames,
 } from "./mcp-tool-projection";
+import {
+  projectBrowserTools,
+  releaseCapabilityIdsForBrowserTools,
+} from "./local-browser-tools";
 
 import {
   type ConfigProviderMeta,
@@ -397,6 +401,24 @@ function buildMcpServerInstructions(
   return lines.join("\n");
 }
 
+function buildLocalBrowserToolInstructions(
+  releaseState: ReleaseCapabilityState,
+  agentId: string
+): string {
+  const tools = projectBrowserTools({
+    capabilityIds: releaseCapabilityIdsForBrowserTools({
+      releaseState,
+      agentId,
+    }),
+  });
+  if (tools.length === 0) return "";
+  return [
+    "## Available Personal Browser Tools",
+    "These local browser tools are registered as first-class tools for this released run. Use only these exact tool names.",
+    `- ${tools.map((tool) => `\`${tool.name}\``).join(", ")}`,
+  ].join("\n");
+}
+
 /**
  * Model-facing notes about MCP tool capability gaps that are easy to
  * misdiagnose from tool names/descriptions alone (e.g. an "update" tool
@@ -575,6 +597,10 @@ export async function getOpenClawSessionContext(
     const toolboxPersonalAgentTools = data.toolboxPersonalAgentTools || [];
     const mcpCliInstructions =
       mcpExposure === "cli" ? buildMcpCliInstructions(data.mcpStatus) : "";
+    const localBrowserToolInstructions = buildLocalBrowserToolInstructions(
+      releaseState,
+      data.agentId || verifiedToken?.agentId || ""
+    );
 
     // Identity/soul/user instructions are returned separately so the worker
     // can prepend them BEFORE the pi-coding-agent base prompt.
@@ -587,6 +613,7 @@ export async function getOpenClawSessionContext(
       mcpCliInstructions,
       mcpSetupInstructions,
       mcpServerInstructions,
+      localBrowserToolInstructions,
     ]
       .filter(Boolean)
       .join("\n\n");

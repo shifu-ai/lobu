@@ -36,6 +36,12 @@ export * from "./capabilities";
 export type { CommandContext, CommandDefinition } from "./command-registry";
 // Command registry
 export { CommandRegistry } from "./command-registry";
+export {
+  isReservedAutomationToolName,
+  PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY,
+  PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
+  SHIFU_TOOLBOX_MCP_ID,
+} from "./constants";
 export * from "./constants";
 // Errors & logging
 export * from "./errors";
