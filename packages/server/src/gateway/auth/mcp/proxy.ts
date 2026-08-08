@@ -885,10 +885,16 @@ export class McpProxy {
   private readonly SESSION_TTL_SECONDS = 30 * 60; // 30 minutes
   // Tool-approval cards may sit in-thread for a long time before the user
   // actually clicks (Slack notifications, async review, etc.). The pending
-  // invocation key holds the args needed to execute the tool after approval;
-  // 24h gives users a realistic window to respond. Anything shorter silently
-  // drops late clicks (the take-on-claim returns null and the click no-ops).
-  private readonly PENDING_TOOL_TTL = 24 * 60 * 60; // 24 hours
+  // invocation key holds the args needed to execute the tool after approval.
+  // This TTL is now the *only* bound on how long a user may deliberate: the
+  // release-binding revalidation deliberately stopped gating on the card-time
+  // 60s snapshot expiry (see isPendingReleaseBindingCurrent). 15 minutes is
+  // long enough to read a LINE card and decide, and short enough that
+  // yesterday's card cannot still trigger a write today.
+  // A late click is not silent: the take-on-claim returns null and the service
+  // reports "expired", which the LINE Gateway renders as
+  // 「這個同意請求已失效，請重新送出剛剛的要求。」
+  private readonly PENDING_TOOL_TTL = 15 * 60; // 15 minutes
   /**
    * Per-process MCP upstream session-id cache. The session id is opaque to
    * the gateway and only valid for the upstream MCP server, so on a gateway

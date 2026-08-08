@@ -112,8 +112,14 @@ export function isPendingReleaseBindingCurrent(
 ): boolean {
   const binding = pending.releaseBinding;
   if (!binding || current.status !== "active") return false;
-  return Date.parse(binding.authorizationExpiresAt) > now.getTime() &&
-    Date.parse(current.claim.expiresAt) > now.getTime() &&
+  // 刻意不看 binding.authorizationExpiresAt：它等於發卡當時那份 snapshot 的
+  // expiresAt，最多是發卡時間 +60 秒（Toolbox SNAPSHOT_TTL_MS）。拿它當閘門等於
+  // 要求使用者在 60 秒內讀完卡片並點按，而卡片本身送達就常吃掉 40 秒。
+  // 人類的思考時限改由 pending 紀錄自己的 TTL 決定（oauth_states.expires_at，
+  // 見 proxy.ts 的 PENDING_TOOL_TTL）；過期會走 "expired" 而不是 "stale"。
+  //
+  // 活性由「重新簽發的授權現在是否有效」把關，也就是下面這行。
+  return Date.parse(current.claim.expiresAt) > now.getTime() &&
     current.claim.agentId === pending.agentId &&
     current.claim.toolboxUserId === pending.userId &&
     current.claim.releaseId === binding.releaseId &&
@@ -135,9 +141,11 @@ async function revalidateReleaseBinding(
   if (!binding) return true;
   if (state?.status !== "active") return false;
   const claim = state.claim;
+  // 下面這串是對「存下來的 pending 紀錄」做完整性比對（欄位彼此自洽、沒被動過），
+  // 不含到期判斷：`binding.authorizationExpiresAt` 與 `claim.expiresAt` 都是發卡當時
+  // 那份 60 秒 snapshot 的到期時間，拿它們擋等於把人類的思考時間限成 60 秒。
+  // 真正的活性由稍後 isPendingReleaseBindingCurrent 對「重新簽發的 claim」把關。
   if (
-    Date.parse(binding.authorizationExpiresAt) <= Date.now() ||
-    Date.parse(claim.expiresAt) <= Date.now() ||
     claim.agentId !== pending.agentId ||
     claim.toolboxUserId !== pending.userId ||
     claim.releaseId !== binding.releaseId ||

@@ -73,6 +73,25 @@ export function stableToolEligibilityDigest(input: {
 		.digest("hex");
 }
 
+/**
+ * Identity of a release authorization — deliberately excludes anything that
+ * changes when the same authorization is re-minted.
+ *
+ * `expiresAt` and `snapshotDigest` are NOT hashed. Toolbox derives
+ * `expiresAt = min(now + 60s, earliestCarrierExpiry)` and then computes
+ * `snapshotDigest` over the whole snapshot *including* that expiry, so both
+ * fields move on every mint. Hashing either of them made this digest a moving
+ * target: a pending approval stored digest D(T1), and revalidation — which
+ * re-mints with `bypassCache: true` — computed D(T2) ≠ D(T1). Every
+ * release-bound tool approval therefore failed as `approval_inventory_stale`,
+ * 100% of the time, until 2026-08-07.
+ *
+ * Liveness is a separate concern and is checked directly against the freshly
+ * minted claim (`isPendingReleaseBindingCurrent`), not smuggled into an
+ * identity hash. Nothing is lost by dropping `snapshotDigest`: Toolbox derives
+ * it from the same release identity and capability set that are hashed here,
+ * plus the expiry we intentionally ignore.
+ */
 export function stableReleaseAuthorizationDigest(
 	claim: import("@lobu/core").ReleaseCapabilityClaim,
 ): string {
@@ -84,8 +103,6 @@ export function stableReleaseAuthorizationDigest(
 			releaseId: claim.releaseId,
 			releaseSequence: claim.releaseSequence,
 			capabilityIds: [...claim.capabilityIds].sort(),
-			snapshotDigest: claim.snapshotDigest,
-			expiresAt: claim.expiresAt,
 		}))
 		.digest("hex");
 }

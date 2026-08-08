@@ -361,7 +361,16 @@ describe("createToolApprovalService", () => {
     }, new Date("2026-07-15T00:00:00.000Z"))).toBe(true);
   });
 
-  test("expired original carrier cannot be blessed by a fresh same-release renewal", () => {
+  // 2026-08-07 政策變更：card-time 授權過期本身不再是拒絕理由。
+  //
+  // 原本這條測試斷言「原始 carrier 過期後，同一顆 release 的重新簽發不得祝福它」，
+  // 但 card-time 授權最多只活 60 秒（Toolbox SNAPSHOT_TTL_MS），所以那個條件對任何
+  // 真人都必然成立 —— 它讓 release-bound 的核准在生產上 100% 失敗。
+  //
+  // 新政策：判準是「現在是否存在有效且同一身分的授權」。carrier 真的過期又沒被續期
+  // 時，Toolbox 根本不會回 active claim（或 capability 會消失），下面那條測試就是
+  // 檢查這個情形。
+  test("card-time 授權過期後，同一顆 release 的有效續期可以放行", () => {
     const pending: PendingToolInvocation = {
       ...LINE_PENDING,
       releaseBinding: {
@@ -379,10 +388,32 @@ describe("createToolApprovalService", () => {
       status: "active",
       claim: {
         ...SEMANTIC_CLAIM,
+        // 重新簽發必然同時換掉 snapshotDigest 與 expiresAt
         snapshotDigest: `sha256:${"f".repeat(64)}`,
         expiresAt: "2099-01-01T00:01:00.000Z",
       },
-    }, new Date("2026-07-15T00:00:00.000Z"))).toBe(false);
+    }, new Date("2026-07-15T00:00:00.000Z"))).toBe(true);
+  });
+
+  test("carrier 沒有被續期（授權已不 active）⇒ 仍然 stale", () => {
+    const pending: PendingToolInvocation = {
+      ...LINE_PENDING,
+      releaseBinding: {
+        routerMode: "semantic",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: "release-1",
+        releaseSequence: 1,
+        snapshotDigest: `sha256:${"a".repeat(64)}`,
+        authorizationExpiresAt: "2026-07-14T23:59:00.000Z",
+        stableAuthorizationDigest: STABLE_SEMANTIC_DIGEST,
+        eligibilityBindingDigest: STABLE_ELIGIBILITY_DIGEST,
+      },
+    };
+    expect(isPendingReleaseBindingCurrent(
+      pending,
+      { status: "legacy_unenrolled" } as never,
+      new Date("2026-07-15T00:00:00.000Z"),
+    )).toBe(false);
   });
 
   test("rejects a stale semantic release before approve_all can grant or execute", async () => {
@@ -647,7 +678,14 @@ describe("createToolApprovalService", () => {
     }
   });
 
-  test("rejects semantic approve_all after an expired original carrier is freshly renewed", async () => {
+  // 2026-08-07 政策變更後，這條測的是「carrier 過期且沒有被續期」。
+  // 忠實模型：Toolbox 在 required carrier 不 ready 時回傳的 capabilities 是空陣列
+  // （runtime-capabilities.ts 的 `allRequiredCarriersReady ? capabilities : []`），
+  // 於是授權身分不符 ⇒ stale、不寫 grant、不執行。
+  //
+  // 舊版這條斷言「同一顆 release 的有效續期也要拒絕」，那個判準對任何真人都必然
+  // 成立（card-time 授權只活 60 秒），是核准在生產上 100% 失敗的直接原因。
+  test("rejects semantic approve_all when the carrier was never renewed", async () => {
     const releaseState = {
       status: "active" as const,
       claim: {
@@ -698,12 +736,13 @@ describe("createToolApprovalService", () => {
       mcpProxy,
       userAgentsStore: { ownsAgent: mock(async () => true) },
       organizationId: "org-1",
+      // required carrier 不 ready ⇒ Toolbox 回傳空的 capabilities
       resolveReleaseSnapshot: mock(async () => ({
         schemaVersion: 1 as const,
         environment: "production" as const,
         toolboxUserId: "toolbox-user-1",
         agentId: "shifu-u-1",
-        capabilities: [...releaseState.claim.capabilityIds],
+        capabilities: [] as string[],
         appliedReleaseId: "release-1",
         appliedReleaseSequence: 1,
         snapshotDigest: `sha256:${"c".repeat(64)}`,
@@ -713,6 +752,7 @@ describe("createToolApprovalService", () => {
         status: "active" as const,
         claim: {
           ...releaseState.claim,
+          capabilityIds: [] as string[],
           snapshotDigest: `sha256:${"d".repeat(64)}`,
           expiresAt: "2099-01-01T00:00:30.000Z",
         },
