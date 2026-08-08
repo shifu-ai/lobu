@@ -73,6 +73,62 @@ export function resolveLocalEgoTunnelRuntimeConfig(
 	};
 }
 
+export type LocalEgoTunnelAuthorization =
+	| { ok: true; bridge: ToolboxLocalEgoBridgeExchange }
+	| {
+			ok: false;
+			status: 400 | 401 | 502 | 503;
+			error:
+				| "local_ego_tunnel_registry_unavailable"
+				| "browser_bridge_token_required"
+				| "browser_bridge_token_exchange_failed";
+	  };
+
+/**
+ * Shared tunnel admission for both upgrade paths (Bun in-handler upgrade and
+ * the Node `'upgrade'`-event handler in local-ego-node-upgrade.ts). Ordering
+ * is load-bearing: runtime-mode gate → token presence → Toolbox exchange, so
+ * a disabled registry never leaks whether a token would have exchanged.
+ */
+export async function authorizeLocalEgoTunnelConnection(input: {
+	token: string | undefined;
+	runtimeEnv?: Record<string, string | undefined>;
+	exchangeToken?: LocalEgoBridgeExchangeToken;
+}): Promise<LocalEgoTunnelAuthorization> {
+	const runtimeConfig = resolveLocalEgoTunnelRuntimeConfig(
+		input.runtimeEnv ?? process.env,
+	);
+	/*
+	 * This MVP registry is an in-process Map. It is valid only when Lobu is
+	 * intentionally running a single app instance or an equivalent sticky-routing
+	 * carrier where browser registration and tool calls hit the same process.
+	 * Keep failing closed here until a shared registry/fan-out exists.
+	 */
+	if (!runtimeConfig.available) {
+		return {
+			ok: false,
+			status: 503,
+			error: "local_ego_tunnel_registry_unavailable",
+		};
+	}
+
+	const token = input.token?.trim();
+	if (!token) {
+		return { ok: false, status: 400, error: "browser_bridge_token_required" };
+	}
+
+	const exchange = input.exchangeToken ?? exchangeToolboxBrowserBridgeToken;
+	try {
+		return { ok: true, bridge: await exchange(token) };
+	} catch (error) {
+		return {
+			ok: false,
+			status: exchangeFailureStatus(error),
+			error: "browser_bridge_token_exchange_failed",
+		};
+	}
+}
+
 export function createLocalEgoWebSocketRoute(
 	options: LocalEgoWebSocketRouteOptions = {},
 ): Hono {
@@ -88,33 +144,17 @@ export function createLocalEgoWebSocketRoute(
 			});
 		}
 
-		const runtimeConfig = resolveLocalEgoTunnelRuntimeConfig(
-			options.runtimeEnv ?? process.env,
-		);
-		/*
-		 * This MVP registry is an in-process Map. It is valid only when Lobu is
-		 * intentionally running a single app instance or an equivalent sticky-routing
-		 * carrier where browser registration and tool calls hit the same process.
-		 * Keep failing closed here until a shared registry/fan-out exists.
-		 */
-		if (!runtimeConfig.available) {
-			return c.json({ error: "local_ego_tunnel_registry_unavailable" }, 503);
+		const authorization = await authorizeLocalEgoTunnelConnection({
+			token: c.req.query("token"),
+			runtimeEnv: options.runtimeEnv,
+			exchangeToken,
+		});
+		if (!authorization.ok) {
+			return c.json({ error: authorization.error }, authorization.status);
 		}
+		const { bridge } = authorization;
 
-		const token = c.req.query("token")?.trim();
-		if (!token) return c.json({ error: "browser_bridge_token_required" }, 400);
-
-		let bridge: ToolboxLocalEgoBridgeExchange;
-		try {
-			bridge = await exchangeToken(token);
-		} catch (error) {
-			return c.json(
-				{ error: "browser_bridge_token_exchange_failed" },
-				exchangeFailureStatus(error),
-			);
-		}
-
-			const upgrade = options.upgradeWebSocket ?? (await createHonoBunUpgrade(c));
+		const upgrade = options.upgradeWebSocket ?? (await createHonoBunUpgrade(c));
 		return upgrade({
 			request: c.req.raw,
 			bridge,
@@ -362,13 +402,26 @@ async function createHonoBunUpgrade(c: {
 	req: { raw: Request };
 }): Promise<LocalEgoRouteUpgrade> {
 	if (typeof process.versions.bun !== "string") {
+		/*
+		 * On Node a genuine WebSocket upgrade never reaches this request-listener
+		 * path — it arrives on the http server's 'upgrade' event, handled by
+		 * createLocalEgoNodeUpgradeHandler (wired in server-lifecycle.ts). A
+		 * request landing here with an Upgrade header was normalized to plain
+		 * HTTP somewhere upstream (e.g. an edge proxy that dropped the
+		 * Connection header), so no socket-level upgrade can be negotiated.
+		 */
 		return () =>
-			new Response(JSON.stringify({ error: "bun_websocket_adapter_unavailable" }), {
-				status: 501,
-				headers: { "content-type": "application/json" },
-			});
+			new Response(
+				JSON.stringify({ error: "websocket_upgrade_not_negotiated" }),
+				{
+					status: 426,
+					headers: { "content-type": "application/json" },
+				},
+			);
 	}
-	const { upgradeWebSocket: honoBunUpgradeWebSocket } = await import("hono/bun");
+	const { upgradeWebSocket: honoBunUpgradeWebSocket } = await import(
+		"hono/bun"
+	);
 	return ({ onOpen }) => {
 		let adapter: HonoWebSocketAdapter | undefined;
 		const handler = honoBunUpgradeWebSocket(() => ({

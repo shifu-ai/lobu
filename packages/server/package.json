@@ -61,11 +61,13 @@
     "postgres": "^3.4.7",
     "react": "^19.2.5",
     "resend": "^6.6.0",
+    "ws": "^8.20.0",
     "zod": "^4.4.0"
   },
   "devDependencies": {
     "@lobu/pgvector-embedded": "workspace:*",
     "@types/react": "^19.2.14",
+    "@types/ws": "^8.5.10",
     "embedded-postgres": "18.3.0-beta.17",
     "@vitest/coverage-v8": "^2.1.8",
     "dotenv": "^16.4.5",
