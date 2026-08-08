@@ -20,9 +20,10 @@ import * as Sentry from "@sentry/node";
 import { Hono } from "hono";
 import { closeDbSingleton } from "./db/client";
 import { mountViteDev } from "./dev-vite";
-import { markShuttingDown } from "./lifecycle-state";
+import { createLocalEgoNodeUpgradeHandler } from "./gateway/browser/local-ego-node-upgrade";
 import type { Env } from "./index";
 import { app as mainApp } from "./index";
+import { markShuttingDown } from "./lifecycle-state";
 import {
 	getLobuCoreServices,
 	initLobuGateway,
@@ -344,6 +345,21 @@ export function createServerLifecycle(
 		const httpServer = http.createServer();
 		httpServer.keepAliveTimeout = 75_000;
 		httpServer.headersTimeout = 76_000;
+
+		// Local ego browser tunnel upgrades. On Node a genuine WebSocket upgrade
+		// arrives on the 'upgrade' event and never reaches the Hono request
+		// listener, so the tunnel route alone cannot accept connections. The
+		// handler owns only the tunnel pathname; any other upgrade is destroyed
+		// only when this is the sole 'upgrade' listener (Node's default when no
+		// listener exists) so Vite's HMR socket in dev keeps working.
+		httpServer.on(
+			"upgrade",
+			createLocalEgoNodeUpgradeHandler({
+				onUnhandledUpgrade: (socket) => {
+					if (httpServer.listenerCount("upgrade") <= 1) socket.destroy();
+				},
+			}),
+		);
 
 		// 7. Vite dev middleware in development; otherwise wire Hono directly.
 		const vite = await mountViteDev(httpServer, honoListener);
