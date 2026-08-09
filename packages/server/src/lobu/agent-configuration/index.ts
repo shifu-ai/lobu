@@ -1,7 +1,6 @@
 export {
   type AgentConfigurationAuthority,
   createAgentConfigurationAuthority,
-  createNativePatchCommand,
 } from './authority';
 export { AgentConfigurationError, type AgentConfigurationErrorCode } from './errors';
 export type {
@@ -12,7 +11,6 @@ export type {
   ConfigurationActorKind,
   ConfigurationManagementMode,
   ConfigurationMutationKind,
-  NativePatchCommand,
   NativePatchCommandInput,
   NativeSettingsPatch,
   Sha256Digest,

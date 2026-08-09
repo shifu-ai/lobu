@@ -154,7 +154,11 @@ export async function applyNativePatchInTransaction(
   const priorCommand = priorCommands[0];
   if (priorCommand) {
     if (priorCommand.command_digest !== command.commandDigest) {
-      throw new AgentConfigurationError('agent_configuration_command_conflict', currentRevision);
+      return {
+        status: 'conflict',
+        conflict: 'command_conflict',
+        currentRevision,
+      };
     }
     return {
       status: 'already_applied',
@@ -163,7 +167,11 @@ export async function applyNativePatchInTransaction(
   }
 
   if (command.expectedConfigurationRevision !== currentRevision) {
-    throw new AgentConfigurationError('agent_configuration_revision_mismatch', currentRevision);
+    return {
+      status: 'conflict',
+      conflict: 'revision_mismatch',
+      currentRevision,
+    };
   }
   if (control.management_mode !== 'native') {
     return { status: 'rejected', reason: 'toolbox_managed' };

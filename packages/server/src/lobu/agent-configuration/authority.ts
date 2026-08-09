@@ -8,30 +8,37 @@ import type {
   AgentConfigurationMutationResult,
   NativePatchCommand,
   NativePatchCommandInput,
+  NativeSettingsPatch,
   Sha256Digest,
 } from './types';
 
 const DECIMAL_REVISION_PATTERN = /^(0|[1-9][0-9]*)$/;
 
 export interface AgentConfigurationAuthority {
-  apply(command: NativePatchCommand): Promise<AgentConfigurationMutationResult>;
+  apply(input: NativePatchCommandInput): Promise<AgentConfigurationMutationResult>;
 }
 
-export function createNativePatchCommand(input: NativePatchCommandInput): NativePatchCommand {
+function materializeNativePatchCommand(input: NativePatchCommandInput): NativePatchCommand {
   if (!DECIMAL_REVISION_PATTERN.test(input.expectedConfigurationRevision)) {
     throw new AgentConfigurationError('invalid_revision_precondition');
   }
+  const patch = JSON.parse(canonicalize(input.patch)) as NativeSettingsPatch;
   const canonicalCommand = {
     kind: 'native_patch',
     agentId: input.agentId,
     expectedRevision: input.expectedConfigurationRevision,
-    patch: input.patch,
+    patch,
   };
   const commandDigest = `sha256:${createHash('sha256')
     .update(canonicalize(canonicalCommand))
     .digest('hex')}` as Sha256Digest;
   return {
-    ...input,
+    organizationId: input.organizationId,
+    agentId: input.agentId,
+    commandId: input.commandId,
+    expectedConfigurationRevision: input.expectedConfigurationRevision,
+    actor: input.actor,
+    patch,
     kind: 'native_patch',
     commandDigest,
   };
@@ -39,7 +46,8 @@ export function createNativePatchCommand(input: NativePatchCommandInput): Native
 
 export function createAgentConfigurationAuthority(sql?: DbClient): AgentConfigurationAuthority {
   return {
-    apply(command) {
+    apply(input) {
+      const command = materializeNativePatchCommand(input);
       return (sql ?? getDb()).begin((tx) => applyNativePatchInTransaction(tx, command));
     },
   };

@@ -49,7 +49,6 @@ import {
 import {
   AgentConfigurationError,
   createAgentConfigurationAuthority,
-  createNativePatchCommand,
 } from './agent-configuration';
 
 const routes = new Hono<{ Bindings: Env }>();
@@ -2168,16 +2167,14 @@ routes.patch('/:agentId/config', async (c) => {
     };
 
     try {
-      const result = await agentConfigurationAuthority.apply(
-        createNativePatchCommand({
-          organizationId,
-          agentId,
-          commandId,
-          expectedConfigurationRevision,
-          actor,
-          patch: settingsUpdates,
-        })
-      );
+      const result = await agentConfigurationAuthority.apply({
+        organizationId,
+        agentId,
+        commandId,
+        expectedConfigurationRevision,
+        actor,
+        patch: settingsUpdates,
+      });
       if (result.status === 'conflict') {
         return c.json(
           {
@@ -2199,15 +2196,6 @@ routes.patch('/:agentId/config', async (c) => {
       };
     } catch (error) {
       if (error instanceof AgentConfigurationError) {
-        if (
-          error.code === 'agent_configuration_revision_mismatch' ||
-          error.code === 'agent_configuration_command_conflict'
-        ) {
-          return c.json(
-            { error: error.code, currentRevision: error.currentRevision },
-            409
-          );
-        }
         if (error.code === 'agent_configuration_not_found') {
           return c.json({ error: error.code }, 404);
         }
