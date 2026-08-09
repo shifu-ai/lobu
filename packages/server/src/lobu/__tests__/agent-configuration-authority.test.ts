@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { canonicalize } from 'json-canonicalize';
-import { getDb } from '../../db/client';
+import { type DbClient, getDb } from '../../db/client';
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
@@ -14,6 +14,49 @@ const ORGANIZATION_ID = 'native-authority-org';
 
 function canonicalDigest(value: unknown): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(canonicalize(value)).digest('hex')}`;
+}
+
+function createTransactionStartBarrier(participantCount: number) {
+  let arrivals = 0;
+  let releaseTransactions!: () => void;
+  let reportAllArrived!: () => void;
+  const released = new Promise<void>((resolve) => {
+    releaseTransactions = resolve;
+  });
+  const allArrived = new Promise<void>((resolve) => {
+    reportAllArrived = resolve;
+  });
+
+  return {
+    async checkpoint() {
+      arrivals += 1;
+      if (arrivals === participantCount) reportAllArrived();
+      await released;
+    },
+    allArrived,
+    release: releaseTransactions,
+    get arrivals() {
+      return arrivals;
+    },
+  };
+}
+
+function withTransactionStartCheckpoint(
+  sql: DbClient,
+  checkpoint: () => Promise<void>
+): DbClient {
+  return new Proxy(sql, {
+    get(target, property, receiver) {
+      if (property === 'begin') {
+        return <T>(fn: (tx: DbClient) => Promise<T>) =>
+          target.begin(async (tx) => {
+            await checkpoint();
+            return fn(tx);
+          });
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
 }
 
 describe('AgentConfigurationAuthority', () => {
@@ -287,12 +330,14 @@ describe('AgentConfigurationAuthority', () => {
   });
 
   test('serializes three distinct native patches from independent authorities to one CAS winner', async () => {
-    const authorities = [
-      createAgentConfigurationAuthority(),
-      createAgentConfigurationAuthority(),
-      createAgentConfigurationAuthority(),
-    ];
-    const results = await Promise.all(
+    const transactionBarrier = createTransactionStartBarrier(3);
+    const sql = getDb();
+    const authorities = Array.from({ length: 3 }, () =>
+      createAgentConfigurationAuthority(
+        withTransactionStartCheckpoint(sql, transactionBarrier.checkpoint)
+      )
+    );
+    const applying = Promise.all(
       authorities.map((authority, index) =>
         authority.apply({
           organizationId: ORGANIZATION_ID,
@@ -308,6 +353,18 @@ describe('AgentConfigurationAuthority', () => {
         })
       )
     );
+    const allTransactionsStarted = await new Promise<boolean>((resolve) => {
+      const timeout = setTimeout(() => resolve(false), 5_000);
+      void transactionBarrier.allArrived.then(() => {
+        clearTimeout(timeout);
+        resolve(true);
+      });
+    });
+    transactionBarrier.release();
+    const results = await applying;
+
+    expect(allTransactionsStarted).toBe(true);
+    expect(transactionBarrier.arrivals).toBe(3);
 
     const winners = results.filter((result) => result.status === 'applied');
     expect(winners).toHaveLength(1);
@@ -324,7 +381,6 @@ describe('AgentConfigurationAuthority', () => {
       },
     ]);
 
-    const sql = getDb();
     const agents = await sql`
       SELECT verbose_logging, user_md, mcp_servers
       FROM agents
