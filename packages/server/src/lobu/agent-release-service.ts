@@ -11,6 +11,7 @@ import { canonicalize } from "json-canonicalize";
 import { type DbClient, getDb } from "../db/client.js";
 import type { RuntimeCapabilitySnapshot } from "../gateway/services/runtime-capability-snapshot.js";
 import {
+	applyLegacyManagedSettingsInTransaction,
 	replaceAgentConfigurationSettingsInTransaction,
 	syncProvisioningGrantsInTransaction,
 } from "./agent-configuration/postgres-repository.js";
@@ -945,37 +946,12 @@ async function applyManagedSettings(
 	agentId: string,
 	settings: ManagedSettings,
 ): Promise<AgentSettingsRow> {
-	const updatedRows = await tx<AgentSettingsRow>`
-		UPDATE agents SET
-			identity_md = CASE
-				WHEN ${hasOwn(settings, "identityMd")} THEN ${settings.identityMd ?? ""}
-				ELSE identity_md
-			END,
-			soul_md = CASE
-				WHEN ${hasOwn(settings, "soulMd")} THEN ${settings.soulMd ?? ""}
-				ELSE soul_md
-			END,
-			user_md = CASE
-				WHEN ${hasOwn(settings, "userMd")} THEN ${settings.userMd ?? ""}
-				ELSE user_md
-			END,
-			model_selection = CASE
-				WHEN ${hasOwn(settings, "modelSelection")}
-					THEN ${tx.json(settings.modelSelection ?? {})}
-				ELSE model_selection
-			END,
-			tools_config = CASE
-				WHEN ${hasOwn(settings, "toolsConfig")}
-					THEN ${tx.json(settings.toolsConfig ?? {})}
-				ELSE tools_config
-			END,
-			updated_at = NOW()
-		WHERE organization_id = ${organizationId}
-		  AND id = ${agentId}
-		RETURNING owner_user_id, identity_md, soul_md, user_md,
-		          model_selection, tools_config
-	`;
-	const updated = updatedRows[0];
+	const updated = await applyLegacyManagedSettingsInTransaction(
+		tx,
+		organizationId,
+		agentId,
+		settings,
+	);
 	if (!updated) {
 		throw releaseError(
 			"agent_release_agent_not_found",

@@ -860,7 +860,12 @@ describe('AgentConfigurationAuthority', () => {
 
     const result = await authority.apply(command);
     if (result.status !== 'applied') throw new Error('Expected applied result');
-    const commandDigest = result.state.lastMutation.commandDigest;
+    const commandDigest = canonicalDigest({
+      kind: 'native_patch',
+      agentId: AGENT_ID,
+      expectedRevision: '0',
+      patch: { verboseLogging: true },
+    });
 
     expect(result).toMatchObject({
       status: 'applied',
@@ -872,7 +877,7 @@ describe('AgentConfigurationAuthority', () => {
         lastMutation: {
           kind: 'native_patch',
           commandId: 'native-command-1',
-          commandDigest,
+          appliedAt: expect.any(String),
         },
       },
     });
@@ -933,7 +938,12 @@ describe('AgentConfigurationAuthority', () => {
       configurationRevision: '0',
       settingsDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
       lastMutation: null,
+      managedRelease: null,
     });
+    expect((await getDb()`
+      SELECT count(*)::int AS count FROM agent_configuration_controls
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `)[0]?.count).toBe(0);
 
     const first = createAgentConfigurationAuthority().apply({
       organizationId: ORGANIZATION_ID,
@@ -971,6 +981,81 @@ describe('AgentConfigurationAuthority', () => {
         agentId: AGENT_ID,
       })
     ).toBeNull();
+  });
+
+  test('reads the canonical applied state without command material or settings values', async () => {
+    const authority = createAgentConfigurationAuthority();
+    await authority.apply({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      commandId: 'canonical-readback-command',
+      expectedConfigurationRevision: '0',
+      actor: { kind: 'session' },
+      patch: { identityMd: 'secret prompt must not be returned' },
+    });
+
+    const state = await authority.readAppliedState({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+    });
+    expect(state).toEqual({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      managementMode: 'native',
+      configurationRevision: '1',
+      settingsDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      lastMutation: {
+        kind: 'native_patch',
+        commandId: 'canonical-readback-command',
+        appliedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      },
+      managedRelease: null,
+    });
+    expect(JSON.stringify(state)).not.toContain('secret prompt');
+    await expect(authority.readAppliedState({
+      organizationId: ORGANIZATION_ID,
+      agentId: 'missing-canonical-readback-agent',
+    })).resolves.toBeNull();
+  });
+
+  test('logs mutation outcomes with field names but never configuration values', async () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined);
+    try {
+      const result = await createAgentConfigurationAuthority().apply({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        commandId: 'safe-observability-command',
+        expectedConfigurationRevision: '0',
+        actor: { kind: 'session' },
+        patch: { identityMd: 'never-log-this-prompt' },
+      });
+      expect(result.status).toBe('applied');
+      expect(infoSpy).toHaveBeenCalledWith(
+        {
+          organizationId: ORGANIZATION_ID,
+          agentId: AGENT_ID,
+          mutationKind: 'native_patch',
+          status: 'applied',
+          previousRevision: '0',
+          resultingRevision: '1',
+          commandId: 'safe-observability-command',
+          changedFieldNames: ['identityMd'],
+        },
+        'agent configuration mutation'
+      );
+      expect(JSON.stringify(infoSpy.mock.calls)).not.toContain('never-log-this-prompt');
+      await expect(createAgentConfigurationAuthority().apply({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        commandId: 'safe-observability-rejection',
+        expectedConfigurationRevision: '1',
+        actor: { kind: 'session' },
+        patch: { 'oauth-token-value-must-not-become-a-log-key': 'secret' },
+      } as never)).rejects.toMatchObject({ code: 'unknown_configuration_field' });
+      expect(JSON.stringify(infoSpy.mock.calls)).not.toContain('oauth-token-value');
+    } finally {
+      infoSpy.mockRestore();
+    }
   });
 
   test('replays the original result and returns conflict for command id reuse', async () => {
@@ -1033,8 +1118,13 @@ describe('AgentConfigurationAuthority', () => {
 
     expect(result).toMatchObject({
       status: 'applied',
-      state: { lastMutation: { commandDigest: expectedDigest } },
+      state: { lastMutation: { commandId } },
     });
+    expect((await sql`
+      SELECT command_digest FROM agent_configuration_commands
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+        AND command_id = ${commandId}
+    `)[0]?.command_digest).toBe(expectedDigest);
     expect((await sql`
       SELECT identity_md FROM agents
       WHERE organization_id = ${ORGANIZATION_ID} AND id = ${AGENT_ID}
@@ -1269,7 +1359,7 @@ describe('AgentConfigurationAuthority', () => {
       status: 'applied',
       state: {
         configurationRevision: '1',
-        lastMutation: { commandDigest: expectedDigest },
+        lastMutation: { commandId: 'native-command-mutable-input' },
       },
     });
     await expect(
@@ -1280,7 +1370,7 @@ describe('AgentConfigurationAuthority', () => {
       })
     ).resolves.toMatchObject({
       status: 'already_applied',
-      state: { lastMutation: { commandDigest: expectedDigest } },
+      state: { lastMutation: { commandId: 'native-command-mutable-input' } },
     });
     const rows = await getDb()`
       SELECT agent.verbose_logging, command_row.command_digest

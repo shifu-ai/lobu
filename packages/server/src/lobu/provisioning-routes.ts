@@ -285,17 +285,19 @@ export function createProvisioningRoutes(
         const metadata = await configStore.getMetadata(agentId);
         if (!metadata || metadata.organizationId !== organizationId)
           return null;
-        const { evidence: receipt } =
-          await agentConfigurationAuthority.readManagedRelease({
+        const readback = await agentConfigurationAuthority.readManagedRelease({
             organizationId,
             agentId,
           });
+        const receipt = readback.evidence;
         return {
           managedReleaseReceipt: receipt,
           liveManagedSettingsDigest:
             receipt?.status === "drifted"
               ? (receipt.liveSettingsHash ?? null)
               : (receipt?.settingsHash ?? null),
+          configurationRevision: readback.state.configurationRevision,
+          managementMode: readback.state.managementMode,
         };
       },
     });

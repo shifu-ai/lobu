@@ -144,8 +144,9 @@ function stateFromReplay(
     lastMutation: {
       kind: replay.mutationKind,
       commandId: command.commandId,
-      commandDigest: replay.commandDigest,
+      appliedAt: replay.appliedAt,
     },
+    managedRelease: null,
   };
 }
 
@@ -157,11 +158,11 @@ function stateFromControl(
   const lastMutation =
     control.lastMutationKind &&
     control.lastCommandId &&
-    control.lastCommandDigest
+    control.lastAppliedAt
       ? {
           kind: control.lastMutationKind,
           commandId: control.lastCommandId,
-          commandDigest: control.lastCommandDigest,
+          appliedAt: control.lastAppliedAt,
         }
       : null;
   return {
@@ -171,6 +172,7 @@ function stateFromControl(
     configurationRevision: control.configurationRevision,
     settingsDigest,
     lastMutation,
+    managedRelease: null,
   };
 }
 

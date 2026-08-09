@@ -196,6 +196,7 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
       configurationRevision: "0",
       settingsDigest: digestAgentConfigurationSettings(settings),
       lastMutation: null,
+      managedRelease: null,
     };
     this.states.set(key, initial);
     return initial;
@@ -343,7 +344,12 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
       managementMode: "native",
       configurationRevision,
       settingsDigest: digestAgentConfigurationSettings(settings),
-      lastMutation: { kind: "native_patch", ...command },
+      lastMutation: {
+        kind: "native_patch",
+        commandId: command.commandId,
+        appliedAt: new Date().toISOString(),
+      },
+      managedRelease: null,
     };
   }
 }

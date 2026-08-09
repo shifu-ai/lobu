@@ -1,6 +1,7 @@
 import type { AgentSettings } from '@lobu/core';
 import type { RuntimeCapabilitySnapshot } from '../../gateway/services/runtime-capability-snapshot';
 import type {
+  AgentReleaseEvidence,
   AgentReleaseApplyResult,
   AgentReleasePostApplyEvidence,
 } from '../agent-release-service';
@@ -73,8 +74,9 @@ export interface AppliedAgentConfigurationState {
   lastMutation: {
     kind: ConfigurationMutationKind;
     commandId: string;
-    commandDigest: Sha256Digest;
+    appliedAt: string;
   };
+  managedRelease: AgentReleaseEvidence | null;
 }
 
 export type BootstrapAgentConfigurationState = Omit<

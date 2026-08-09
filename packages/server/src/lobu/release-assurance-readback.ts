@@ -457,6 +457,8 @@ export function createReleaseAssuranceReadback(input: {
   findAgentBase(query: { organizationId: string; agentId: string }): Promise<{
     managedReleaseReceipt: unknown;
     liveManagedSettingsDigest: string | null;
+    configurationRevision: string;
+    managementMode: 'native' | 'toolbox_managed';
   } | null>;
   now?: () => Date;
 }) {

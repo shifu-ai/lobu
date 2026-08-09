@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { canonicalize } from 'json-canonicalize';
 import type { DbClient } from '../../db/client';
 import { getDb } from '../../db/client';
+import logger from '../../utils/logger';
 import {
   AgentReleaseError,
   type createAgentReleaseService,
@@ -79,6 +80,66 @@ const RELEASE_BASELINE_SETTING_KEYS = new Set([
   'baselinePrompt',
   'runtimeConfig',
 ]);
+const SAFE_OBSERVABILITY_FIELD_NAMES = new Set([
+  ...RELEASE_LEGACY_SETTING_KEYS,
+  ...RELEASE_BASELINE_SETTING_KEYS,
+  'providerModelPreferences',
+  'networkConfig',
+  'egressConfig',
+  'nixConfig',
+  'mcpServers',
+  'skillsConfig',
+  'pluginsConfig',
+  'installedProviders',
+  'verboseLogging',
+  'preApprovedTools',
+  'guardrails',
+  'managementMode',
+]);
+
+function safeChangedFieldNames(value: object): string[] {
+  return Object.keys(value)
+    .filter((field) => SAFE_OBSERVABILITY_FIELD_NAMES.has(field))
+    .sort();
+}
+
+function rejectedMutationStatus(error: unknown): 'rejected' | 'failed' {
+  return error instanceof AgentConfigurationError || error instanceof AgentReleaseError
+    ? 'rejected'
+    : 'failed';
+}
+
+function configurationRevisionFromResult(result: unknown): string | null {
+  if (!result || typeof result !== 'object') return null;
+  const record = result as Record<string, unknown>;
+  const state = record.state;
+  if (state && typeof state === 'object') {
+    const revision = (state as Record<string, unknown>).configurationRevision;
+    if (typeof revision === 'string') return revision;
+  }
+  if (typeof record.configurationRevision === 'string') return record.configurationRevision;
+  if (typeof record.currentRevision === 'string') return record.currentRevision;
+  return null;
+}
+
+function mutationStatus(result: unknown): string {
+  if (!result || typeof result !== 'object') return 'failed';
+  const status = (result as Record<string, unknown>).status;
+  return typeof status === 'string' ? status : 'failed';
+}
+
+function logConfigurationMutation(input: {
+  organizationId: string;
+  agentId: string;
+  mutationKind: string;
+  status: string;
+  previousRevision: string | null;
+  resultingRevision: string | null;
+  commandId: string;
+  changedFieldNames: string[];
+}): void {
+  logger.info(input, 'agent configuration mutation');
+}
 
 function materializeManagedEnrollmentCommand(
   input: EnrollToolboxManagedInput,
@@ -134,10 +195,67 @@ export function createAgentConfigurationAuthority(
     lifecycleRecorder: options.lifecycleRecorder,
   });
   return {
-    bootstrap: (input) => bootstrap.apply(input),
-    apply(input) {
-      const command = materializeNativePatchCommand(input);
-      return (sql ?? getDb()).begin((tx) => applyNativePatchInTransaction(tx, command));
+    async bootstrap(input) {
+      try {
+        const result = await bootstrap.apply(input);
+        logConfigurationMutation({
+          organizationId: input.organizationId,
+          agentId: input.agentId,
+          mutationKind: 'bootstrap',
+          status: mutationStatus(result),
+          previousRevision: input.expectedConfigurationRevision ?? null,
+          resultingRevision: configurationRevisionFromResult(result),
+          commandId: input.commandId,
+          changedFieldNames: safeChangedFieldNames(input.settings),
+        });
+        return result;
+      } catch (error) {
+        logConfigurationMutation({
+          organizationId: input.organizationId,
+          agentId: input.agentId,
+          mutationKind: 'bootstrap',
+          status: rejectedMutationStatus(error),
+          previousRevision: input.expectedConfigurationRevision ?? null,
+          resultingRevision:
+            error instanceof AgentConfigurationError ? error.currentRevision ?? null : null,
+          commandId: input.commandId,
+          changedFieldNames: safeChangedFieldNames(input.settings),
+        });
+        throw error;
+      }
+    },
+    async apply(input) {
+      const changedFieldNames = safeChangedFieldNames(input.patch);
+      try {
+        const command = materializeNativePatchCommand(input);
+        const result = await (sql ?? getDb()).begin((tx) =>
+          applyNativePatchInTransaction(tx, command)
+        );
+        logConfigurationMutation({
+          organizationId: input.organizationId,
+          agentId: input.agentId,
+          mutationKind: 'native_patch',
+          status: mutationStatus(result),
+          previousRevision: input.expectedConfigurationRevision,
+          resultingRevision: configurationRevisionFromResult(result),
+          commandId: input.commandId,
+          changedFieldNames,
+        });
+        return result;
+      } catch (error) {
+        logConfigurationMutation({
+          organizationId: input.organizationId,
+          agentId: input.agentId,
+          mutationKind: 'native_patch',
+          status: rejectedMutationStatus(error),
+          previousRevision: input.expectedConfigurationRevision,
+          resultingRevision:
+            error instanceof AgentConfigurationError ? error.currentRevision ?? null : null,
+          commandId: input.commandId,
+          changedFieldNames,
+        });
+        throw error;
+      }
     },
     readAppliedState(input) {
       return (sql ?? getDb()).begin(async (tx) => {
@@ -152,15 +270,25 @@ export function createAgentConfigurationAuthority(
           configuration_revision: string;
           last_mutation_kind: AppliedAgentConfigurationState['lastMutation']['kind'] | null;
           last_command_id: string | null;
-          last_command_digest: Sha256Digest | null;
+          last_applied_at: Date | string | null;
         }>`
-          SELECT management_mode, configuration_revision::text AS configuration_revision,
-                 last_mutation_kind, last_command_id, last_command_digest
-          FROM agent_configuration_controls
-          WHERE organization_id=${input.organizationId} AND agent_id=${input.agentId}
+          SELECT control.management_mode,
+                 control.configuration_revision::text AS configuration_revision,
+                 control.last_mutation_kind, control.last_command_id,
+                 command_row.applied_at AS last_applied_at
+          FROM agent_configuration_controls control
+          LEFT JOIN agent_configuration_commands command_row
+            ON command_row.organization_id = control.organization_id
+           AND command_row.agent_id = control.agent_id
+           AND command_row.command_id = control.last_command_id
+          WHERE control.organization_id=${input.organizationId}
+            AND control.agent_id=${input.agentId}
         `;
         const control = controls[0];
         const settingsDigest = await readAgentConfigurationSettingsDigest(tx, input);
+        const managedRelease = options.agentReleaseService
+          ? await options.agentReleaseService.getEvidenceInTransaction(tx, input)
+          : null;
         return {
           organizationId: input.organizationId,
           agentId: input.agentId,
@@ -172,31 +300,67 @@ export function createAgentConfigurationAuthority(
           lastMutation:
             control?.last_mutation_kind &&
             control.last_command_id &&
-            control.last_command_digest
+            control.last_applied_at
               ? {
                   kind: control.last_mutation_kind,
                   commandId: control.last_command_id,
-                  commandDigest: control.last_command_digest,
+                  appliedAt: new Date(control.last_applied_at).toISOString(),
                 }
               : null,
+          managedRelease,
         };
       });
     },
-    enrollToolboxManaged(input) {
-      const command = materializeManagedEnrollmentCommand(input);
-      return (sql ?? getDb()).begin(async (tx) => {
-        await options.transactionHooks?.beforeAgentLock?.();
-        return enrollToolboxManagedInTransaction(tx, command);
-      });
+    async enrollToolboxManaged(input) {
+      try {
+        const command = materializeManagedEnrollmentCommand(input);
+        const result = await (sql ?? getDb()).begin(async (tx) => {
+          await options.transactionHooks?.beforeAgentLock?.();
+          return enrollToolboxManagedInTransaction(tx, command);
+        });
+        logConfigurationMutation({
+          organizationId: input.organizationId,
+          agentId: input.agentId,
+          mutationKind: 'managed_enrollment',
+          status: mutationStatus(result),
+          previousRevision: input.expectedConfigurationRevision,
+          resultingRevision: configurationRevisionFromResult(result),
+          commandId: input.commandId,
+          changedFieldNames: ['managementMode'],
+        });
+        return result;
+      } catch (error) {
+        logConfigurationMutation({
+          organizationId: input.organizationId,
+          agentId: input.agentId,
+          mutationKind: 'managed_enrollment',
+          status: rejectedMutationStatus(error),
+          previousRevision: input.expectedConfigurationRevision,
+          resultingRevision:
+            error instanceof AgentConfigurationError ? error.currentRevision ?? null : null,
+          commandId: input.commandId,
+          changedFieldNames: ['managementMode'],
+        });
+        throw error;
+      }
     },
     async applyManagedRelease(input) {
+      let observedCommandId = 'managed-release:unmaterialized';
+      let previousRevision: string | null = null;
+      let changedFieldNames: string[] = [];
+      try {
       const releaseService = options.agentReleaseService;
       if (!releaseService) {
         throw new AgentConfigurationError('invalid_native_settings_patch');
       }
       const prepared = releaseService.prepareAgentReleaseApply(input);
+      previousRevision = prepared.command.expectedConfigurationRevision ?? null;
+      changedFieldNames = safeChangedFieldNames(
+        prepared.command.settings ?? prepared.command.signedManifest.managedSettings
+      );
       assertManagedReleaseSettingsOwnership(prepared);
       const authorityCommand = materializeManagedReleaseCommand(input, prepared);
+      observedCommandId = authorityCommand.commandId;
       const transactionResult = await (sql ?? getDb()).begin(async (tx) => {
         await options.transactionHooks?.beforeAgentLock?.();
         let control: Awaited<ReturnType<typeof lockAgentAndConfigurationControl>>;
@@ -272,6 +436,7 @@ export function createAgentConfigurationAuthority(
               authorityCommand,
               control,
               settingsDigest,
+              releaseResult.appliedAt,
             ),
           };
         }
@@ -289,8 +454,7 @@ export function createAgentConfigurationAuthority(
         });
         return { releaseResult, state };
       });
-      return {
-        evidence: releaseService.finalizeAgentReleaseApplyEvidence(
+      const evidence = releaseService.finalizeAgentReleaseApplyEvidence(
           prepared,
           transactionResult.releaseResult,
           input.responseVersion === AGENT_CONFIGURATION_RESPONSE_VERSION
@@ -299,9 +463,42 @@ export function createAgentConfigurationAuthority(
                 managementMode: transactionResult.state.managementMode,
               }
             : undefined,
-        ),
-        state: transactionResult.state,
+        );
+      const result = {
+        evidence,
+        state: {
+          ...transactionResult.state,
+          managedRelease: transactionResult.releaseResult,
+        },
       };
+      logConfigurationMutation({
+        organizationId: input.organizationId,
+        agentId: input.agentId,
+        mutationKind: 'managed_release',
+        status:
+          transactionResult.releaseResult.idempotent && !transactionResult.releaseResult.repaired
+            ? 'no_change'
+            : 'applied',
+        previousRevision,
+        resultingRevision: transactionResult.state.configurationRevision,
+        commandId: observedCommandId,
+        changedFieldNames,
+      });
+      return result;
+      } catch (error) {
+        logConfigurationMutation({
+          organizationId: input.organizationId,
+          agentId: input.agentId,
+          mutationKind: 'managed_release',
+          status: rejectedMutationStatus(error),
+          previousRevision,
+          resultingRevision:
+            error instanceof AgentConfigurationError ? error.currentRevision ?? null : null,
+          commandId: observedCommandId,
+          changedFieldNames,
+        });
+        throw error;
+      }
     },
     async readConfigurationControl(input) {
       const rows = await (sql ?? getDb())<{
@@ -421,8 +618,10 @@ function stateForUnchangedManagedRelease(
     lastMutationKind: AppliedAgentConfigurationState['lastMutation']['kind'] | null;
     lastCommandId: string | null;
     lastCommandDigest: Sha256Digest | null;
+    lastAppliedAt: string | null;
   },
   settingsDigest: Sha256Digest,
+  managedReleaseAppliedAt: string,
 ): AppliedAgentConfigurationState {
   return {
     organizationId: input.organizationId,
@@ -433,7 +632,8 @@ function stateForUnchangedManagedRelease(
     lastMutation: {
       kind: control.lastMutationKind ?? 'managed_release',
       commandId: control.lastCommandId ?? command.commandId,
-      commandDigest: control.lastCommandDigest ?? command.commandDigest,
+      appliedAt: control.lastAppliedAt ?? managedReleaseAppliedAt,
     },
+    managedRelease: null,
   };
 }

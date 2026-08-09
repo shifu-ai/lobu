@@ -47,6 +47,16 @@ type AgentSettingsRow = {
   guardrails: unknown;
 };
 
+export type LegacyManagedSettingsProjection = Pick<
+  AgentSettings,
+  'identityMd' | 'soulMd' | 'userMd' | 'modelSelection' | 'toolsConfig'
+>;
+
+export type LegacyManagedSettingsRow = Pick<
+  AgentSettingsRow,
+  'owner_user_id' | 'identity_md' | 'soul_md' | 'user_md' | 'model_selection' | 'tools_config'
+>;
+
 type ControlRow = {
   management_mode: ConfigurationManagementMode;
   configuration_revision: string;
@@ -67,6 +77,7 @@ type CommandRow = {
   resulting_mode: ConfigurationManagementMode;
   resulting_settings_digest: Sha256Digest;
   result_status: 'applied' | 'no_change';
+  applied_at: Date | string;
 };
 
 type EnrollmentReceiptRow = ReleaseCapabilityReceiptRow & {
@@ -79,6 +90,7 @@ export interface LockedConfigurationControl {
   lastMutationKind: 'bootstrap' | 'native_patch' | 'managed_release' | 'managed_enrollment' | null;
   lastCommandId: string | null;
   lastCommandDigest: Sha256Digest | null;
+  lastAppliedAt: string | null;
 }
 
 export interface ConfigurationCommandReplay {
@@ -88,6 +100,7 @@ export interface ConfigurationCommandReplay {
   resultingMode: ConfigurationManagementMode;
   resultingSettingsDigest: Sha256Digest;
   resultStatus: 'applied' | 'no_change';
+  appliedAt: string;
 }
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
@@ -102,6 +115,12 @@ function hasOwn(value: object, key: PropertyKey): boolean {
 
 function sha256Canonical(value: unknown): Sha256Digest {
   return `sha256:${createHash('sha256').update(canonicalize(value)).digest('hex')}`;
+}
+
+function commandAppliedAt(rows: Array<{ applied_at: Date | string }>): string {
+  const appliedAt = rows[0]?.applied_at;
+  if (!appliedAt) throw new Error('Agent configuration command insert returned no receipt');
+  return new Date(appliedAt).toISOString();
 }
 
 function settingsProjection(row: AgentSettingsRow): Record<string, unknown> {
@@ -157,6 +176,44 @@ export async function replaceAgentConfigurationSettingsInTransaction(
       updated_at = NOW()
     WHERE organization_id = ${organizationId} AND id = ${agentId}
   `;
+}
+
+export async function applyLegacyManagedSettingsInTransaction(
+  tx: DbClient,
+  organizationId: string,
+  agentId: string,
+  settings: Partial<LegacyManagedSettingsProjection>,
+): Promise<LegacyManagedSettingsRow | null> {
+  const updatedRows = await tx<LegacyManagedSettingsRow>`
+    UPDATE agents SET
+      identity_md = CASE
+        WHEN ${hasOwn(settings, 'identityMd')} THEN ${settings.identityMd ?? ''}
+        ELSE identity_md
+      END,
+      soul_md = CASE
+        WHEN ${hasOwn(settings, 'soulMd')} THEN ${settings.soulMd ?? ''}
+        ELSE soul_md
+      END,
+      user_md = CASE
+        WHEN ${hasOwn(settings, 'userMd')} THEN ${settings.userMd ?? ''}
+        ELSE user_md
+      END,
+      model_selection = CASE
+        WHEN ${hasOwn(settings, 'modelSelection')}
+          THEN ${tx.json(settings.modelSelection ?? {})}
+        ELSE model_selection
+      END,
+      tools_config = CASE
+        WHEN ${hasOwn(settings, 'toolsConfig')}
+          THEN ${tx.json(settings.toolsConfig ?? {})}
+        ELSE tools_config
+      END,
+      updated_at = NOW()
+    WHERE organization_id = ${organizationId} AND id = ${agentId}
+    RETURNING owner_user_id, identity_md, soul_md, user_md,
+              model_selection, tools_config
+  `;
+  return updatedRows[0] ?? null;
 }
 
 export async function syncProvisioningGrantsInTransaction(
@@ -267,8 +324,9 @@ function stateFromCommandRow(
     lastMutation: {
       kind: row.mutation_kind,
       commandId: command.commandId,
-      commandDigest: row.command_digest,
+      appliedAt: new Date(row.applied_at).toISOString(),
     },
+    managedRelease: null,
   };
 }
 
@@ -319,7 +377,7 @@ export async function enrollToolboxManagedInTransaction(
   const currentRevision = String(control.configuration_revision);
 
   const priorCommands = await tx<CommandRow>`
-    SELECT command_digest, mutation_kind,
+    SELECT command_digest, mutation_kind, applied_at,
            resulting_revision::text AS resulting_revision, resulting_mode,
            resulting_settings_digest, result_status
     FROM agent_configuration_commands
@@ -465,7 +523,7 @@ export async function enrollToolboxManagedInTransaction(
     };
   }
   const settingsDigest = receipt.settings_hash as Sha256Digest;
-  await tx`
+  const commandRows = await tx<{ applied_at: Date | string }>`
     INSERT INTO agent_configuration_commands (
       organization_id, agent_id, command_id, command_digest, mutation_kind,
       resulting_revision, resulting_mode, resulting_settings_digest, result_status
@@ -473,7 +531,7 @@ export async function enrollToolboxManagedInTransaction(
       ${command.organizationId}, ${command.agentId}, ${command.commandId},
       ${command.commandDigest}, 'managed_enrollment', ${resultingRevision}::bigint,
       'toolbox_managed', ${settingsDigest}, 'applied'
-    )
+    ) RETURNING applied_at
   `;
   return {
     status: 'applied',
@@ -486,8 +544,9 @@ export async function enrollToolboxManagedInTransaction(
       lastMutation: {
         kind: 'managed_enrollment',
         commandId: command.commandId,
-        commandDigest: command.commandDigest,
+        appliedAt: commandAppliedAt(commandRows),
       },
+      managedRelease: null,
     },
   };
 }
@@ -571,7 +630,7 @@ export async function applyNativePatchInTransaction(
   const currentRevision = String(control.configuration_revision);
 
   const priorCommands = await tx<CommandRow>`
-    SELECT command_digest, mutation_kind,
+    SELECT command_digest, mutation_kind, applied_at,
            resulting_revision::text AS resulting_revision, resulting_mode,
            resulting_settings_digest, result_status
     FROM agent_configuration_commands
@@ -685,7 +744,7 @@ export async function applyNativePatchInTransaction(
         updated_at = NOW()
     WHERE organization_id = ${command.organizationId} AND agent_id = ${command.agentId}
   `;
-  await tx`
+  const commandRows = await tx<{ applied_at: Date | string }>`
     INSERT INTO agent_configuration_commands (
       organization_id, agent_id, command_id, command_digest, mutation_kind,
       resulting_revision, resulting_mode, resulting_settings_digest, result_status
@@ -693,7 +752,7 @@ export async function applyNativePatchInTransaction(
       ${command.organizationId}, ${command.agentId}, ${command.commandId},
       ${command.commandDigest}, 'native_patch', ${resultingRevision}::bigint,
       ${control.management_mode}, ${resultingSettingsDigest}, ${resultStatus}
-    )
+    ) RETURNING applied_at
   `;
 
   return {
@@ -707,8 +766,9 @@ export async function applyNativePatchInTransaction(
       lastMutation: {
         kind: 'native_patch',
         commandId: command.commandId,
-        commandDigest: command.commandDigest,
+        appliedAt: commandAppliedAt(commandRows),
       },
+      managedRelease: null,
     },
   };
 }
@@ -729,12 +789,19 @@ export async function lockAgentAndConfigurationControl(
     VALUES (${input.organizationId}, ${input.agentId})
     ON CONFLICT (organization_id, agent_id) DO NOTHING
   `;
-  const controls = await tx<ControlRow>`
-    SELECT management_mode, configuration_revision::text AS configuration_revision,
-           last_mutation_kind, last_command_id, last_command_digest
-    FROM agent_configuration_controls
-    WHERE organization_id = ${input.organizationId} AND agent_id = ${input.agentId}
-    FOR UPDATE
+  const controls = await tx<ControlRow & { last_applied_at: Date | string | null }>`
+    SELECT control.management_mode,
+           control.configuration_revision::text AS configuration_revision,
+           control.last_mutation_kind, control.last_command_id, control.last_command_digest,
+           command_row.applied_at AS last_applied_at
+    FROM agent_configuration_controls control
+    LEFT JOIN agent_configuration_commands command_row
+      ON command_row.organization_id = control.organization_id
+     AND command_row.agent_id = control.agent_id
+     AND command_row.command_id = control.last_command_id
+    WHERE control.organization_id = ${input.organizationId}
+      AND control.agent_id = ${input.agentId}
+    FOR UPDATE OF control
   `;
   const control = controls[0];
   if (!control) throw new AgentConfigurationError('agent_configuration_not_found');
@@ -744,6 +811,9 @@ export async function lockAgentAndConfigurationControl(
     lastMutationKind: control.last_mutation_kind ?? null,
     lastCommandId: control.last_command_id ?? null,
     lastCommandDigest: control.last_command_digest ?? null,
+    lastAppliedAt: control.last_applied_at
+      ? new Date(control.last_applied_at).toISOString()
+      : null,
   };
 }
 
@@ -752,7 +822,7 @@ export async function findConfigurationCommand(
   input: { organizationId: string; agentId: string; commandId: string },
 ): Promise<ConfigurationCommandReplay | null> {
   const rows = await tx<CommandRow>`
-    SELECT command_digest, mutation_kind,
+    SELECT command_digest, mutation_kind, applied_at,
            resulting_revision::text AS resulting_revision, resulting_mode,
            resulting_settings_digest, result_status
     FROM agent_configuration_commands
@@ -769,6 +839,7 @@ export async function findConfigurationCommand(
         resultingMode: row.resulting_mode,
         resultingSettingsDigest: row.resulting_settings_digest,
         resultStatus: row.result_status,
+        appliedAt: new Date(row.applied_at).toISOString(),
       }
     : null;
 }
@@ -813,7 +884,7 @@ export async function recordManagedReleaseConfigurationMutation(
         updated_at = NOW()
     WHERE organization_id = ${input.organizationId} AND agent_id = ${input.agentId}
   `;
-  await tx`
+  const commandRows = await tx<{ applied_at: Date | string }>`
     INSERT INTO agent_configuration_commands (
       organization_id, agent_id, command_id, command_digest, mutation_kind,
       resulting_revision, resulting_mode, resulting_settings_digest, result_status
@@ -821,7 +892,7 @@ export async function recordManagedReleaseConfigurationMutation(
       ${input.organizationId}, ${input.agentId}, ${input.commandId},
       ${input.commandDigest}, 'managed_release', ${resultingRevision}::bigint,
       ${input.managementMode}, ${input.settingsDigest}, 'applied'
-    )
+    ) RETURNING applied_at
   `;
   return {
     organizationId: input.organizationId,
@@ -832,8 +903,9 @@ export async function recordManagedReleaseConfigurationMutation(
     lastMutation: {
       kind: 'managed_release',
       commandId: input.commandId,
-      commandDigest: input.commandDigest,
+      appliedAt: commandAppliedAt(commandRows),
     },
+    managedRelease: null,
   };
 }
 
@@ -858,7 +930,7 @@ export async function recordBootstrapConfigurationMutation(
         updated_at = NOW()
     WHERE organization_id = ${input.organizationId} AND agent_id = ${input.agentId}
   `;
-  await tx`
+  const commandRows = await tx<{ applied_at: Date | string }>`
     INSERT INTO agent_configuration_commands (
       organization_id, agent_id, command_id, command_digest, mutation_kind,
       resulting_revision, resulting_mode, resulting_settings_digest, result_status
@@ -866,7 +938,7 @@ export async function recordBootstrapConfigurationMutation(
       ${input.organizationId}, ${input.agentId}, ${input.commandId},
       ${input.commandDigest}, 'bootstrap', ${resultingRevision}::bigint,
       'native', ${input.settingsDigest}, 'applied'
-    )
+    ) RETURNING applied_at
   `;
   return {
     organizationId: input.organizationId,
@@ -877,7 +949,8 @@ export async function recordBootstrapConfigurationMutation(
     lastMutation: {
       kind: 'bootstrap',
       commandId: input.commandId,
-      commandDigest: input.commandDigest,
+      appliedAt: commandAppliedAt(commandRows),
     },
+    managedRelease: null,
   };
 }
