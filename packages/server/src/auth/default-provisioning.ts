@@ -125,6 +125,7 @@ export async function hasOrgSentinel(
  *     ownership check in `verifyOwnedAgentAccess`).
  *   - agent_users mapping for that (platform, user_id) so `ownsAgent`
  *     returns true on the PAT-session path.
+ *   - the default identity restored when the legacy value is blank.
  *   - installed_providers populated with all currently-available
  *     system-key providers when empty. Never removes existing entries
  *     and never overwrites a non-empty list — admins may have curated
@@ -138,15 +139,21 @@ async function backfillDefaultAgent(
   client: DbClient
 ): Promise<void> {
   const rows = (await client`
-    SELECT owner_platform, owner_user_id, installed_providers
-      FROM agents
-     WHERE organization_id = ${organizationId}
-       AND id = ${DEFAULT_AGENT_ID}
+    SELECT a.owner_platform, a.owner_user_id, a.identity_md,
+           a.installed_providers,
+           COALESCE(c.configuration_revision, 0)::text AS configuration_revision
+      FROM agents a
+      LEFT JOIN agent_configuration_controls c
+        ON c.organization_id = a.organization_id AND c.agent_id = a.id
+     WHERE a.organization_id = ${organizationId}
+       AND a.id = ${DEFAULT_AGENT_ID}
      LIMIT 1
   `) as unknown as Array<{
     owner_platform: string | null;
     owner_user_id: string | null;
+    identity_md: string | null;
     installed_providers: unknown;
+    configuration_revision: string;
   }>;
   const row = rows[0];
   if (!row) return;
@@ -171,6 +178,8 @@ async function backfillDefaultAgent(
     (row.owner_user_id !== ownerUserId || row.owner_platform !== 'external');
   const needsProvidersFix =
     installedNow.length === 0 && missingSystemProviders.length > 0;
+  const needsIdentityFix =
+    typeof row.identity_md !== 'string' || row.identity_md.trim().length === 0;
 
   if (needsOwnerFix) {
     await client`
@@ -184,34 +193,53 @@ async function backfillDefaultAgent(
   }
 
   let providersAdded: string[] = [];
-  if (needsProvidersFix) {
+  let identityFixed = false;
+  if (needsIdentityFix || needsProvidersFix) {
+    const patch = {
+      ...(needsIdentityFix ? { identityMd: DEFAULT_AGENT_IDENTITY } : {}),
+      ...(needsProvidersFix
+        ? { installedProviders: missingSystemProviders }
+        : {}),
+    };
     const digest = createHash('sha256')
-      .update(JSON.stringify(missingSystemProviders))
+      .update(JSON.stringify(patch))
       .digest('hex');
     const patchResult = await createAgentConfigurationAuthority(client).apply({
       organizationId,
       agentId: DEFAULT_AGENT_ID,
-      commandId: `default-provider-backfill:${digest}`,
-      expectedConfigurationRevision: null,
+      commandId: `default-settings-backfill:${digest}`,
+      expectedConfigurationRevision: row.configuration_revision,
       actor: { kind: 'provider_catalog' },
-      patch: { installedProviders: missingSystemProviders },
+      patch,
     });
     if (patchResult.status === 'rejected') {
       logger.warn(
         { organizationId, agentId: DEFAULT_AGENT_ID, reason: patchResult.reason },
-        '[default-provisioning] Managed default-agent provider backfill deferred'
+        '[default-provisioning] Managed default-agent settings backfill deferred'
       );
-    } else if (patchResult.status !== 'conflict') {
+    } else if (patchResult.status === 'conflict') {
+      logger.warn(
+        {
+          organizationId,
+          agentId: DEFAULT_AGENT_ID,
+          conflict: patchResult.conflict,
+          currentRevision: patchResult.currentRevision,
+        },
+        '[default-provisioning] Default-agent settings backfill deferred after revision conflict'
+      );
+    } else {
       providersAdded = missingSystemProviders.map((provider) => provider.providerId);
+      identityFixed = needsIdentityFix;
     }
   }
 
-  if (needsOwnerFix || needsProvidersFix) {
+  if (needsOwnerFix || needsIdentityFix || needsProvidersFix) {
     logger.info(
       {
         organizationId,
         agentId: DEFAULT_AGENT_ID,
         ownerFixed: !!needsOwnerFix,
+        identityFixed,
         providersAdded,
       },
       '[default-provisioning] Backfilled default agent'
@@ -230,7 +258,7 @@ async function backfillDefaultAgent(
 /**
  * Provision the default Owletto agent for the given org, exactly once. Also
  * runs `backfillDefaultAgent` on every call so legacy installs (where the
- * row was inserted before this code populated owner/providers) heal in
+ * row was inserted before this code populated owner/identity/providers) heal in
  * place — that part is idempotent and only writes on divergence.
  *
  * Three guards stack on the create path:

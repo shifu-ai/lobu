@@ -231,6 +231,42 @@ describe('POST /agents — idempotent same-org create', () => {
     expect(rows.length).toBe(1);
   });
 
+  test('preserves an explicitly empty description on create and replay', async () => {
+    const app = await importAgentRoutes();
+    const request = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'empty-description-agent',
+        name: 'Empty Description Agent',
+        description: '',
+      }),
+    };
+
+    const created = await app.request('/', request);
+    expect(created.status).toBe(201);
+    await expect(created.json()).resolves.toEqual({
+      agentId: 'empty-description-agent',
+      name: 'Empty Description Agent',
+      description: '',
+    });
+
+    const replay = await app.request('/', request);
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toEqual({
+      agentId: 'empty-description-agent',
+      name: 'Empty Description Agent',
+      description: '',
+    });
+
+    const { getDb } = await import('../../db/client.js');
+    const rows = await getDb()`
+      SELECT description FROM agents
+      WHERE organization_id = ${ORG_A} AND id = 'empty-description-agent'
+    `;
+    expect(rows).toEqual([{ description: '' }]);
+  });
+
   test('idempotent path does not re-inject the Lobu MCP server', async () => {
     const app = await importAgentRoutes();
     const { getDb } = await import('../../db/client.js');

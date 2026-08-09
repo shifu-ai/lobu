@@ -305,6 +305,7 @@ async function buildApp(
 		agentConfigurationTransactionHooks?: {
 			beforeAgentLock?: () => Promise<void>;
 		};
+		authUserId?: string;
 	} = {},
 ) {
 	const { createProvisioningRoutes } = await import(
@@ -313,15 +314,16 @@ async function buildApp(
 	const app = new Hono();
 	app.onError((_error, c) => c.json({ error: "internal_error" }, 500));
 	app.use("*", async (c, next) => {
+		const authUserId = overrides.authUserId ?? "gateway-user";
 		c.set("user", {
-			id: "gateway-user",
+			id: authUserId,
 			name: "Gateway User",
 			email: "gateway@example.test",
 			emailVerified: true,
 		});
 		c.set("session", {
 			id: "pat:test-client",
-			userId: "gateway-user",
+			userId: authUserId,
 			token: "owl_pat_test",
 			expiresAt: new Date(Date.now() + 60_000),
 			activeOrganizationId: ORG_ID,
@@ -1436,7 +1438,7 @@ describe("POST /api/provisioning/agents", () => {
 		`;
 		const app = await buildApp();
 
-		const response = await app.request("/api/provisioning/agents", {
+		const request = {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
@@ -1445,9 +1447,18 @@ describe("POST /api/provisioning/agents", () => {
 				ownerUserId: "toolbox-user-admin",
 				settings: {},
 			}),
-		});
+		};
+		const response = await app.request("/api/provisioning/agents", request);
 
 		expect(response.status).toBe(201);
+		await expect(response.json()).resolves.toMatchObject({
+			membership: { ensured: true, role: "admin" },
+		});
+		const replay = await app.request("/api/provisioning/agents", request);
+		expect(replay.status).toBe(200);
+		await expect(replay.json()).resolves.toMatchObject({
+			membership: { ensured: true, role: "admin" },
+		});
 
 		const members = await sql`
 			SELECT id, "organizationId", "userId", role
@@ -1464,6 +1475,75 @@ describe("POST /api/provisioning/agents", () => {
 				role: "admin",
 			},
 		]);
+	});
+
+	test("maps changed admin PAT effects under the same broad command to a stable 409", async () => {
+		const body = {
+			agentId: "shifu-u-broad-command-conflict",
+			name: "Broad Command Conflict",
+			ownerUserId: "toolbox-user-broad-conflict",
+			settings: { userMd: "original broad settings" },
+		};
+		const first = await (await buildApp()).request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+		expect(first.status).toBe(201);
+
+		const conflict = await (
+			await buildApp(["mcp:admin"], { authUserId: "changed-gateway-user" })
+		).request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+		expect(conflict.status).toBe(409);
+		await expect(conflict.json()).resolves.toEqual({
+			error: "agent_configuration_command_conflict",
+			currentRevision: "1",
+		});
+
+		const { getDb } = await import("../../db/client.js");
+		const owners = await getDb()`
+			SELECT platform, user_id FROM agent_users
+			WHERE organization_id = ${ORG_ID}
+			  AND agent_id = ${body.agentId}
+			ORDER BY platform, user_id
+		`;
+		expect(owners).toEqual([
+			{ platform: "external", user_id: "gateway-user" },
+			{ platform: "toolbox", user_id: body.ownerUserId },
+		]);
+	});
+
+	test("maps a broad bootstrap revision conflict to a stable 409", async () => {
+		const { AgentConfigurationError } = await import("../agent-configuration/index.js");
+		const app = await buildApp(["mcp:admin"], {
+			agentConfigurationAuthority: {
+				bootstrap: async () => {
+					throw new AgentConfigurationError(
+						"agent_configuration_revision_mismatch",
+						"7",
+					);
+				},
+			},
+		});
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-broad-revision-conflict",
+				name: "Broad Revision Conflict",
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(409);
+		await expect(response.json()).resolves.toEqual({
+			error: "agent_configuration_revision_mismatch",
+			currentRevision: "7",
+		});
 	});
 
 	test("uses a hash-based placeholder email so old raw-email collisions do not block provisioning", async () => {
@@ -1771,6 +1851,60 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 			GROUP BY c.configuration_revision
 		`;
 		expect(rows).toEqual([{ configuration_revision: "1", command_count: 1 }]);
+	});
+
+	test("maps changed admin PAT effects under the same fenced command to a stable 409", async () => {
+		const agentId = "shifu-u-fenced-command-conflict";
+		const body = fencedProvisioningBody();
+		const first = await putFencedAgent(await buildApp(), agentId, body);
+		expect(first.status).toBe(201);
+
+		const conflict = await putFencedAgent(
+			await buildApp(["mcp:admin"], { authUserId: "changed-gateway-user" }),
+			agentId,
+			body,
+		);
+		expect(conflict.status).toBe(409);
+		await expect(conflict.json()).resolves.toEqual({
+			error: "agent_configuration_command_conflict",
+			currentRevision: "1",
+		});
+
+		const { getDb } = await import("../../db/client.js");
+		const owners = await getDb()`
+			SELECT platform, user_id FROM agent_users
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${agentId}
+			ORDER BY platform, user_id
+		`;
+		expect(owners).toEqual([
+			{ platform: "external", user_id: "gateway-user" },
+			{ platform: "toolbox", user_id: body.ownerUserId },
+		]);
+	});
+
+	test("maps a fenced bootstrap revision conflict to a stable 409", async () => {
+		const { AgentConfigurationError } = await import("../agent-configuration/index.js");
+		const app = await buildApp(["mcp:admin"], {
+			agentConfigurationAuthority: {
+				bootstrap: async () => {
+					throw new AgentConfigurationError(
+						"agent_configuration_revision_mismatch",
+						"9",
+					);
+				},
+			},
+		});
+		const response = await putFencedAgent(
+			app,
+			"shifu-u-fenced-revision-conflict",
+			fencedProvisioningBody(),
+		);
+
+		expect(response.status).toBe(409);
+		await expect(response.json()).resolves.toEqual({
+			error: "agent_configuration_revision_mismatch",
+			currentRevision: "9",
+		});
 	});
 
 	test("rolls back the whole aggregate when final authority control persistence fails", async () => {

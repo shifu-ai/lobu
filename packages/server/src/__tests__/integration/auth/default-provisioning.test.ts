@@ -6,10 +6,11 @@
  * timing (watcher creation requires a device row), and idempotency.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { generateSecureToken } from '../../../auth/oauth/utils';
 import {
   DEFAULT_AGENT_ID,
+  DEFAULT_AGENT_IDENTITY,
   DEFAULT_AGENT_SENTINEL,
   DEFAULT_WATCHER_SENTINEL,
   DEFAULT_WATCHER_SLUG,
@@ -17,6 +18,9 @@ import {
   ensureDefaultWatcher,
   hasOrgSentinel,
 } from '../../../auth/default-provisioning';
+import * as moduleSystem from '../../../gateway/modules/module-system';
+import { createAgentConfigurationAuthority } from '../../../lobu/agent-configuration';
+import logger from '../../../utils/logger';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 
 async function seedOrg(orgId: string): Promise<void> {
@@ -243,6 +247,210 @@ describe('ensureDefaultAgent', () => {
     `;
     expect(userAgents).toHaveLength(1);
     expect(String(userAgents[0].user_id)).toBe(ownerUserId);
+  });
+
+  it('repairs a blank legacy identity through one revisioned authority patch', async () => {
+    const providerSpy = vi
+      .spyOn(moduleSystem, 'getModelProviderModules')
+      .mockReturnValue([]);
+    try {
+      const orgId = `org-identity-backfill-${generateSecureToken(4)}`;
+      await seedOrg(orgId);
+      const sql = getTestDb();
+      await sql`
+        UPDATE "organization"
+           SET metadata = ${JSON.stringify({
+             [DEFAULT_AGENT_SENTINEL]: new Date().toISOString(),
+           })}
+         WHERE id = ${orgId}
+      `;
+      await sql`
+        INSERT INTO agents (
+          id, organization_id, name, identity_md, installed_providers,
+          created_at, updated_at
+        ) VALUES (
+          ${DEFAULT_AGENT_ID}, ${orgId}, 'Owletto Personal', '',
+          ${sql.json([{ providerId: 'curated-provider', installedAt: 1 }])},
+          NOW(), NOW()
+        )
+      `;
+
+      await ensureDefaultAgent(orgId);
+
+      const rows = await sql`
+        SELECT a.identity_md, a.installed_providers,
+               c.configuration_revision::text AS configuration_revision,
+               count(command_row.command_id)::int AS command_count
+        FROM agents a
+        JOIN agent_configuration_controls c
+          ON c.organization_id = a.organization_id AND c.agent_id = a.id
+        JOIN agent_configuration_commands command_row
+          ON command_row.organization_id = a.organization_id
+         AND command_row.agent_id = a.id
+        WHERE a.organization_id = ${orgId} AND a.id = ${DEFAULT_AGENT_ID}
+        GROUP BY a.identity_md, a.installed_providers, c.configuration_revision
+      `;
+      expect(rows).toEqual([{
+        identity_md: DEFAULT_AGENT_IDENTITY,
+        installed_providers: [{ providerId: 'curated-provider', installedAt: 1 }],
+        configuration_revision: '1',
+        command_count: 1,
+      }]);
+    } finally {
+      providerSpy.mockRestore();
+    }
+  });
+
+  it('repairs provider drift independently without rewriting a healthy identity', async () => {
+    const providerSpy = vi
+      .spyOn(moduleSystem, 'getModelProviderModules')
+      .mockReturnValue([{
+        providerId: 'system-provider',
+        hasSystemKey: () => true,
+      } as never]);
+    try {
+      const orgId = `org-provider-backfill-${generateSecureToken(4)}`;
+      await seedOrg(orgId);
+      const sql = getTestDb();
+      await sql`
+        UPDATE "organization"
+           SET metadata = ${JSON.stringify({
+             [DEFAULT_AGENT_SENTINEL]: new Date().toISOString(),
+           })}
+         WHERE id = ${orgId}
+      `;
+      await sql`
+        INSERT INTO agents (
+          id, organization_id, name, identity_md, installed_providers,
+          created_at, updated_at
+        ) VALUES (
+          ${DEFAULT_AGENT_ID}, ${orgId}, 'Owletto Personal',
+          ${DEFAULT_AGENT_IDENTITY}, '[]'::jsonb, NOW(), NOW()
+        )
+      `;
+
+      await ensureDefaultAgent(orgId);
+
+      const rows = await sql`
+        SELECT identity_md, installed_providers
+        FROM agents
+        WHERE organization_id = ${orgId} AND id = ${DEFAULT_AGENT_ID}
+      `;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].identity_md).toBe(DEFAULT_AGENT_IDENTITY);
+      expect(rows[0].installed_providers).toEqual([
+        { providerId: 'system-provider', installedAt: expect.any(Number) },
+      ]);
+    } finally {
+      providerSpy.mockRestore();
+    }
+  });
+
+  it('warns and preserves a managed blank identity as last-known-good state', async () => {
+    const providerSpy = vi
+      .spyOn(moduleSystem, 'getModelProviderModules')
+      .mockReturnValue([]);
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const orgId = `org-managed-identity-${generateSecureToken(4)}`;
+      await seedOrg(orgId);
+      const sql = getTestDb();
+      await sql`
+        INSERT INTO agents (id, organization_id, name, identity_md)
+        VALUES (${DEFAULT_AGENT_ID}, ${orgId}, 'Managed Owletto', '')
+      `;
+      await sql`
+        INSERT INTO agent_configuration_controls (
+          organization_id, agent_id, management_mode, configuration_revision
+        ) VALUES (${orgId}, ${DEFAULT_AGENT_ID}, 'toolbox_managed', 3)
+      `;
+
+      await ensureDefaultAgent(orgId);
+
+      const rows = await sql`
+        SELECT identity_md FROM agents
+        WHERE organization_id = ${orgId} AND id = ${DEFAULT_AGENT_ID}
+      `;
+      expect(rows).toEqual([{ identity_md: '' }]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          organizationId: orgId,
+          agentId: DEFAULT_AGENT_ID,
+          reason: 'field_owned_by_managed_release',
+        }),
+        expect.stringContaining('backfill deferred')
+      );
+    } finally {
+      warnSpy.mockRestore();
+      providerSpy.mockRestore();
+    }
+  });
+
+  it('does not overwrite a concurrent identity repair after its observed revision goes stale', async () => {
+    const providerSpy = vi
+      .spyOn(moduleSystem, 'getModelProviderModules')
+      .mockReturnValue([]);
+    try {
+      const orgId = `org-conflicting-identity-${generateSecureToken(4)}`;
+      await seedOrg(orgId);
+      const sql = getTestDb();
+      await sql`
+        UPDATE "organization"
+           SET metadata = ${JSON.stringify({
+             [DEFAULT_AGENT_SENTINEL]: new Date().toISOString(),
+           })}
+         WHERE id = ${orgId}
+      `;
+      await sql`
+        INSERT INTO agents (id, organization_id, name, identity_md)
+        VALUES (${DEFAULT_AGENT_ID}, ${orgId}, 'Owletto Personal', '')
+      `;
+
+      let injectedWinner = false;
+      const racingClient = new Proxy(sql, {
+        get(target, property, receiver) {
+          if (property === 'begin') {
+            return async (callback: (tx: never) => Promise<unknown>) => {
+              if (!injectedWinner) {
+                injectedWinner = true;
+                await createAgentConfigurationAuthority(sql as never).apply({
+                  organizationId: orgId,
+                  agentId: DEFAULT_AGENT_ID,
+                  commandId: 'concurrent-default-identity-winner',
+                  expectedConfigurationRevision: '0',
+                  actor: { kind: 'session' },
+                  patch: { identityMd: 'concurrent winner identity' },
+                });
+              }
+              return target.begin(callback as never);
+            };
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+
+      await ensureDefaultAgent(orgId, racingClient as never);
+
+      const rows = await sql`
+        SELECT a.identity_md, c.configuration_revision::text AS configuration_revision,
+               count(command_row.command_id)::int AS command_count
+        FROM agents a
+        JOIN agent_configuration_controls c
+          ON c.organization_id = a.organization_id AND c.agent_id = a.id
+        JOIN agent_configuration_commands command_row
+          ON command_row.organization_id = a.organization_id
+         AND command_row.agent_id = a.id
+        WHERE a.organization_id = ${orgId} AND a.id = ${DEFAULT_AGENT_ID}
+        GROUP BY a.identity_md, c.configuration_revision
+      `;
+      expect(rows).toEqual([{
+        identity_md: 'concurrent winner identity',
+        configuration_revision: '1',
+        command_count: 1,
+      }]);
+    } finally {
+      providerSpy.mockRestore();
+    }
   });
 
   it('skips creation (but stamps sentinel) when other agents already exist', async () => {

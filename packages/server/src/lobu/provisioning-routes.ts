@@ -612,6 +612,21 @@ export function createProvisioningRoutes(
         if (error instanceof ProvisioningFenceError) {
           return c.json({ error: error.code }, 409);
         }
+        if (
+          error instanceof AgentConfigurationError &&
+          (error.code === "agent_configuration_command_conflict" ||
+            error.code === "agent_configuration_revision_mismatch")
+        ) {
+          return c.json(
+            {
+              error: error.code,
+              ...(error.currentRevision === undefined
+                ? {}
+                : { currentRevision: error.currentRevision }),
+            },
+            409
+          );
+        }
         throw error;
       }
     }
@@ -715,6 +730,21 @@ export function createProvisioningRoutes(
     } catch (error) {
       if (error instanceof AgentProvisioningModeError) {
         return c.json({ error: error.code }, 409);
+      }
+      if (
+        error instanceof AgentConfigurationError &&
+        (error.code === "agent_configuration_command_conflict" ||
+          error.code === "agent_configuration_revision_mismatch")
+      ) {
+        return c.json(
+          {
+            error: error.code,
+            ...(error.currentRevision === undefined
+              ? {}
+              : { currentRevision: error.currentRevision }),
+          },
+          409
+        );
       }
       throw error;
     }

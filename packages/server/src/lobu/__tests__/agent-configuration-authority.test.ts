@@ -182,6 +182,62 @@ describe('AgentConfigurationAuthority', () => {
     expect(agents).toEqual([]);
   });
 
+  test('replays an exact native bootstrap but rejects changed effects under the same command id', async () => {
+    const authority = createAgentConfigurationAuthority();
+    const agentId = 'native-bootstrap-command-conflict';
+    const command = {
+      kind: 'bootstrap' as const,
+      profile: 'native' as const,
+      organizationId: ORGANIZATION_ID,
+      agentId,
+      commandId: 'native-bootstrap-stable-command',
+      expectedConfigurationRevision: '0',
+      actor: { kind: 'admin_pat' as const },
+      name: 'Original native agent',
+      description: 'original description',
+      settings: { identityMd: 'original identity' },
+      requestDigest: canonicalDigest({ request: 'stable native command' }),
+      ownerPlatform: 'lobu',
+      ownerUserId: null,
+    };
+
+    const applied = await authority.bootstrap(command);
+    expect(applied.status).toBe('applied');
+    const replay = await authority.bootstrap(command);
+    expect(replay.status).toBe('already_applied');
+
+    await expect(
+      authority.bootstrap({
+        ...command,
+        name: 'Changed native agent',
+        description: 'changed description',
+        settings: { identityMd: 'changed identity' },
+        ownerPlatform: 'external',
+      })
+    ).rejects.toMatchObject({
+      code: 'agent_configuration_command_conflict',
+      currentRevision: '1',
+    });
+
+    const aggregate = await getDb()`
+      SELECT a.name, a.description, a.identity_md, a.owner_platform,
+             count(command_row.command_id)::int AS command_count
+      FROM agents a
+      JOIN agent_configuration_commands command_row
+        ON command_row.organization_id = a.organization_id
+       AND command_row.agent_id = a.id
+      WHERE a.organization_id = ${ORGANIZATION_ID} AND a.id = ${agentId}
+      GROUP BY a.name, a.description, a.identity_md, a.owner_platform
+    `;
+    expect(aggregate).toEqual([{
+      name: 'Original native agent',
+      description: 'original description',
+      identity_md: 'original identity',
+      owner_platform: 'lobu',
+      command_count: 1,
+    }]);
+  });
+
   test('rejects exact fence replay when the command durable effects changed', async () => {
     const authority = createAgentConfigurationAuthority();
     const agentId = 'toolbox-fence-command-conflict';

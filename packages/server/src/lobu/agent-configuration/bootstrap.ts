@@ -147,6 +147,13 @@ function stateFromReplay(
   };
 }
 
+function metadataWithDescription(
+  name: string,
+  description: string | null | undefined
+): { name: string; description?: string } {
+  return description == null ? { name } : { name, description };
+}
+
 export function createAgentConfigurationBootstrap(
   sql?: DbClient,
   options: { transactionHooks?: { afterAgentLock?: () => Promise<void> } } = {}
@@ -193,18 +200,22 @@ export function createAgentConfigurationBootstrap(
         const replay = await findConfigurationCommand(tx, command);
 
         if (command.profile === 'native' && !created) {
-          if (replay && replay.commandDigest === command.commandDigest) {
+          if (replay) {
+            if (replay.commandDigest !== command.commandDigest) {
+              throw new AgentConfigurationError(
+                'agent_configuration_command_conflict',
+                control.configurationRevision
+              );
+            }
             return {
               status: 'already_applied' as const,
               created: false,
               replayed: true,
               state: stateFromReplay(command, replay),
-              metadata: {
-                name: existingMetadata[0]?.name ?? command.name,
-                ...(existingMetadata[0]?.description
-                  ? { description: existingMetadata[0].description }
-                  : {}),
-              },
+              metadata: metadataWithDescription(
+                existingMetadata[0]?.name ?? command.name,
+                existingMetadata[0]?.description
+              ),
             };
           }
           const settingsDigest = await readAgentConfigurationSettingsDigest(
@@ -228,12 +239,10 @@ export function createAgentConfigurationBootstrap(
                   control.lastCommandDigest ?? command.commandDigest,
               },
             },
-            metadata: {
-              name: existingMetadata[0]?.name ?? command.name,
-              ...(existingMetadata[0]?.description
-                ? { description: existingMetadata[0].description }
-                : {}),
-            },
+            metadata: metadataWithDescription(
+              existingMetadata[0]?.name ?? command.name,
+              existingMetadata[0]?.description
+            ),
           };
         }
 
@@ -318,7 +327,10 @@ export function createAgentConfigurationBootstrap(
                           control.lastCommandDigest ?? command.commandDigest,
                       },
                     },
-                metadata: { name: existingMetadata[0]?.name ?? command.name },
+                metadata: metadataWithDescription(
+                  existingMetadata[0]?.name ?? command.name,
+                  existingMetadata[0]?.description
+                ),
               };
             }
           }
@@ -329,13 +341,25 @@ export function createAgentConfigurationBootstrap(
             );
           }
           if (replay) {
+            const memberships = await tx<{ role: string }>`
+              SELECT role FROM "member"
+              WHERE "organizationId" = ${command.organizationId}
+                AND "userId" = ${command.ownerUserId}
+              LIMIT 1
+            `;
             return {
               status: 'already_applied' as const,
               created: false,
               replayed: true,
-              membership: { ensured: true as const, role: 'member' },
+              membership: {
+                ensured: true as const,
+                role: String(memberships[0]?.role ?? 'member'),
+              },
               state: stateFromReplay(command, replay),
-              metadata: { name: existingMetadata[0]?.name ?? command.name },
+              metadata: metadataWithDescription(
+                existingMetadata[0]?.name ?? command.name,
+                existingMetadata[0]?.description
+              ),
             };
           }
 
@@ -437,12 +461,7 @@ export function createAgentConfigurationBootstrap(
               role: String(memberships[0]?.role ?? 'member'),
             },
             state,
-            metadata: {
-              name: command.name,
-              ...(command.description
-                ? { description: command.description }
-                : {}),
-            },
+            metadata: metadataWithDescription(command.name, command.description),
           };
         }
 
@@ -483,12 +502,7 @@ export function createAgentConfigurationBootstrap(
           created: true,
           replayed: false,
           state,
-          metadata: {
-            name: command.name,
-            ...(command.description
-              ? { description: command.description }
-              : {}),
-          },
+          metadata: metadataWithDescription(command.name, command.description),
         };
       });
 
