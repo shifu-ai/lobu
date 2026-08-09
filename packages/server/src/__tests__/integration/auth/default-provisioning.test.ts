@@ -524,6 +524,102 @@ describe('ensureDefaultAgent', () => {
     }
   });
 
+  it('does not repair owner, mappings, or settings after an applied release receipt seals native control', async () => {
+    const providerSpy = vi
+      .spyOn(moduleSystem, 'getModelProviderModules')
+      .mockReturnValue([{
+        providerId: 'system-provider',
+        hasSystemKey: () => true,
+      } as never]);
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const orgId = `org-release-sealed-default-${generateSecureToken(4)}`;
+      const ownerUserId = `user_${generateSecureToken(4)}`;
+      await seedOrg(orgId);
+      const sql = getTestDb();
+      await sql`
+        INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+        VALUES (${ownerUserId}, 'Release Owner', ${`${ownerUserId}@test.local`}, true, NOW(), NOW())
+      `;
+      await sql`
+        UPDATE "organization"
+        SET metadata = ${JSON.stringify({
+          personal_org_for_user_id: ownerUserId,
+          [DEFAULT_AGENT_SENTINEL]: new Date().toISOString(),
+        })}
+        WHERE id = ${orgId}
+      `;
+      await sql`
+        INSERT INTO agents (
+          id, organization_id, name, owner_platform, owner_user_id,
+          identity_md, installed_providers
+        ) VALUES (
+          ${DEFAULT_AGENT_ID}, ${orgId}, 'Release Sealed Owletto', 'lobu', NULL,
+          '', '[]'::jsonb
+        )
+      `;
+      await sql`
+        INSERT INTO agent_configuration_controls (
+          organization_id, agent_id, management_mode, configuration_revision
+        ) VALUES (${orgId}, ${DEFAULT_AGENT_ID}, 'native', 5)
+      `;
+      const digest = `sha256:${'a'.repeat(64)}`;
+      await sql`
+        INSERT INTO agent_release_applies (
+          organization_id, agent_id, environment,
+          desired_release_id, desired_release_sequence, desired_feed_sequence,
+          applied_release_id, applied_release_sequence, applied_feed_sequence,
+          applied_channel, applied_feed_digest, manifest_digest, status,
+          revision_ref, settings_hash
+        ) VALUES (
+          ${orgId}, ${DEFAULT_AGENT_ID}, 'production',
+          'default-release-seal', 1, 1,
+          'default-release-seal', 1, 1,
+          'stable', ${digest}, ${digest}, 'applied',
+          'lobu:default-release-seal:1', ${digest}
+        )
+      `;
+
+      await ensureDefaultAgent(orgId);
+
+      const aggregate = await sql`
+        SELECT a.owner_platform, a.owner_user_id, a.identity_md, a.installed_providers,
+               c.management_mode, c.configuration_revision::text AS revision,
+               (SELECT count(*)::int FROM agent_users au
+                WHERE au.organization_id = a.organization_id
+                  AND au.agent_id = a.id) AS mapping_count,
+               (SELECT count(*)::int FROM agent_configuration_commands command_row
+                WHERE command_row.organization_id = a.organization_id
+                  AND command_row.agent_id = a.id) AS command_count
+        FROM agents a
+        JOIN agent_configuration_controls c
+          ON c.organization_id = a.organization_id AND c.agent_id = a.id
+        WHERE a.organization_id = ${orgId} AND a.id = ${DEFAULT_AGENT_ID}
+      `;
+      expect(aggregate).toEqual([{
+        owner_platform: 'lobu',
+        owner_user_id: null,
+        identity_md: '',
+        installed_providers: [],
+        management_mode: 'native',
+        revision: '5',
+        mapping_count: 0,
+        command_count: 0,
+      }]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          organizationId: orgId,
+          agentId: DEFAULT_AGENT_ID,
+          reason: 'managed_configuration_sealed',
+        }),
+        expect.stringContaining('backfill deferred')
+      );
+    } finally {
+      warnSpy.mockRestore();
+      providerSpy.mockRestore();
+    }
+  });
+
   it('does not overwrite a concurrent identity repair after its observed revision goes stale', async () => {
     const providerSpy = vi
       .spyOn(moduleSystem, 'getModelProviderModules')

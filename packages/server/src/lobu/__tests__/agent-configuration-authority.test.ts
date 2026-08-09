@@ -424,6 +424,85 @@ describe('AgentConfigurationAuthority', () => {
     }]);
   });
 
+  test('rejects historical owner replay without restoring superseded Toolbox access', async () => {
+    const authority = createAgentConfigurationAuthority();
+    const agentId = 'toolbox-superseded-owner-replay';
+    const ownerA = {
+      kind: 'bootstrap' as const,
+      profile: 'toolbox_personal' as const,
+      organizationId: ORGANIZATION_ID,
+      agentId,
+      commandId: 'toolbox-owner-a-command',
+      expectedConfigurationRevision: '0',
+      actor: { kind: 'provisioning' as const },
+      name: 'Owner A bootstrap',
+      settings: { userMd: 'owner A settings' },
+      requestDigest: canonicalDigest({ owner: 'A' }),
+      ownerUserId: 'toolbox-owner-a',
+      patUserId: 'toolbox-owner-a-pat',
+      membershipId: 'toolbox-owner-a-member',
+      ownerEmail: 'toolbox-owner-a@example.invalid',
+    };
+    const ownerB = {
+      ...ownerA,
+      commandId: 'toolbox-owner-b-command',
+      expectedConfigurationRevision: '1',
+      name: 'Owner B bootstrap',
+      settings: { userMd: 'owner B settings' },
+      requestDigest: canonicalDigest({ owner: 'B' }),
+      ownerUserId: 'toolbox-owner-b',
+      patUserId: 'toolbox-owner-b-pat',
+      membershipId: 'toolbox-owner-b-member',
+      ownerEmail: 'toolbox-owner-b@example.invalid',
+    };
+
+    expect((await authority.bootstrap(ownerA)).status).toBe('applied');
+    expect((await authority.bootstrap(ownerB)).status).toBe('applied');
+    const sql = getDb();
+    await sql`
+      DELETE FROM agent_users
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${agentId}
+        AND user_id IN (${ownerA.ownerUserId}, ${ownerA.patUserId})
+    `;
+    await sql`
+      DELETE FROM "member"
+      WHERE "organizationId" = ${ORGANIZATION_ID}
+        AND "userId" = ${ownerA.ownerUserId}
+    `;
+
+    await expect(authority.bootstrap(ownerA)).resolves.toEqual({
+      status: 'rejected',
+      reason: 'bootstrap_owner_superseded',
+    });
+
+    const aggregate = await sql`
+      SELECT a.owner_platform, a.owner_user_id,
+             c.configuration_revision::text AS revision,
+             (SELECT count(*)::int FROM agent_configuration_commands command_row
+              WHERE command_row.organization_id = a.organization_id
+                AND command_row.agent_id = a.id) AS command_count,
+             (SELECT json_agg(au.user_id ORDER BY au.user_id)
+              FROM agent_users au
+              WHERE au.organization_id = a.organization_id
+                AND au.agent_id = a.id AND au.platform = 'toolbox') AS toolbox_users,
+             (SELECT count(*)::int FROM "member" m
+              WHERE m."organizationId" = a.organization_id
+                AND m."userId" = ${ownerA.ownerUserId}) AS owner_a_membership_count
+      FROM agents a
+      JOIN agent_configuration_controls c
+        ON c.organization_id = a.organization_id AND c.agent_id = a.id
+      WHERE a.organization_id = ${ORGANIZATION_ID} AND a.id = ${agentId}
+    `;
+    expect(aggregate).toEqual([{
+      owner_platform: 'toolbox',
+      owner_user_id: ownerB.ownerUserId,
+      revision: '2',
+      command_count: 2,
+      toolbox_users: [ownerB.ownerUserId],
+      owner_a_membership_count: 0,
+    }]);
+  });
+
   test('checks supplied CAS for an unreceipted existing native agent and reports truthful control state', async () => {
     const authority = createAgentConfigurationAuthority();
     const base = {

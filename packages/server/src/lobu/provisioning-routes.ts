@@ -595,7 +595,15 @@ export function createProvisioningRoutes(
           requestDigest: digest,
         });
         if (result.status === "rejected") {
-          return c.json({ error: "agent_settings_managed_by_release" }, 409);
+          return c.json(
+            {
+              error:
+                result.reason === "bootstrap_owner_superseded"
+                  ? result.reason
+                  : "agent_settings_managed_by_release",
+            },
+            409
+          );
         }
         return c.json(
           {
@@ -718,6 +726,9 @@ export function createProvisioningRoutes(
         requestDigest: digest,
       });
       if (provisioned.status === "rejected") {
+        if (provisioned.reason === "bootstrap_owner_superseded") {
+          return c.json({ error: provisioned.reason }, 409);
+        }
         return c.json(
           {
             error: "agent_settings_managed_by_release",

@@ -163,10 +163,23 @@ async function backfillDefaultAgent(
       ? ownerUserIdRaw
       : null;
 
-  const ownerRepair = ownerUserId
-    ? await repairDefaultAgentOwner(organizationId, ownerUserId, client)
-    : { status: 'unchanged' as const, ownerFixed: false, mappingEnsured: false };
-  if (ownerRepair.status === 'managed') {
+  const ownerRepair = await repairDefaultAgentOwner(
+    organizationId,
+    ownerUserId,
+    client
+  );
+  if (ownerRepair.status === 'applied_release') {
+    logger.warn(
+      {
+        organizationId,
+        agentId: DEFAULT_AGENT_ID,
+        reason: 'managed_configuration_sealed',
+      },
+      '[default-provisioning] Managed default-agent backfill deferred'
+    );
+    return;
+  }
+  if (ownerRepair.status === 'managed_control' && ownerUserId) {
     logger.warn(
       {
         organizationId,
@@ -175,6 +188,7 @@ async function backfillDefaultAgent(
       },
       '[default-provisioning] Managed default-agent owner backfill deferred'
     );
+    return;
   }
 
   const installedNow = Array.isArray(row.installed_providers)
@@ -254,10 +268,14 @@ async function backfillDefaultAgent(
 
 async function repairDefaultAgentOwner(
   organizationId: string,
-  ownerUserId: string,
+  ownerUserId: string | null,
   client: DbClient
 ): Promise<
-  | { status: 'missing' | 'managed'; ownerFixed: false; mappingEnsured: false }
+  | {
+      status: 'missing' | 'managed_control' | 'applied_release';
+      ownerFixed: false;
+      mappingEnsured: false;
+    }
   | { status: 'repaired' | 'unchanged'; ownerFixed: boolean; mappingEnsured: boolean }
 > {
   return client.begin(async (tx) => {
@@ -288,8 +306,34 @@ async function repairDefaultAgentOwner(
       WHERE organization_id = ${organizationId} AND agent_id = ${DEFAULT_AGENT_ID}
       FOR UPDATE
     `;
+    const releaseReceipts = await tx<{
+      status: 'applying' | 'applied' | 'failed';
+      applied_at: Date | null;
+    }>`
+      SELECT status, applied_at
+      FROM agent_release_applies
+      WHERE organization_id = ${organizationId} AND agent_id = ${DEFAULT_AGENT_ID}
+      FOR UPDATE
+    `;
+    if (
+      releaseReceipts[0]?.status === 'applied' &&
+      releaseReceipts[0].applied_at !== null
+    ) {
+      return {
+        status: 'applied_release',
+        ownerFixed: false,
+        mappingEnsured: false,
+      } as const;
+    }
     if (controls[0]?.management_mode === 'toolbox_managed') {
-      return { status: 'managed', ownerFixed: false, mappingEnsured: false } as const;
+      return {
+        status: 'managed_control',
+        ownerFixed: false,
+        mappingEnsured: false,
+      } as const;
+    }
+    if (!ownerUserId) {
+      return { status: 'unchanged', ownerFixed: false, mappingEnsured: false } as const;
     }
 
     const ownerFixed =

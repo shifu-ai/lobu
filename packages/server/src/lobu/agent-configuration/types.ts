@@ -90,6 +90,7 @@ export type AgentConfigurationRejectionReason =
   | 'runtime_field_requires_runtime_api'
   | 'credential_field_requires_credential_api'
   | 'managed_configuration_sealed'
+  | 'bootstrap_owner_superseded'
   | 'invalid_release'
   | 'stale_release'
   | 'environment_mismatch'
@@ -192,4 +193,7 @@ export type AgentConfigurationBootstrapResult =
       state: BootstrapAgentConfigurationState;
       metadata: { name: string; description?: string };
     }
-  | { status: 'rejected'; reason: 'managed_configuration_sealed' };
+  | {
+      status: 'rejected';
+      reason: 'managed_configuration_sealed' | 'bootstrap_owner_superseded';
+    };

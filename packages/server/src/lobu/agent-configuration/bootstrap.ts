@@ -253,8 +253,10 @@ export function createAgentConfigurationBootstrap(
         const existingMetadata = await tx<{
           name: string;
           description: string | null;
+          owner_platform: string | null;
+          owner_user_id: string | null;
         }>`
-          SELECT name, description FROM agents
+          SELECT name, description, owner_platform, owner_user_id FROM agents
           WHERE organization_id = ${command.organizationId} AND id = ${command.agentId}
         `;
         const replay = await findConfigurationCommand(tx, command);
@@ -351,6 +353,15 @@ export function createAgentConfigurationBootstrap(
                   control.configurationRevision
                 );
               }
+              if (
+                existingMetadata[0]?.owner_platform !== 'toolbox' ||
+                existingMetadata[0]?.owner_user_id !== command.ownerUserId
+              ) {
+                return {
+                  status: 'rejected',
+                  reason: 'bootstrap_owner_superseded',
+                } as const;
+              }
               const role = await ensureToolboxPrincipalAndMembership(tx, command);
               const prior = replay;
               const settingsDigest =
@@ -381,6 +392,15 @@ export function createAgentConfigurationBootstrap(
             );
           }
           if (replay) {
+            if (
+              existingMetadata[0]?.owner_platform !== 'toolbox' ||
+              existingMetadata[0]?.owner_user_id !== command.ownerUserId
+            ) {
+              return {
+                status: 'rejected',
+                reason: 'bootstrap_owner_superseded',
+              } as const;
+            }
             const role = await ensureToolboxPrincipalAndMembership(tx, command);
             return {
               status: 'already_applied' as const,
