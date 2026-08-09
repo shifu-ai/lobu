@@ -43,10 +43,15 @@ import {
   type WorkerShifuTraceContext,
 } from "../shared/journey-trace";
 import { getApiKeyEnvVarForProvider } from "../shared/provider-auth-hints";
-import type { GatewayParams } from "../shared/tool-implementations";
+import {
+  callToolboxPersonalAgentTool,
+  type GatewayParams,
+} from "../shared/tool-implementations";
 import { isRecord } from "../shared/type-guards";
 import { buildTrustedAutomationModificationTurnContext } from "./automation-modification-context";
 import { buildCalendarResolverInstructions } from "./calendar-resolver-guidance";
+import { maybeProposeCompanyWikiCapture } from "./company-wiki-capture";
+import { maybeRecallCompanyWiki } from "./company-wiki-recall";
 import {
   checkCompletionClaim,
   getRequiredBattleReportMutationTools,
@@ -1499,7 +1504,6 @@ export async function runAISession(
     // token, whose claims these are not.
     verifiedTokenClaims: runJobToken ? verifiedRunTokenClaims : undefined,
   });
-
   // Sync enabled skills to workspace filesystem so the agent can `cat` them.
   // Remove stale skill directories to avoid serving removed/disabled skills.
   const skillsRoot = path.join(workspaceDir, ".skills");
@@ -3140,7 +3144,45 @@ Use it when the user references past discussions or you need context.`);
       })
       .join("\n\n");
 
-    const inlinePromptPrefix = `${configNotice}${sessionSummary ? `${sessionSummary}\n\n` : ""}${prependContexts ? `${prependContexts}\n\n` : ""}`;
+    const releaseCapabilityIds =
+      context.releaseState?.status === "active"
+        ? context.releaseState.claim.capabilityIds
+        : [];
+    const toolboxWikiRecallToolGroup = context.toolboxPersonalAgentTools.find(
+      (group) =>
+        group.connectorKey === "shifu_toolbox" &&
+        group.tools.some(
+          (tool) =>
+            tool.name === "wiki_recall_context" ||
+            tool.connectorToolName === "wiki_recall_context"
+        )
+    );
+    const toolboxWikiRecallTool = toolboxWikiRecallToolGroup?.tools.find(
+      (tool) =>
+        tool.name === "wiki_recall_context" ||
+        tool.connectorToolName === "wiki_recall_context"
+    );
+    let companyWikiContext = "";
+    if (toolboxWikiRecallToolGroup && toolboxWikiRecallTool) {
+      const recallResult = await maybeRecallCompanyWiki({
+        capabilityIds: releaseCapabilityIds,
+        userMessage: userPrompt,
+        callTool: async (_toolName, args) =>
+          callToolboxPersonalAgentTool(gwParams, {
+            connectorKey: toolboxWikiRecallToolGroup.connectorKey,
+            connectionRef: toolboxWikiRecallToolGroup.connectionRef,
+            connectorToolName: toolboxWikiRecallTool.connectorToolName,
+            toolArgs: args,
+          }),
+      });
+      if (recallResult.status === "recalled") {
+        companyWikiContext = recallResult.contextText;
+      } else if (recallResult.status === "failed") {
+        logger.warn(`Company Wiki recall failed: ${recallResult.reason}`);
+      }
+    }
+
+    const inlinePromptPrefix = `${configNotice}${sessionSummary ? `${sessionSummary}\n\n` : ""}${prependContexts ? `${prependContexts}\n\n` : ""}${companyWikiContext ? `${companyWikiContext}\n\n` : ""}`;
     const contextPreparedPrompt = await prepareUserPromptForContext({
       workspaceDir,
       promptText: userPrompt,
@@ -3300,6 +3342,44 @@ Use it when the user references past discussions or you need context.`);
     if (bufferCurrentTurnOutputForFinalGuards) {
       pendingDelta = guardedFinalText;
       await flushDelta();
+    }
+
+    const toolboxWikiToolGroup = context.toolboxPersonalAgentTools.find(
+      (group) =>
+        group.connectorKey === "shifu_toolbox" &&
+        group.tools.some(
+          (tool) =>
+            tool.name === "wiki_propose_from_conversation" ||
+            tool.connectorToolName === "wiki_propose_from_conversation"
+        )
+    );
+    const toolboxWikiTool = toolboxWikiToolGroup?.tools.find(
+      (tool) =>
+        tool.name === "wiki_propose_from_conversation" ||
+        tool.connectorToolName === "wiki_propose_from_conversation"
+    );
+    if (toolboxWikiToolGroup && toolboxWikiTool) {
+      void maybeProposeCompanyWikiCapture({
+        capabilityIds: releaseCapabilityIds,
+        messages: [
+          { role: "user", content: userPrompt },
+          { role: "assistant", content: guardedFinalText },
+        ],
+        conversationId,
+        runId: messageId,
+        agentId: agentId || context.agentId,
+        callTool: async (_toolName, args) =>
+          callToolboxPersonalAgentTool(gwParams, {
+            connectorKey: toolboxWikiToolGroup.connectorKey,
+            connectionRef: toolboxWikiToolGroup.connectionRef,
+            connectorToolName: toolboxWikiTool.connectorToolName,
+            toolArgs: args,
+          }),
+      }).then((result) => {
+        if (result.status === "failed") {
+          logger.warn(`Company Wiki capture proposal failed: ${result.reason}`);
+        }
+      });
     }
 
     progressProcessor.setFinalResult({
