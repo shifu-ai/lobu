@@ -50,7 +50,7 @@ import {
 } from "./sales-battle-report-schedule-reconcile.js";
 import {
   AGENT_ID_PATTERN,
-  createPostgresAgentConfigStore,
+  createPostgresAgentConfigReadMetadataStore,
   createPostgresAgentConnectionStore,
 } from "./stores/postgres-stores";
 import { parseStrictJsonBytes, StrictJsonError } from "./strict-json-parser.js";
@@ -85,7 +85,7 @@ export type ShifuMcpStatusReasonCode =
   | "runtime_status_unavailable"
   | "ui_unmanaged_connector";
 
-const configStore = createPostgresAgentConfigStore();
+const configStore = createPostgresAgentConfigReadMetadataStore();
 const connectionStore = createPostgresAgentConnectionStore();
 const grantStore = new GrantStore();
 

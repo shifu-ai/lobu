@@ -29,6 +29,7 @@ import { getDb } from "../../db/client.js";
 import { createCourseMemoryRuntimeService } from "../../lobu/course-memory-runtime-service.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { createPostgresAgentConfigStore } from "../../lobu/stores/postgres-stores.js";
+import { seedAgentSettings } from "../../lobu/__tests__/helpers/agent-settings-fixture.js";
 import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
 import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import type { SettingsTokenPayload } from "../auth/settings/token-service.js";
@@ -564,11 +565,7 @@ describe("agent CRUD: access control and input validation", () => {
 
   test("owner can delete an agent after a course projection while retaining its immutable receipt", async () => {
     const sql = getDb();
-    await orgContext.run({ organizationId: ORG_A }, () =>
-      createPostgresAgentConfigStore().updateSettings("my-agent", {
-        soulMd: "must be removed",
-      })
-    );
+    await seedAgentSettings(ORG_A, "my-agent", { soulMd: "must be removed" });
     const bindings = new Set(["line:delete-regression"]);
     const channelBindingService = {
       async getBinding() { return null; },

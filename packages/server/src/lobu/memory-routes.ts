@@ -14,11 +14,11 @@ import {
   createCourseMemoryRuntimeService,
   parseCourseMemoryApplyCommand,
 } from './course-memory-runtime-service';
-import { createPostgresAgentConfigStore } from './stores/postgres-stores';
+import { createPostgresAgentConfigReadMetadataStore } from './stores/postgres-stores';
 import { parseStrictJsonBytes, StrictJsonError } from './strict-json-parser';
 
 const memoryRoutes = new Hono<{ Bindings: Env }>();
-const configStore = createPostgresAgentConfigStore();
+const configStore = createPostgresAgentConfigReadMetadataStore();
 type MemoryContext = Context<{ Bindings: Env }>;
 const LOG_SAFE_METADATA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,199}$/;
 

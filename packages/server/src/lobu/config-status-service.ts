@@ -17,7 +17,7 @@ import {
 	statusReasonForConnector,
 } from "./provisioning-routes.js";
 import { orgContext } from "./stores/org-context.js";
-import { createPostgresAgentConfigStore } from "./stores/postgres-stores.js";
+import { createPostgresAgentConfigReadMetadataStore } from "./stores/postgres-stores.js";
 
 export type LobuConnectorKey = ToolboxMcpStatusConnectorKey | (string & {});
 export type LobuOAuthStatus =
@@ -447,7 +447,7 @@ function resolveStoredCredentialInspector(
 export function createLobuConfigStatusService(
 	options: LobuConfigStatusServiceOptions = {},
 ): LobuConfigStatusService {
-	const store = options.store ?? createPostgresAgentConfigStore();
+	const store = options.store ?? createPostgresAgentConfigReadMetadataStore();
 	const oauthStatusProvider = options.oauthStatusProvider;
 	const toolInventoryProvider = options.toolInventoryProvider;
 	const inspectStoredCredentialStatus =

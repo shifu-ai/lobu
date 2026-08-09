@@ -35,6 +35,7 @@ import {
 } from '../lobu/stores/postgres-secret-store';
 import { orgContext } from '../lobu/stores/org-context';
 import { createPostgresAgentConfigStore } from '../lobu/stores/postgres-stores';
+import { seedAgentSettings } from '../lobu/__tests__/helpers/agent-settings-fixture';
 import { SecretStoreRegistry } from '../gateway/secrets/index';
 import { cleanupTestDatabase, getTestDb } from './setup/test-db';
 import {
@@ -131,9 +132,8 @@ describe('ChatResponseBridge — wired output guardrail', () => {
     const agent = await createTestAgent({ organizationId: orgId });
     agentId = agent.agentId;
 
-    const configStore = createPostgresAgentConfigStore();
     await orgContext.run({ organizationId: orgId }, async () => {
-      await configStore.saveSettings(agentId, {
+      await seedAgentSettings(orgId, agentId, {
         guardrails: ['secret-scan'],
         updatedAt: Date.now(),
       });
@@ -465,9 +465,8 @@ describe('MessageConsumer — wired input guardrail', () => {
     const agent = await createTestAgent({ organizationId: orgId });
     agentId = agent.agentId;
 
-    const configStore = createPostgresAgentConfigStore();
     await orgContext.run({ organizationId: orgId }, async () => {
-      await configStore.saveSettings(agentId, {
+      await seedAgentSettings(orgId, agentId, {
         guardrails: ['test-input-tripper'],
         updatedAt: Date.now(),
       });
@@ -661,9 +660,8 @@ describe('McpProxy — wired pre-tool guardrail', () => {
     const agent = await createTestAgent({ organizationId: orgId });
     agentId = agent.agentId;
 
-    const configStore = createPostgresAgentConfigStore();
     await orgContext.run({ organizationId: orgId }, async () => {
-      await configStore.saveSettings(agentId, {
+      await seedAgentSettings(orgId, agentId, {
         guardrails: ['forbidden-tools'],
         updatedAt: Date.now(),
       });

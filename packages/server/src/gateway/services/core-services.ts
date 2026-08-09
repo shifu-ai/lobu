@@ -2,6 +2,7 @@
 
 import {
   type AgentAccessStore,
+  type AgentConfigReadMetadataStore,
   type AgentConfigStore,
   type AgentConnectionStore,
   CommandRegistry,
@@ -181,7 +182,7 @@ export class CoreServices {
   // ============================================================================
   // Agent Sub-Stores (injectable — host can provide its own implementations)
   // ============================================================================
-  private configStore?: AgentConfigStore;
+  private configStore?: AgentConfigReadMetadataStore;
   private connectionStore?: AgentConnectionStore;
   private accessStore?: AgentAccessStore;
 
@@ -192,7 +193,7 @@ export class CoreServices {
 
   // Options stored for deferred initialization
   private options?: {
-    configStore?: AgentConfigStore;
+    configStore?: AgentConfigReadMetadataStore;
     connectionStore?: AgentConnectionStore;
     accessStore?: AgentAccessStore;
     providerRegistry?: ProviderRegistryEntry[];
@@ -205,7 +206,7 @@ export class CoreServices {
   constructor(
     private readonly config: GatewayConfig,
     options?: {
-      configStore?: AgentConfigStore;
+      configStore?: AgentConfigReadMetadataStore;
       connectionStore?: AgentConnectionStore;
       accessStore?: AgentAccessStore;
       providerRegistry?: ProviderRegistryEntry[];
@@ -222,7 +223,7 @@ export class CoreServices {
     if (options?.accessStore) this.accessStore = options.accessStore;
   }
 
-  getConfigStore(): AgentConfigStore | undefined {
+  getConfigStore(): AgentConfigReadMetadataStore | undefined {
     return this.configStore;
   }
 
@@ -387,10 +388,10 @@ export class CoreServices {
     this.channelBindingService = new ChannelBindingService();
     this.userAgentsStore = new UserAgentsStore();
 
-    // Initialize agent sub-stores. The configStore here owns all Postgres I/O
-    // for agent settings + metadata; the AgentSettingsStore / AgentMetadataStore
-    // wrappers below add the declared-agent overlay and convenience helpers
-    // without duplicating the storage layer.
+    // Initialize agent sub-stores. Persistent configStore implementations expose
+    // settings reads and metadata lifecycle only; revisioned settings writes use
+    // agentConfigurationMutationPort. The built-in in-memory store implements
+    // both surfaces for SDK-embedded mode.
     if (!this.configStore || !this.connectionStore || !this.accessStore) {
       if (this.config.agents?.length) {
         const inMemoryStore = new InMemoryAgentStore();
@@ -426,7 +427,9 @@ export class CoreServices {
       logger.debug("Using injected persistent agent configuration authority");
     } else if (usesBuiltInInMemoryStore) {
       embeddedConfigurationAdapter =
-        new EmbeddedInMemoryAgentConfigurationMutationAdapter(this.configStore);
+        new EmbeddedInMemoryAgentConfigurationMutationAdapter(
+          this.configStore as AgentConfigStore
+        );
       this.agentConfigurationMutationPort = embeddedConfigurationAdapter;
       logger.debug(
         "Using built-in embedded in-memory agent configuration mutation adapter"

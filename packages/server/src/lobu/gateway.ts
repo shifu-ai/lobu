@@ -41,7 +41,7 @@ import { PostgresSecretStore } from './stores/postgres-secret-store';
 import { createRuntimeAgentConfigurationAuthority } from './agent-configuration';
 import {
   createPostgresAgentAccessStore,
-  createPostgresAgentConfigStore,
+  createPostgresAgentConfigReadMetadataStore,
   createPostgresAgentConnectionStore,
 } from './stores/postgres-stores';
 
@@ -341,7 +341,7 @@ export async function initLobuGateway(): Promise<Hono | null> {
     orchestrator = new Orchestrator(gatewayConfig.orchestration);
 
     // Create PostgreSQL-backed stores
-    const configStore = createPostgresAgentConfigStore();
+    const configStore = createPostgresAgentConfigReadMetadataStore();
     const connectionStore = createPostgresAgentConnectionStore();
     const accessStore = createPostgresAgentAccessStore();
     const postgresSecretStore = new PostgresSecretStore();

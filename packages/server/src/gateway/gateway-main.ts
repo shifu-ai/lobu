@@ -2,7 +2,7 @@
 
 import {
   type AgentAccessStore,
-  type AgentConfigStore,
+  type AgentConfigReadMetadataStore,
   type AgentConnectionStore,
   createLogger,
   type ProviderRegistryEntry,
@@ -36,7 +36,7 @@ const logger = createLogger("gateway");
  */
 export interface GatewayOptions {
   /** Agent settings + metadata store. Defaults to InMemoryAgentStore. */
-  configStore?: AgentConfigStore;
+  configStore?: AgentConfigReadMetadataStore;
   /** Connections + channel bindings store. Defaults to InMemoryAgentStore. */
   connectionStore?: AgentConnectionStore;
   /** Grants + user-agent associations store. Defaults to InMemoryAgentStore. */

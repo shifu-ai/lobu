@@ -28,7 +28,7 @@ import {
 } from './onboarding-discovery-job-service';
 import {
   AGENT_ID_PATTERN,
-  createPostgresAgentConfigStore,
+  createPostgresAgentConfigReadMetadataStore,
   createPostgresAgentConnectionStore,
 } from './stores/postgres-stores';
 import { orgContext } from './stores/org-context';
@@ -71,7 +71,7 @@ function toStringArray(value: unknown): string[] {
   return [];
 }
 
-const configStore = createPostgresAgentConfigStore();
+const configStore = createPostgresAgentConfigReadMetadataStore();
 const connectionStore = createPostgresAgentConnectionStore();
 const agentConfigurationAuthority = createAgentConfigurationAuthority();
 

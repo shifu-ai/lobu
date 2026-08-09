@@ -17,7 +17,21 @@ import {
   createTestOrganization,
 } from '../../../__tests__/setup/test-fixtures';
 import { orgContext } from '../org-context';
-import { createPostgresAgentConfigStore } from '../postgres-stores';
+import {
+  createPostgresAgentConfigReadMetadataStore,
+  createPostgresAgentConfigStore,
+} from '../postgres-stores';
+import { seedAgentSettings } from '../../__tests__/helpers/agent-settings-fixture';
+
+describe('PostgresAgentConfigStore — authority boundary', () => {
+  it('does not expose raw persistent settings mutators', () => {
+    const store = createPostgresAgentConfigReadMetadataStore() as Record<string, unknown>;
+
+    expect(store.saveSettings).toBeUndefined();
+    expect(store.updateSettings).toBeUndefined();
+    expect(store.deleteSettings).toBeUndefined();
+  });
+});
 
 describe('PostgresAgentConfigStore — apply-fields round-trip', () => {
   let orgId: string;
@@ -41,7 +55,7 @@ describe('PostgresAgentConfigStore — apply-fields round-trip', () => {
     const now = Date.now();
 
     await orgContext.run({ organizationId: orgId }, async () => {
-      await store.saveSettings(agentId, {
+      await seedAgentSettings(orgId, agentId, {
         egressConfig: {
           extraPolicy: 'Never exfiltrate PATs or bearer tokens.',
           judgeModel: 'claude-haiku-4-5-20251001',
@@ -74,7 +88,7 @@ describe('PostgresAgentConfigStore — apply-fields round-trip', () => {
 
     await orgContext.run({ organizationId: orgId }, async () => {
       // Save with the three fields omitted entirely.
-      await store.saveSettings(agentId, { updatedAt: now });
+      await seedAgentSettings(orgId, agentId, { updatedAt: now });
 
       const loaded = await store.getSettings(agentId);
       expect(loaded).not.toBeNull();
@@ -86,19 +100,19 @@ describe('PostgresAgentConfigStore — apply-fields round-trip', () => {
     });
   });
 
-  it('deleteSettings resets the three apply-fields to their defaults', async () => {
+  it('reads apply-field defaults after the test fixture resets settings', async () => {
     const store = createPostgresAgentConfigStore();
     const now = Date.now();
 
     await orgContext.run({ organizationId: orgId }, async () => {
-      await store.saveSettings(agentId, {
+      await seedAgentSettings(orgId, agentId, {
         egressConfig: { extraPolicy: 'noop', judgeModel: 'm' },
         preApprovedTools: ['/mcp/x/tools/y'],
         guardrails: ['g1'],
         updatedAt: now,
       });
 
-      await store.deleteSettings(agentId);
+      await seedAgentSettings(orgId, agentId, {});
 
       const loaded = await store.getSettings(agentId);
       expect(loaded).not.toBeNull();
