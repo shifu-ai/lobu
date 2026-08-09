@@ -190,14 +190,37 @@ export class InMemoryAgentStore extends BaseAgentStore {
     connectionId: string,
     updates: Partial<StoredConnection>
   ): Promise<void> {
-    const ownerAtStart = this.connections.get(connectionId)?.agentId;
-    const incarnation = ownerAtStart
-      ? this.captureLiveIncarnation(ownerAtStart)
+    const connectionAtStart = this.connections.get(connectionId);
+    if (!connectionAtStart) return;
+    const sourceAgentId = connectionAtStart.agentId;
+    const hasDestinationUpdate = Object.prototype.hasOwnProperty.call(
+      updates,
+      "agentId"
+    );
+    const destinationAgentId = hasDestinationUpdate
+      ? updates.agentId
+      : sourceAgentId;
+    const sourceIncarnation = sourceAgentId
+      ? this.captureLiveIncarnation(sourceAgentId)
       : null;
+    const destinationIncarnation =
+      destinationAgentId && destinationAgentId !== sourceAgentId
+        ? this.captureLiveIncarnation(destinationAgentId)
+        : sourceIncarnation;
     const existing = await this.readConnection(connectionId);
     if (!existing) return;
-    if (ownerAtStart && incarnation) {
-      this.assertCurrentIncarnation(ownerAtStart, incarnation);
+    if (sourceAgentId && sourceIncarnation) {
+      this.assertCurrentIncarnation(sourceAgentId, sourceIncarnation);
+    }
+    if (
+      destinationAgentId &&
+      destinationAgentId !== sourceAgentId &&
+      destinationIncarnation
+    ) {
+      this.assertCurrentIncarnation(
+        destinationAgentId,
+        destinationIncarnation
+      );
     }
     await this.saveConnection({
       ...existing,

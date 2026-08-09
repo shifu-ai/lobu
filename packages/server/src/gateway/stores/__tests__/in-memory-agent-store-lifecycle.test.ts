@@ -211,6 +211,88 @@ test("connection update started in an old incarnation cannot write into recreati
   });
 });
 
+test("connection reassignment cannot attach to a recreated destination", async () => {
+  let delayNextRead = false;
+  let reportReadStarted!: () => void;
+  let releaseRead!: () => void;
+  const readStarted = new Promise<void>((resolve) => {
+    reportReadStarted = resolve;
+  });
+  const readReleased = new Promise<void>((resolve) => {
+    releaseRead = resolve;
+  });
+  class DelayedReassignmentStore extends InMemoryAgentStore {
+    protected override async readConnection(connectionId: string) {
+      const snapshot = await super.readConnection(connectionId);
+      if (delayNextRead) {
+        delayNextRead = false;
+        reportReadStarted();
+        await readReleased;
+      }
+      return snapshot;
+    }
+  }
+
+  const store = new DelayedReassignmentStore();
+  const sourceAgentId = "reassignment-source-agent";
+  const destinationAgentId = "reassignment-destination-agent";
+  await store.saveMetadata(sourceAgentId, metadata(sourceAgentId));
+  await store.saveMetadata(destinationAgentId, metadata(destinationAgentId));
+  await store.saveConnection(
+    connection("delayed-reassignment", sourceAgentId)
+  );
+  delayNextRead = true;
+  const staleReassignment = store.updateConnection("delayed-reassignment", {
+    agentId: destinationAgentId,
+  });
+  await readStarted;
+
+  await store.deleteMetadata(destinationAgentId);
+  await store.saveMetadata(destinationAgentId, {
+    ...metadata(destinationAgentId),
+    name: "recreated destination",
+    createdAt: 2,
+  });
+  releaseRead();
+
+  await expect(staleReassignment).rejects.toMatchObject({
+    code: "embedded_agent_incarnation_mismatch",
+  });
+  expect(await store.getConnection("delayed-reassignment")).toMatchObject({
+    agentId: sourceAgentId,
+  });
+  expect(
+    await store.listConnections({ agentId: destinationAgentId })
+  ).toEqual([]);
+});
+
+test("connection reassignment rejects a missing destination before reading", async () => {
+  let connectionReads = 0;
+  class ObservedConnectionReadStore extends InMemoryAgentStore {
+    protected override async readConnection(connectionId: string) {
+      connectionReads += 1;
+      return super.readConnection(connectionId);
+    }
+  }
+
+  const store = new ObservedConnectionReadStore();
+  const sourceAgentId = "missing-target-source-agent";
+  await store.saveMetadata(sourceAgentId, metadata(sourceAgentId));
+  await store.saveConnection(connection("missing-target", sourceAgentId));
+
+  await expect(
+    store.updateConnection("missing-target", {
+      agentId: "absent-destination-agent",
+    })
+  ).rejects.toMatchObject({
+    code: "embedded_agent_aggregate_not_found",
+  });
+  expect(connectionReads).toBe(0);
+  expect(await store.getConnection("missing-target")).toMatchObject({
+    agentId: sourceAgentId,
+  });
+});
+
 test("adapter deletion invoked before direct creation preserves the recreation", async () => {
   const store = new InMemoryAgentStore();
   const agentId = "delete-first-recreation-agent";
