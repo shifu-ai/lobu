@@ -38,8 +38,7 @@ import { createLocalEgoWebSocketRoute } from '../gateway/browser/local-ego-webso
 import { createCourseAwareWakeRoutes } from './course-aware-wake-routes';
 import { resolveWakeThreadId } from '../scheduled/wake-target';
 import { PostgresSecretStore } from './stores/postgres-secret-store';
-import { createAgentConfigurationAuthority } from './agent-configuration';
-import { createAgentReleaseService } from './agent-release-service';
+import { createRuntimeAgentConfigurationAuthority } from './agent-configuration';
 import {
   createPostgresAgentAccessStore,
   createPostgresAgentConfigStore,
@@ -349,9 +348,7 @@ export async function initLobuGateway(): Promise<Hono | null> {
     const secretStore = new SecretStoreRegistry(postgresSecretStore, {
       secret: postgresSecretStore,
     });
-    const agentConfigurationAuthority = createAgentConfigurationAuthority(undefined, {
-      agentReleaseService: createAgentReleaseService({}),
-    });
+    const agentConfigurationAuthority = createRuntimeAgentConfigurationAuthority();
 
     gateway = new Gateway(gatewayConfig, {
       configStore,

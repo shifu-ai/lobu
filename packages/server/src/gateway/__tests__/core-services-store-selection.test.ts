@@ -180,6 +180,10 @@ describe("CoreServices store selection", () => {
     expect(source).toMatch(
       /createProvisioningRoutes\([\s\S]*?agentConfigurationAuthority,/
     );
+    expect(source).toMatch(
+      /agentConfigurationAuthority\s*=\s*createRuntimeAgentConfigurationAuthority\(\)/
+    );
+    expect(source).not.toContain("createAgentReleaseService({})");
   });
 
   test("selects the embedded adapter only for the built-in in-memory store", async () => {
@@ -199,6 +203,123 @@ describe("CoreServices store selection", () => {
     expect(
       (coreServices as any).agentConfigurationMutationPort
     ).toBeInstanceOf(EmbeddedInMemoryAgentConfigurationMutationAdapter);
+  });
+
+  test("rejects an InMemoryAgentStore subclass without an injected authority", async () => {
+    ensureEncryptionKey();
+    await resetTestDatabase();
+    class HostInMemoryStore extends InMemoryAgentStore {}
+    const store = new HostInMemoryStore();
+    const coreServices = new CoreServices(createGatewayConfig(), {
+      stateAdapter: new InMemoryStateAdapter(),
+      configStore: store,
+      connectionStore: store,
+      accessStore: store,
+    });
+    (coreServices as any).queue = new MockMessageQueue();
+
+    await expect(
+      (coreServices as any).initializeSessionServices()
+    ).rejects.toThrow(/configuration mutation port.*host-provided/i);
+  });
+
+  test("embedded agent deletion clears the aggregate before recreation", async () => {
+    ensureEncryptionKey();
+    await resetTestDatabase();
+    const store = new InMemoryAgentStore();
+    const coreServices = new CoreServices(createGatewayConfig(), {
+      stateAdapter: new InMemoryStateAdapter(),
+      configStore: store,
+      connectionStore: store,
+      accessStore: store,
+    });
+    (coreServices as any).queue = new MockMessageQueue();
+    await (coreServices as any).initializeSessionServices();
+    const metadata = coreServices.getAgentMetadataStore();
+    const settings = coreServices.getAgentSettingsStore();
+    const mutations = coreServices.getAgentConfigurationMutationPort();
+    const embeddedSubject = {
+      organizationId: "embedded-org",
+      agentId: "embedded-lifecycle-agent",
+    };
+
+    await metadata.createAgent(
+      embeddedSubject.agentId,
+      "Embedded Lifecycle",
+      "external",
+      "owner-1"
+    );
+    expect(await settings.getSettings(embeddedSubject.agentId)).toMatchObject({
+      updatedAt: expect.any(Number),
+    });
+    expect(
+      (await mutations.readAppliedState(embeddedSubject))?.configurationRevision
+    ).toBe("0");
+    settings.getEphemeralAuthProfiles().set(embeddedSubject.agentId, [
+      {
+        id: "ephemeral-credential",
+        provider: "authority-test",
+        credential: "embedded-secret",
+        authType: "api-key",
+        label: "ephemeral",
+        model: "*",
+        createdAt: 1,
+      },
+    ]);
+    let reportMutationWrite!: () => void;
+    let releaseMutationWrite!: () => void;
+    const mutationWriteStarted = new Promise<void>((resolve) => {
+      reportMutationWrite = resolve;
+    });
+    const mutationWriteReleased = new Promise<void>((resolve) => {
+      releaseMutationWrite = resolve;
+    });
+    const updateSettings = store.updateSettings.bind(store);
+    store.updateSettings = async (agentId, patch) => {
+      reportMutationWrite();
+      await mutationWriteReleased;
+      await updateSettings(agentId, patch);
+    };
+    const mutation = mutations.updateNativeConfiguration({
+      ...embeddedSubject,
+      commandId: "embedded-lifecycle-command",
+      expectedConfigurationRevision: "0",
+      actor: { kind: "provider_catalog" },
+      patch: { identityMd: "before delete" },
+    });
+    await mutationWriteStarted;
+    const deletion = metadata.deleteAgent(embeddedSubject.agentId);
+    await Promise.resolve();
+    expect(await settings.getSettings(embeddedSubject.agentId)).not.toBeNull();
+    releaseMutationWrite();
+    expect((await mutation).status).toBe("applied");
+    await deletion;
+    expect(await settings.getSettings(embeddedSubject.agentId)).toBeNull();
+    expect(
+      settings.getEphemeralAuthProfiles().get(embeddedSubject.agentId)
+    ).toBeUndefined();
+    expect(await mutations.readAppliedState(embeddedSubject)).toBeNull();
+
+    await metadata.createAgent(
+      embeddedSubject.agentId,
+      "Embedded Lifecycle Recreated",
+      "external",
+      "owner-2"
+    );
+    expect(
+      (await mutations.readAppliedState(embeddedSubject))?.configurationRevision
+    ).toBe("0");
+    expect(
+      (
+        await mutations.updateNativeConfiguration({
+          ...embeddedSubject,
+          commandId: "embedded-lifecycle-command",
+          expectedConfigurationRevision: "0",
+          actor: { kind: "provider_catalog" },
+          patch: { identityMd: "after recreate" },
+        })
+      ).status
+    ).toBe("applied");
   });
 
   test("uses the host-provided secret store for persisted auth profiles", async () => {

@@ -415,14 +415,19 @@ export class CoreServices {
     }
 
     this.agentSettingsStore = new AgentSettingsStore(this.configStore);
-    this.agentMetadataStore = new AgentMetadataStore(this.configStore);
+    let embeddedConfigurationAdapter:
+      | EmbeddedInMemoryAgentConfigurationMutationAdapter
+      | undefined;
+    const usesBuiltInInMemoryStore =
+      Object.getPrototypeOf(this.configStore) === InMemoryAgentStore.prototype;
     if (this.options?.agentConfigurationMutationPort) {
       this.agentConfigurationMutationPort =
         this.options.agentConfigurationMutationPort;
       logger.debug("Using injected persistent agent configuration authority");
-    } else if (this.configStore instanceof InMemoryAgentStore) {
-      this.agentConfigurationMutationPort =
+    } else if (usesBuiltInInMemoryStore) {
+      embeddedConfigurationAdapter =
         new EmbeddedInMemoryAgentConfigurationMutationAdapter(this.configStore);
+      this.agentConfigurationMutationPort = embeddedConfigurationAdapter;
       logger.debug(
         "Using built-in embedded in-memory agent configuration mutation adapter"
       );
@@ -431,6 +436,29 @@ export class CoreServices {
         "Agent configuration mutation port is required for host-provided config stores"
       );
     }
+    this.agentMetadataStore = new AgentMetadataStore(
+      this.configStore,
+      usesBuiltInInMemoryStore
+        ? {
+            deleteAgent: async (agentId, deleteMetadata) => {
+              const deleteAggregate = async () => {
+                await deleteMetadata();
+                this.agentSettingsStore!
+                  .getEphemeralAuthProfiles()
+                  .delete(agentId);
+              };
+              if (embeddedConfigurationAdapter) {
+                await embeddedConfigurationAdapter.deleteAgent(
+                  agentId,
+                  deleteAggregate
+                );
+              } else {
+                await deleteAggregate();
+              }
+            },
+          }
+        : undefined
+    );
     logger.debug(
       "Agent settings, channel binding, user agents & metadata stores initialized"
     );
@@ -1050,6 +1078,13 @@ export class CoreServices {
     if (!this.agentSettingsStore)
       throw new Error("Agent settings store not initialized");
     return this.agentSettingsStore;
+  }
+
+  getAgentConfigurationMutationPort(): AgentConfigurationMutationPort {
+    if (!this.agentConfigurationMutationPort) {
+      throw new Error("Agent configuration mutation port not initialized");
+    }
+    return this.agentConfigurationMutationPort;
   }
 
   getChannelBindingService(): ChannelBindingService {

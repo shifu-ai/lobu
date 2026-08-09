@@ -15,9 +15,8 @@ import { AgentConfigurationError } from './errors';
 import {
   LEGACY_MANAGED_RELEASE_SETTING_KEYS,
   PERSONAL_BASELINE_RELEASE_SETTING_KEYS,
-  normalizeNativeSettingsPatchForPersistence,
-  parseNativeSettingsPatch,
 } from './field-ownership';
+import { materializeNativePatchCommand } from './native-patch';
 import {
   applyNativePatchInTransaction,
   enrollToolboxManagedInTransaction,
@@ -37,7 +36,6 @@ import type {
   ManagedReleaseCommandInput,
   ManagedReleaseConfigurationResult,
   ManagedEnrollmentCommand,
-  NativePatchCommand,
   NativePatchCommandInput,
   EnrollToolboxManagedInput,
   Sha256Digest,
@@ -81,36 +79,6 @@ const RELEASE_BASELINE_SETTING_KEYS = new Set([
   'baselinePrompt',
   'runtimeConfig',
 ]);
-
-function materializeNativePatchCommand(input: NativePatchCommandInput): NativePatchCommand {
-  if (
-    input.expectedConfigurationRevision !== null &&
-    !DECIMAL_REVISION_PATTERN.test(input.expectedConfigurationRevision)
-  ) {
-    throw new AgentConfigurationError('invalid_revision_precondition');
-  }
-  const parsedPatch = parseNativeSettingsPatch(input.patch);
-  const patch = parseNativeSettingsPatch(JSON.parse(canonicalize(parsedPatch)));
-  const canonicalCommand = {
-    kind: 'native_patch',
-    agentId: input.agentId,
-    expectedRevision: input.expectedConfigurationRevision,
-    patch: normalizeNativeSettingsPatchForPersistence(patch),
-  };
-  const commandDigest = `sha256:${createHash('sha256')
-    .update(canonicalize(canonicalCommand))
-    .digest('hex')}` as Sha256Digest;
-  return {
-    organizationId: input.organizationId,
-    agentId: input.agentId,
-    commandId: input.commandId,
-    expectedConfigurationRevision: input.expectedConfigurationRevision,
-    actor: input.actor,
-    patch,
-    kind: 'native_patch',
-    commandDigest,
-  };
-}
 
 function materializeManagedEnrollmentCommand(
   input: EnrollToolboxManagedInput,

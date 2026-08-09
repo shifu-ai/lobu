@@ -64,6 +64,9 @@ export class InMemoryAgentStore extends BaseAgentStore {
 
   async saveMetadata(agentId: string, metadata: AgentMetadata): Promise<void> {
     this.metadata.set(agentId, metadata);
+    if (!this.settings.has(agentId)) {
+      this.settings.set(agentId, { updatedAt: Date.now() });
+    }
   }
 
   async updateMetadata(
@@ -77,6 +80,7 @@ export class InMemoryAgentStore extends BaseAgentStore {
 
   protected async deleteMetadataRaw(agentId: string): Promise<void> {
     this.metadata.delete(agentId);
+    this.settings.delete(agentId);
   }
 
   protected async hasMetadataRaw(agentId: string): Promise<boolean> {

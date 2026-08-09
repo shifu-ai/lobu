@@ -3,6 +3,10 @@ export {
   createAgentConfigurationAuthority,
 } from './authority';
 export {
+  createRuntimeAgentConfigurationAuthority,
+  type RuntimeAgentConfigurationAuthorityOptions,
+} from './runtime-authority';
+export {
   AgentConfigurationError,
   ProvisioningFenceError,
   type AgentConfigurationErrorCode,
@@ -35,3 +39,10 @@ export {
   AGENT_CONFIGURATION_RESPONSE_VERSION,
   AGENT_CONFIGURATION_VERSION_HEADER,
 } from './types';
+export {
+  digestAgentConfigurationSettings,
+  materializeNativePatchCommand,
+  projectAgentConfigurationSettings,
+  projectAgentConfigurationSettingsAfterPatch,
+  sha256Canonical,
+} from './native-patch';

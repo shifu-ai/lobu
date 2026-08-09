@@ -33,13 +33,12 @@ import {
   ProvisioningFenceError,
   type AgentConfigurationAuthority,
   type AgentConfigurationResponseVersion,
-  createAgentConfigurationAuthority,
+  createRuntimeAgentConfigurationAuthority,
   type Sha256Digest,
 } from "./agent-configuration/index.js";
 import { parseNativeSettingsPatch } from "./agent-configuration/field-ownership.js";
 import {
   AgentReleaseError,
-  createAgentReleaseService,
 } from "./agent-release-service.js";
 import {
   validateExpectedGrantPatterns,
@@ -257,24 +256,19 @@ export function createProvisioningRoutes(
   options: ProvisioningRoutesOptions = {}
 ): Hono<{ Bindings: Env }> {
   const provisioningRoutes = new Hono<{ Bindings: Env }>();
-  const agentReleaseService = createAgentReleaseService({
-    trustedPublicKeysJson:
-      options.agentReleaseTrustedPublicKeysJson ??
-      process.env.AGENT_RELEASE_TRUSTED_PUBLIC_KEYS_JSON,
-    evidenceSigningPrivateKeysJson:
-      options.agentReleaseEvidenceSigningPrivateKeysJson ??
-      process.env.AGENT_RELEASE_EVIDENCE_SIGNING_PRIVATE_KEYS_JSON,
-    expectedEnvironment:
-      options.agentReleaseEnvironment ?? process.env.AGENT_RELEASE_ENVIRONMENT,
-    transactionHooks: options.agentReleaseTransactionHooks,
-  });
   const agentConfigurationAuthority =
     options.agentConfigurationAuthority ??
-    createAgentConfigurationAuthority(undefined, {
-      agentReleaseService,
-      readHooks: options.agentConfigurationReadHooks,
-      transactionHooks: options.agentConfigurationTransactionHooks,
-      bootstrapTransactionHooks: options.legacyProvisioningHooks,
+    createRuntimeAgentConfigurationAuthority({
+      agentReleaseTrustedPublicKeysJson:
+        options.agentReleaseTrustedPublicKeysJson,
+      agentReleaseEvidenceSigningPrivateKeysJson:
+        options.agentReleaseEvidenceSigningPrivateKeysJson,
+      agentReleaseEnvironment: options.agentReleaseEnvironment,
+      agentReleaseTransactionHooks: options.agentReleaseTransactionHooks,
+      agentConfigurationReadHooks: options.agentConfigurationReadHooks,
+      agentConfigurationTransactionHooks:
+        options.agentConfigurationTransactionHooks,
+      legacyProvisioningHooks: options.legacyProvisioningHooks,
     });
   const runtimeCapabilitySnapshotResolver =
     options.runtimeCapabilitySnapshotResolver ?? resolveRuntimeCapabilitySnapshot;
@@ -291,10 +285,11 @@ export function createProvisioningRoutes(
         const metadata = await configStore.getMetadata(agentId);
         if (!metadata || metadata.organizationId !== organizationId)
           return null;
-        const receipt = await agentReleaseService.getEvidence({
-          organizationId,
-          agentId,
-        });
+        const { evidence: receipt } =
+          await agentConfigurationAuthority.readManagedRelease({
+            organizationId,
+            agentId,
+          });
         return {
           managedReleaseReceipt: receipt,
           liveManagedSettingsDigest:

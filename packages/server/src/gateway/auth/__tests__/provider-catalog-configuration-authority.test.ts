@@ -13,6 +13,8 @@ import {
   createAgentConfigurationMutationPort,
 } from "../agent-configuration-mutation-port.js";
 import { ProviderCatalogService } from "../provider-catalog.js";
+import { getOrgId, orgContext } from "../../../lobu/stores/org-context.js";
+import { InMemoryAgentStore } from "../../stores/in-memory-agent-store.js";
 
 interface AgentConfigurationMutationPort {
   readAppliedState(input: typeof subject): Promise<AppliedAgentConfigurationState | null>;
@@ -270,6 +272,49 @@ describe("ProviderCatalogService configuration authority mutations", () => {
     expect(events).toEqual(["state", "settings", "update"]);
     expect(writes[0]?.expectedConfigurationRevision).toBe("7");
   });
+
+  test("reads settings in the explicit mutation subject tenant", async () => {
+    const observedOrganizations: string[] = [];
+    const writes: NativePatchCommandInput[] = [];
+    const catalog = new ProviderCatalogService(
+      {
+        async getSettings() {
+          const organizationId = getOrgId();
+          observedOrganizations.push(organizationId);
+          return {
+            installedProviders:
+              organizationId === subject.organizationId
+                ? [{ providerId: "other", installedAt: 10 }]
+                : [{ providerId: "ambient-only", installedAt: 20 }],
+            updatedAt: 1,
+          };
+        },
+      } as never,
+      {} as never,
+      { has: () => false } as never,
+      {
+        async readAppliedState() {
+          return appliedState("7");
+        },
+        async updateNativeConfiguration(input) {
+          writes.push(input);
+          return { status: "applied", state: appliedState("8") };
+        },
+      },
+      () => "00000000-0000-4000-8000-000000000003",
+      () => installedAt
+    );
+
+    await orgContext.run({ organizationId: "org-ambient-b" }, () =>
+      catalog.installProvider(subject, "authority-test")
+    );
+
+    expect(observedOrganizations).toEqual([subject.organizationId]);
+    expect(writes[0]?.patch.installedProviders).toEqual([
+      { providerId: "other", installedAt: 10 },
+      { providerId: "authority-test", installedAt },
+    ]);
+  });
 });
 
 test("embedded adapter serializes concurrent CAS and cleans up its subject lock", async () => {
@@ -381,6 +426,232 @@ test("embedded adapter does not let a delayed initial read overwrite committed s
 
   expect((await staleRead)?.configurationRevision).toBe("1");
   expect((await adapter.readAppliedState(subject))?.configurationRevision).toBe("1");
+});
+
+test("embedded adapter rejects the same agent id in another tenant", async () => {
+  const adapter = new EmbeddedInMemoryAgentConfigurationMutationAdapter({
+    async getSettings() {
+      return { installedProviders: [], updatedAt: 1 };
+    },
+  } as never);
+
+  expect(await adapter.readAppliedState(subject)).not.toBeNull();
+
+  await expect(
+    adapter.readAppliedState({
+      organizationId: "org-provider-other",
+      agentId: subject.agentId,
+    })
+  ).rejects.toThrow(/tenant/i);
+});
+
+test("embedded adapter matches persistent null-reset semantics", async () => {
+  const parityCases: Array<{
+    field: string;
+    initial: unknown;
+    reset: unknown;
+  }> = [
+    { field: "model", initial: "provider/model", reset: null },
+    { field: "modelSelection", initial: { mode: "auto" }, reset: {} },
+    { field: "providerModelPreferences", initial: { p: "p/m" }, reset: {} },
+    { field: "networkConfig", initial: { allowedDomains: ["a.test"] }, reset: {} },
+    { field: "egressConfig", initial: { judgeModel: "judge" }, reset: {} },
+    { field: "nixConfig", initial: { packages: ["curl"] }, reset: {} },
+    { field: "mcpServers", initial: { test: { url: "https://mcp.test" } }, reset: {} },
+    { field: "soulMd", initial: "soul", reset: "" },
+    { field: "userMd", initial: "user", reset: "" },
+    { field: "identityMd", initial: "identity", reset: "" },
+    {
+      field: "skillsConfig",
+      initial: { skills: [{ repo: "repo", name: "skill", enabled: true }] },
+      reset: { skills: [] },
+    },
+    { field: "toolsConfig", initial: { allowedTools: ["read"] }, reset: {} },
+    { field: "pluginsConfig", initial: { plugins: [] }, reset: {} },
+    {
+      field: "installedProviders",
+      initial: [{ providerId: "other", installedAt: 1 }],
+      reset: [],
+    },
+    { field: "verboseLogging", initial: true, reset: false },
+    { field: "preApprovedTools", initial: ["read"], reset: [] },
+    { field: "guardrails", initial: ["secret-scan"], reset: [] },
+  ];
+
+  for (const parityCase of parityCases) {
+    const store = new InMemoryAgentStore();
+    await store.saveMetadata(subject.agentId, {
+      agentId: subject.agentId,
+      name: "Parity",
+      owner: { platform: "test", userId: "owner" },
+      createdAt: 1,
+    });
+    await store.saveSettings(subject.agentId, {
+      [parityCase.field]: parityCase.initial,
+      updatedAt: 1,
+    } as AgentSettings);
+    const adapter = new EmbeddedInMemoryAgentConfigurationMutationAdapter(store);
+
+    const result = await adapter.updateNativeConfiguration({
+      ...subject,
+      commandId: `reset-${parityCase.field}`,
+      expectedConfigurationRevision: "0",
+      actor: { kind: "provider_catalog" },
+      patch: { [parityCase.field]: null },
+    } as never);
+
+    expect(result.status, parityCase.field).toBe("applied");
+    expect(
+      (await store.getSettings(subject.agentId))?.[
+        parityCase.field as keyof AgentSettings
+      ],
+      parityCase.field
+    ).toEqual(parityCase.reset);
+  }
+});
+
+test("embedded unchanged and empty patches are no-change without revision advance", async () => {
+  for (const patch of [{}, { identityMd: "same identity" }]) {
+    const store = new InMemoryAgentStore();
+    await store.saveMetadata(subject.agentId, {
+      agentId: subject.agentId,
+      name: "No Change",
+      owner: { platform: "test", userId: "owner" },
+      createdAt: 1,
+    });
+    await store.saveSettings(subject.agentId, {
+      identityMd: "same identity",
+      updatedAt: 1,
+    });
+    const before = await store.getSettings(subject.agentId);
+    const adapter = new EmbeddedInMemoryAgentConfigurationMutationAdapter(store);
+
+    const result = await adapter.updateNativeConfiguration({
+      ...subject,
+      commandId: `no-change-${Object.keys(patch).length}`,
+      expectedConfigurationRevision: "0",
+      actor: { kind: "provider_catalog" },
+      patch,
+    });
+
+    expect(result.status).toBe("no_change");
+    if (result.status === "no_change") {
+      expect(result.state.configurationRevision).toBe("0");
+    }
+    expect((await store.getSettings(subject.agentId))?.updatedAt).toBe(
+      before?.updatedAt
+    );
+  }
+});
+
+test("embedded canonical command replay ignores object key order", async () => {
+  const store = new InMemoryAgentStore();
+  await store.saveMetadata(subject.agentId, {
+    agentId: subject.agentId,
+    name: "Canonical Replay",
+    owner: { platform: "test", userId: "owner" },
+    createdAt: 1,
+  });
+  const adapter = new EmbeddedInMemoryAgentConfigurationMutationAdapter(store);
+  const first = await adapter.updateNativeConfiguration({
+    ...subject,
+    commandId: "canonical-replay",
+    expectedConfigurationRevision: "0",
+    actor: { kind: "provider_catalog" },
+    patch: {
+      identityMd: "canonical",
+      toolsConfig: { allowedTools: ["read"], strictMode: true },
+    },
+  });
+  const replay = await adapter.updateNativeConfiguration({
+    ...subject,
+    commandId: "canonical-replay",
+    expectedConfigurationRevision: "0",
+    actor: { kind: "provider_catalog" },
+    patch: {
+      toolsConfig: { strictMode: true, allowedTools: ["read"] },
+      identityMd: "canonical",
+    },
+  });
+
+  expect(first.status).toBe("applied");
+  expect(replay.status).toBe("already_applied");
+  expect(replay).toEqual({ status: "already_applied", state: (first as any).state });
+});
+
+test("embedded settings digest is the exact durable 17-field projection", async () => {
+  const store = new InMemoryAgentStore();
+  await store.saveMetadata(subject.agentId, {
+    agentId: subject.agentId,
+    name: "Digest Projection",
+    owner: { platform: "test", userId: "owner" },
+    createdAt: 1,
+  });
+  await store.saveSettings(subject.agentId, {
+    updatedAt: 9_999,
+    authProfiles: [
+      {
+        id: "credential",
+        provider: "other",
+        credential: "secret",
+        authType: "api-key",
+        label: "excluded",
+        model: "*",
+        createdAt: 1,
+      },
+    ],
+    mcpInstallNotified: { runtime: 1 },
+  });
+  const adapter = new EmbeddedInMemoryAgentConfigurationMutationAdapter(store);
+
+  const state = await adapter.readAppliedState(subject);
+
+  expect(state?.settingsDigest).toBe(
+    "sha256:5ef4825c95689b2c3603774aadc7af857f2af55692e3818053563107cfb43dfd"
+  );
+});
+
+test("embedded bounded receipt window retains recent conflicts and evicts the oldest", async () => {
+  const store = new InMemoryAgentStore();
+  await store.saveMetadata(subject.agentId, {
+    agentId: subject.agentId,
+    name: "Bounded Receipts",
+    owner: { platform: "test", userId: "owner" },
+    createdAt: 1,
+  });
+  const adapter = new EmbeddedInMemoryAgentConfigurationMutationAdapter(store);
+  for (let index = 0; index < 257; index += 1) {
+    const result = await adapter.updateNativeConfiguration({
+      ...subject,
+      commandId: `bounded-${index}`,
+      expectedConfigurationRevision: "0",
+      actor: { kind: "provider_catalog" },
+      patch: {},
+    });
+    expect(result.status).toBe("no_change");
+  }
+
+  const recentReuse = await adapter.updateNativeConfiguration({
+    ...subject,
+    commandId: "bounded-256",
+    expectedConfigurationRevision: "0",
+    actor: { kind: "provider_catalog" },
+    patch: { identityMd: "different recent effect" },
+  });
+  const evictedReuse = await adapter.updateNativeConfiguration({
+    ...subject,
+    commandId: "bounded-0",
+    expectedConfigurationRevision: "0",
+    actor: { kind: "provider_catalog" },
+    patch: { identityMd: "explicitly outside retained embedded window" },
+  });
+
+  expect(recentReuse).toEqual({
+    status: "conflict",
+    conflict: "command_conflict",
+    currentRevision: "0",
+  });
+  expect(evictedReuse.status).toBe("applied");
 });
 
 test("authority port rejects null revisions before delegating", async () => {

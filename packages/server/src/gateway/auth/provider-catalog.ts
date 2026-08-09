@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createLogger, type InstalledProvider } from "@lobu/core";
+import { orgContext } from "../../lobu/stores/org-context.js";
 import {
   getModelProviderModules,
   type ModelProviderModule,
@@ -296,7 +297,10 @@ export class ProviderCatalogService {
     if (!appliedState) {
       throw new AgentConfigurationMutationTargetNotFoundError();
     }
-    const settings = await this.agentSettingsStore.getSettings(subject.agentId);
+    const settings = await orgContext.run(
+      { organizationId: subject.organizationId },
+      () => this.agentSettingsStore.getSettings(subject.agentId)
+    );
     if (!settings) {
       throw new AgentConfigurationMutationTargetNotFoundError();
     }

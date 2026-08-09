@@ -9,6 +9,7 @@ import {
   type ReleaseCapabilityReceiptRow,
 } from '../agent-release-service';
 import { AgentConfigurationError } from './errors';
+import { projectAgentConfigurationSettings } from './native-patch';
 import {
   LEGACY_MANAGED_RELEASE_SETTING_KEYS,
   PERSONAL_BASELINE_RELEASE_SETTING_KEYS,
@@ -104,25 +105,28 @@ function sha256Canonical(value: unknown): Sha256Digest {
 }
 
 function settingsProjection(row: AgentSettingsRow): Record<string, unknown> {
-  return {
-    model: row.model ?? null,
-    modelSelection: row.model_selection ?? {},
-    providerModelPreferences: row.provider_model_preferences ?? {},
-    networkConfig: row.network_config ?? {},
-    egressConfig: row.egress_config ?? {},
-    nixConfig: row.nix_config ?? {},
-    mcpServers: row.mcp_servers ?? {},
-    soulMd: row.soul_md ?? '',
-    userMd: row.user_md ?? '',
-    identityMd: row.identity_md ?? '',
-    skillsConfig: row.skills_config ?? { skills: [] },
-    toolsConfig: row.tools_config ?? {},
-    pluginsConfig: row.plugins_config ?? {},
-    installedProviders: row.installed_providers ?? [],
-    verboseLogging: row.verbose_logging ?? false,
-    preApprovedTools: row.pre_approved_tools ?? [],
-    guardrails: row.guardrails ?? [],
-  };
+  return projectAgentConfigurationSettings({
+    model: row.model ?? undefined,
+    modelSelection: row.model_selection as AgentSettings['modelSelection'],
+    providerModelPreferences:
+      row.provider_model_preferences as AgentSettings['providerModelPreferences'],
+    networkConfig: row.network_config as AgentSettings['networkConfig'],
+    egressConfig: row.egress_config as AgentSettings['egressConfig'],
+    nixConfig: row.nix_config as AgentSettings['nixConfig'],
+    mcpServers: row.mcp_servers as AgentSettings['mcpServers'],
+    soulMd: row.soul_md ?? undefined,
+    userMd: row.user_md ?? undefined,
+    identityMd: row.identity_md ?? undefined,
+    skillsConfig: row.skills_config as AgentSettings['skillsConfig'],
+    toolsConfig: row.tools_config as AgentSettings['toolsConfig'],
+    pluginsConfig: row.plugins_config as AgentSettings['pluginsConfig'],
+    installedProviders:
+      row.installed_providers as AgentSettings['installedProviders'],
+    verboseLogging: row.verbose_logging ?? undefined,
+    preApprovedTools:
+      row.pre_approved_tools as AgentSettings['preApprovedTools'],
+    guardrails: row.guardrails as AgentSettings['guardrails'],
+  });
 }
 
 export async function replaceAgentConfigurationSettingsInTransaction(

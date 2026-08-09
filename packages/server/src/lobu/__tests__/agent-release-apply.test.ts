@@ -81,6 +81,64 @@ beforeEach(async () => {
 });
 
 describe("signed managed agent release apply", () => {
+	test("shared runtime authority applies a managed release with configured signing trust", async () => {
+		const { createRuntimeAgentConfigurationAuthority } = await import(
+			"../agent-configuration/runtime-authority.js"
+		);
+		const authority = createRuntimeAgentConfigurationAuthority({
+			agentReleaseTrustedPublicKeysJson: trustedPublicKeysJson(),
+			agentReleaseEvidenceSigningPrivateKeysJson:
+				evidenceSigningPrivateKeysJson(),
+			agentReleaseEnvironment: "production",
+		});
+		const app = await buildApp({ agentConfigurationAuthority: authority });
+
+		const response = await putApply(app, latestSignedApplyRequest());
+
+		expect(response.status).toBe(200);
+		expect(await currentUserMd()).toBe("release user");
+	});
+
+	test("shared runtime authority fails closed when release configuration is unavailable", async () => {
+		const { createRuntimeAgentConfigurationAuthority } = await import(
+			"../agent-configuration/runtime-authority.js"
+		);
+		const missingConfigurationCases = [
+			{
+				label: "trusted keyring",
+				overrides: { agentReleaseTrustedPublicKeysJson: "" },
+				error: "agent_release_keyring_unavailable",
+			},
+			{
+				label: "evidence signer",
+				overrides: { agentReleaseEvidenceSigningPrivateKeysJson: "" },
+				error: "agent_release_evidence_signer_unavailable",
+			},
+			{
+				label: "runtime environment",
+				overrides: { agentReleaseEnvironment: "" },
+				error: "agent_release_environment_unavailable",
+			},
+		];
+		for (const missing of missingConfigurationCases) {
+			const authority = createRuntimeAgentConfigurationAuthority({
+				agentReleaseTrustedPublicKeysJson: trustedPublicKeysJson(),
+				agentReleaseEvidenceSigningPrivateKeysJson:
+					evidenceSigningPrivateKeysJson(),
+				agentReleaseEnvironment: "production",
+				...missing.overrides,
+			});
+			const app = await buildApp({ agentConfigurationAuthority: authority });
+			const response = await putApply(app, latestSignedApplyRequest());
+
+			expect(response.status, missing.label).toBe(503);
+			await expect(response.json(), missing.label).resolves.toMatchObject({
+				error: missing.error,
+			});
+		}
+		expect(await currentUserMd()).toBe("existing user");
+	});
+
 	test("rejects legacy broad provisioning after a managed release is applied", async () => {
 		const app = await buildApp();
 		const release = await putApply(app, latestSignedApplyRequest());
@@ -2830,6 +2888,7 @@ async function buildApp(
 		agentConfigurationTransactionHooks?: {
 			beforeAgentLock?: () => Promise<void>;
 		};
+		agentConfigurationAuthority?: unknown;
 	} = {},
 ) {
 	const organizationId = options.organizationId ?? ORG_ID;
@@ -2849,6 +2908,8 @@ async function buildApp(
 	app.route(
 		"/api/provisioning",
 		createProvisioningRoutes({
+			agentConfigurationAuthority:
+				options.agentConfigurationAuthority as never,
 			agentReleaseTrustedPublicKeysJson:
 				options.trustedPublicKeysJson ?? trustedPublicKeysJson(),
 			agentReleaseEvidenceSigningPrivateKeysJson:

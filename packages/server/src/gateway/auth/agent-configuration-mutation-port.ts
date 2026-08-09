@@ -1,5 +1,12 @@
-import { createHash } from "node:crypto";
 import type { AgentConfigStore, AgentSettings } from "@lobu/core";
+import { canonicalize } from "json-canonicalize";
+import {
+  digestAgentConfigurationSettings,
+  materializeNativePatchCommand,
+  projectAgentConfigurationSettings,
+  projectAgentConfigurationSettingsAfterPatch,
+} from "../../lobu/agent-configuration/native-patch.js";
+import { normalizeNativeSettingsPatchForPersistence } from "../../lobu/agent-configuration/field-ownership.js";
 import type {
   AgentConfigurationMutationResult as ConfigurationMutationResult,
   AgentConfigurationRejectionReason,
@@ -66,6 +73,13 @@ export class AgentConfigurationMutationInvalidRevisionError extends Error {
   }
 }
 
+export class AgentConfigurationMutationTenantMismatchError extends Error {
+  constructor() {
+    super("Embedded agent configuration tenant does not match its bound tenant");
+    this.name = "AgentConfigurationMutationTenantMismatchError";
+  }
+}
+
 function assertDecimalRevision(value: unknown): asserts value is string {
   if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) {
     throw new AgentConfigurationMutationInvalidRevisionError();
@@ -102,29 +116,66 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
   implements AgentConfigurationMutationPort
 {
   private readonly states = new Map<string, BootstrapAgentConfigurationState>();
+  /**
+   * Embedded compatibility keeps only the 256 newest receipts per agent
+   * subject. Recent command conflicts/replays remain exact; older receipts are
+   * explicitly outside the non-durable embedded replay window. Production
+   * authority persists an unbounded durable ledger in Postgres instead.
+   */
+  private static readonly MAX_RECEIPTS_PER_SUBJECT = 256;
   private readonly commands = new Map<
     string,
-    { digest: Sha256Digest; state: AppliedAgentConfigurationState }
+    Map<string, { digest: Sha256Digest; state: AppliedAgentConfigurationState }>
   >();
   private readonly subjectMutationQueues = new Map<string, Promise<void>>();
+  private readonly organizationsByAgent = new Map<string, string>();
 
   constructor(private readonly store: AgentConfigStore) {}
+
+  async deleteAgent(
+    agentId: string,
+    deleteAggregate: () => Promise<void>
+  ): Promise<void> {
+    const organizationId = this.organizationsByAgent.get(agentId);
+    if (organizationId) {
+      const subjectKey = this.subjectKey({ organizationId, agentId });
+      await this.withSubjectMutationLock(subjectKey, async () => {
+        await deleteAggregate();
+        this.clearAgentState(agentId);
+      });
+      return;
+    }
+    await deleteAggregate();
+    this.clearAgentState(agentId);
+  }
+
+  private clearAgentState(agentId: string): void {
+    this.organizationsByAgent.delete(agentId);
+    for (const key of this.states.keys()) {
+      if (key.split("\0")[1] === agentId) this.states.delete(key);
+    }
+    for (const key of this.commands.keys()) {
+      if (key.split("\0")[1] === agentId) this.commands.delete(key);
+    }
+  }
 
   async readAppliedState(
     subject: ProviderMutationSubject
   ): Promise<BootstrapAgentConfigurationState | null> {
+    this.assertMatchingOrganization(subject);
     const key = this.subjectKey(subject);
     const current = this.states.get(key);
     if (current) return current;
     const settings = await this.store.getSettings(subject.agentId);
     if (!settings) return null;
+    this.bindOrganization(subject);
     const stateCreatedWhileReading = this.states.get(key);
     if (stateCreatedWhileReading) return stateCreatedWhileReading;
     const initial: BootstrapAgentConfigurationState = {
       ...subject,
       managementMode: "native",
       configurationRevision: "0",
-      settingsDigest: this.digest(settings),
+      settingsDigest: digestAgentConfigurationSettings(settings),
       lastMutation: null,
     };
     this.states.set(key, initial);
@@ -153,9 +204,10 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
       throw new AgentConfigurationMutationTargetNotFoundError();
     }
     const currentRevision = current.configurationRevision;
-    const commandKey = `${this.subjectKey(subject)}\0${input.commandId}`;
-    const commandDigest = this.digest(input);
-    const prior = this.commands.get(commandKey);
+    const subjectKey = this.subjectKey(subject);
+    const command = materializeNativePatchCommand(input);
+    const commandDigest = command.commandDigest;
+    const prior = this.commands.get(subjectKey)?.get(input.commandId);
     if (prior) {
       return prior.digest === commandDigest
         ? { status: "already_applied", state: prior.state }
@@ -173,25 +225,33 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
       };
     }
 
-    const updates = Object.fromEntries(
-      Object.entries(input.patch).map(([key, value]) => [
-        key,
-        value === null ? undefined : value,
-      ])
-    ) as Partial<AgentSettings>;
-    await this.store.updateSettings(input.agentId, updates);
     const settings = await this.store.getSettings(input.agentId);
-    if (!settings) {
-      throw new Error("Embedded agent configuration target was not found");
+    if (!settings) throw new AgentConfigurationMutationTargetNotFoundError();
+    const currentProjection = projectAgentConfigurationSettings(settings);
+    const resultingProjection = projectAgentConfigurationSettingsAfterPatch(
+      settings,
+      command.patch
+    );
+    const changed = canonicalize(currentProjection) !== canonicalize(resultingProjection);
+    if (changed) {
+      await this.store.updateSettings(
+        input.agentId,
+        normalizeNativeSettingsPatchForPersistence(command.patch) as Partial<AgentSettings>
+      );
     }
-    const nextRevision = (BigInt(currentRevision) + 1n).toString();
-    const state = this.createState(subject, nextRevision, settings, {
+    const nextRevision = changed
+      ? (BigInt(currentRevision) + 1n).toString()
+      : currentRevision;
+    const state = this.createState(subject, nextRevision, resultingProjection, {
       commandId: input.commandId,
       commandDigest,
     });
-    this.states.set(this.subjectKey(subject), state);
-    this.commands.set(commandKey, { digest: commandDigest, state });
-    return { status: "applied", state };
+    this.states.set(subjectKey, state);
+    this.recordCommandReceipt(subjectKey, input.commandId, {
+      digest: commandDigest,
+      state,
+    });
+    return { status: changed ? "applied" : "no_change", state };
   }
 
   private async withSubjectMutationLock<T>(
@@ -220,23 +280,50 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
     return `${subject.organizationId}\0${subject.agentId}`;
   }
 
-  private digest(value: unknown): Sha256Digest {
-    return `sha256:${createHash("sha256")
-      .update(JSON.stringify(value))
-      .digest("hex")}`;
+  private recordCommandReceipt(
+    subjectKey: string,
+    commandId: string,
+    receipt: { digest: Sha256Digest; state: AppliedAgentConfigurationState }
+  ): void {
+    let receipts = this.commands.get(subjectKey);
+    if (!receipts) {
+      receipts = new Map();
+      this.commands.set(subjectKey, receipts);
+    }
+    if (
+      receipts.size >=
+        EmbeddedInMemoryAgentConfigurationMutationAdapter.MAX_RECEIPTS_PER_SUBJECT &&
+      !receipts.has(commandId)
+    ) {
+      const oldestCommandId = receipts.keys().next().value;
+      if (oldestCommandId !== undefined) receipts.delete(oldestCommandId);
+    }
+    receipts.set(commandId, receipt);
+  }
+
+  private assertMatchingOrganization(subject: ProviderMutationSubject): void {
+    const organizationId = this.organizationsByAgent.get(subject.agentId);
+    if (organizationId && organizationId !== subject.organizationId) {
+      throw new AgentConfigurationMutationTenantMismatchError();
+    }
+  }
+
+  private bindOrganization(subject: ProviderMutationSubject): void {
+    this.assertMatchingOrganization(subject);
+    this.organizationsByAgent.set(subject.agentId, subject.organizationId);
   }
 
   private createState(
     subject: ProviderMutationSubject,
     configurationRevision: string,
-    settings: AgentSettings,
+    settings: Partial<AgentSettings>,
     command: { commandId: string; commandDigest: Sha256Digest }
   ): AppliedAgentConfigurationState {
     return {
       ...subject,
       managementMode: "native",
       configurationRevision,
-      settingsDigest: this.digest(settings),
+      settingsDigest: digestAgentConfigurationSettings(settings),
       lastMutation: { kind: "native_patch", ...command },
     };
   }
