@@ -134,6 +134,76 @@ describe('AgentConfigurationAuthority', () => {
     expect(receipts).toEqual([{ result_status: 'applied' }]);
   });
 
+  test('applies a complete native partial patch without resetting omitted fields', async () => {
+    const sql = getDb();
+    await sql`
+      UPDATE agents
+      SET user_md = 'keep this user prompt',
+          mcp_servers = ${sql.json({ old: { url: 'https://old.example' } })}
+      WHERE organization_id = ${ORGANIZATION_ID} AND id = ${AGENT_ID}
+    `;
+
+    const result = await createAgentConfigurationAuthority().apply({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      commandId: 'native-command-mcp-partial',
+      expectedConfigurationRevision: '0',
+      actor: { kind: 'session' },
+      patch: { mcpServers: { current: { url: 'https://current.example' } } },
+    });
+
+    expect(result.status).toBe('applied');
+    const rows = await sql`
+      SELECT user_md, mcp_servers
+      FROM agents
+      WHERE organization_id = ${ORGANIZATION_ID} AND id = ${AGENT_ID}
+    `;
+    expect(rows).toEqual([
+      {
+        user_md: 'keep this user prompt',
+        mcp_servers: { current: { url: 'https://current.example' } },
+      },
+    ]);
+  });
+
+  test('rejects release-owned fields in toolbox_managed mode but permits operator fields', async () => {
+    const sql = getDb();
+    await sql`
+      INSERT INTO agent_configuration_controls (
+        organization_id, agent_id, management_mode
+      ) VALUES (${ORGANIZATION_ID}, ${AGENT_ID}, 'toolbox_managed')
+    `;
+    const authority = createAgentConfigurationAuthority();
+
+    await expect(
+      authority.apply({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        commandId: 'managed-release-owned-command',
+        expectedConfigurationRevision: '0',
+        actor: { kind: 'session' },
+        patch: { model: 'legacy-model', identityMd: 'managed identity' },
+      })
+    ).resolves.toEqual({
+      status: 'rejected',
+      reason: 'field_owned_by_managed_release',
+    });
+
+    await expect(
+      authority.apply({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        commandId: 'managed-operator-command',
+        expectedConfigurationRevision: '0',
+        actor: { kind: 'session' },
+        patch: { verboseLogging: true },
+      })
+    ).resolves.toMatchObject({
+      status: 'applied',
+      state: { managementMode: 'toolbox_managed', configurationRevision: '1' },
+    });
+  });
+
   test('advances decimal revisions without JavaScript number precision loss', async () => {
     const sql = getDb();
     await sql`
@@ -216,7 +286,7 @@ describe('AgentConfigurationAuthority', () => {
     ]);
   });
 
-  test('serializes three independent authorities to one CAS winner', async () => {
+  test('serializes three distinct native patches from independent authorities to one CAS winner', async () => {
     const authorities = [
       createAgentConfigurationAuthority(),
       createAgentConfigurationAuthority(),
@@ -230,7 +300,11 @@ describe('AgentConfigurationAuthority', () => {
           commandId: `native-command-race-${index + 1}`,
           expectedConfigurationRevision: '0',
           actor: { kind: 'session' },
-          patch: { verboseLogging: true },
+          patch: [
+            { verboseLogging: true },
+            { userMd: 'race user winner' },
+            { mcpServers: { race: { url: 'https://race.example' } } },
+          ][index],
         })
       )
     );
@@ -252,11 +326,16 @@ describe('AgentConfigurationAuthority', () => {
 
     const sql = getDb();
     const agents = await sql`
-      SELECT verbose_logging
+      SELECT verbose_logging, user_md, mcp_servers
       FROM agents
       WHERE organization_id = ${ORGANIZATION_ID} AND id = ${AGENT_ID}
     `;
-    expect(agents).toEqual([{ verbose_logging: true }]);
+    const changedFields = [
+      agents[0]?.verbose_logging === true,
+      agents[0]?.user_md === 'race user winner',
+      Object.hasOwn(agents[0]?.mcp_servers ?? {}, 'race'),
+    ];
+    expect(changedFields.filter(Boolean)).toHaveLength(1);
     const controls = await sql`
       SELECT configuration_revision
       FROM agent_configuration_controls

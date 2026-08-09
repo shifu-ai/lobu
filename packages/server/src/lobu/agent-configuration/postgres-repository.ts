@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { canonicalize } from 'json-canonicalize';
 import type { DbClient } from '../../db/client';
+import logger from '../../utils/logger';
 import { AgentConfigurationError } from './errors';
+import { decideNativeSettingsPatch } from './field-ownership';
 import type {
   AgentConfigurationMutationResult,
   AppliedAgentConfigurationState,
@@ -45,6 +47,30 @@ type CommandRow = {
 };
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const LEGACY_RELEASE_OWNED_SETTINGS = new Set([
+  'identityMd',
+  'soulMd',
+  'userMd',
+  'modelSelection',
+  'toolsConfig',
+]);
+const PERSONAL_BASELINE_LOBU_OWNED_SETTINGS = new Set([
+  ...LEGACY_RELEASE_OWNED_SETTINGS,
+  'mcpServers',
+  'skillsConfig',
+  'preApprovedTools',
+  'providerModelPreferences',
+  'networkConfig',
+  'egressConfig',
+  'nixConfig',
+  'pluginsConfig',
+  'guardrails',
+  'installedProviders',
+]);
+
+function hasOwn(value: object, key: PropertyKey): boolean {
+  return Object.hasOwn(value, key);
+}
 
 function sha256Canonical(value: unknown): Sha256Digest {
   return `sha256:${createHash('sha256').update(canonicalize(value)).digest('hex')}`;
@@ -90,25 +116,81 @@ function stateFromCommandRow(
   };
 }
 
-function assertTracerPatch(command: NativePatchCommand): void {
-  const keys = Object.keys(command.patch);
-  if (
-    keys.length > 1 ||
-    (keys.length === 1 &&
-      (keys[0] !== 'verboseLogging' || typeof command.patch.verboseLogging !== 'boolean'))
-  ) {
-    throw new AgentConfigurationError('invalid_native_settings_patch');
-  }
+function assertNativePatchCommand(command: NativePatchCommand): void {
   if (!command.commandId.trim() || !SHA256_PATTERN.test(command.commandDigest)) {
     throw new AgentConfigurationError('invalid_native_settings_patch');
   }
+}
+
+function normalizedPatchValue(key: string, value: unknown): unknown {
+  switch (key) {
+    case 'model':
+      return value ?? null;
+    case 'modelSelection':
+    case 'providerModelPreferences':
+    case 'networkConfig':
+    case 'egressConfig':
+    case 'nixConfig':
+    case 'mcpServers':
+    case 'toolsConfig':
+    case 'pluginsConfig':
+      return value ?? {};
+    case 'soulMd':
+    case 'userMd':
+    case 'identityMd':
+      return value ?? '';
+    case 'skillsConfig':
+      return value ?? { skills: [] };
+    case 'installedProviders':
+    case 'preApprovedTools':
+    case 'guardrails':
+      return value ?? [];
+    case 'verboseLogging':
+      return value ?? false;
+    default:
+      throw new AgentConfigurationError('invalid_native_settings_patch');
+  }
+}
+
+function projectedSettingsAfterPatch(
+  agent: AgentSettingsRow,
+  patch: NativePatchCommand['patch']
+): Record<string, unknown> {
+  const projected = settingsProjection(agent);
+  for (const key of Object.keys(patch)) {
+    projected[key] = normalizedPatchValue(key, patch[key as keyof typeof patch]);
+  }
+  return projected;
+}
+
+async function legacyReleasePredicateRejectedFields(
+  tx: DbClient,
+  command: NativePatchCommand
+): Promise<string[]> {
+  const fields = Object.keys(command.patch);
+  if (fields.length === 0) return [];
+  const receipts = await tx<{ personal_baseline_settings: unknown }>`
+    SELECT personal_baseline_settings
+    FROM agent_release_applies
+    WHERE organization_id = ${command.organizationId}
+      AND agent_id = ${command.agentId}
+      AND status = 'applied'
+      AND applied_at IS NOT NULL
+    LIMIT 1
+  `;
+  if (receipts.length === 0) return [];
+  const ownedFields =
+    receipts[0]?.personal_baseline_settings != null
+      ? PERSONAL_BASELINE_LOBU_OWNED_SETTINGS
+      : LEGACY_RELEASE_OWNED_SETTINGS;
+  return fields.filter((field) => ownedFields.has(field));
 }
 
 export async function applyNativePatchInTransaction(
   tx: DbClient,
   command: NativePatchCommand
 ): Promise<AgentConfigurationMutationResult> {
-  assertTracerPatch(command);
+  assertNativePatchCommand(command);
 
   const agents = await tx<AgentSettingsRow>`
     SELECT model, model_selection, provider_model_preferences,
@@ -166,36 +248,86 @@ export async function applyNativePatchInTransaction(
     };
   }
 
-  if (command.expectedConfigurationRevision !== currentRevision) {
+  const expectedConfigurationRevision =
+    command.expectedConfigurationRevision ?? currentRevision;
+  if (expectedConfigurationRevision !== currentRevision) {
     return {
       status: 'conflict',
       conflict: 'revision_mismatch',
       currentRevision,
     };
   }
-  if (control.management_mode !== 'native') {
-    return { status: 'rejected', reason: 'toolbox_managed' };
+
+  const legacyRejectedFields = await legacyReleasePredicateRejectedFields(tx, command);
+  const policyDecision = decideNativeSettingsPatch(control.management_mode, command.patch);
+  const legacyRejected = legacyRejectedFields.length > 0;
+  const shadowDecisionMatches =
+    canonicalize([...legacyRejectedFields].sort()) ===
+    canonicalize([...policyDecision.rejectedFields].sort());
+  if (!shadowDecisionMatches) {
+    logger.warn(
+      {
+        legacyRejectedFields,
+        policyRejectedFields: policyDecision.rejectedFields,
+      },
+      'shadow_decision_mismatch'
+    );
+  }
+  if (control.management_mode === 'native' && legacyRejected) {
+    return { status: 'rejected', reason: 'managed_configuration_sealed' };
+  }
+  if (policyDecision.reason) {
+    return { status: 'rejected', reason: policyDecision.reason };
   }
 
-  const resultingVerboseLogging =
-    command.patch.verboseLogging ?? (agent.verbose_logging ?? false);
-  const changed =
-    command.patch.verboseLogging !== undefined &&
-    (agent.verbose_logging ?? false) !== command.patch.verboseLogging;
+  const currentSettings = settingsProjection(agent);
+  const resultingSettings = projectedSettingsAfterPatch(agent, command.patch);
+  const changed = canonicalize(currentSettings) !== canonicalize(resultingSettings);
   const resultingRevision = changed ? (BigInt(currentRevision) + 1n).toString() : currentRevision;
   const resultStatus = changed ? 'applied' : 'no_change';
   if (changed) {
     await tx`
       UPDATE agents
-      SET verbose_logging = ${resultingVerboseLogging}, updated_at = NOW()
+      SET model = CASE WHEN ${hasOwn(command.patch, 'model')}
+            THEN ${command.patch.model ?? null} ELSE model END,
+          model_selection = CASE WHEN ${hasOwn(command.patch, 'modelSelection')}
+            THEN ${tx.json(command.patch.modelSelection ?? {})} ELSE model_selection END,
+          provider_model_preferences = CASE WHEN ${hasOwn(command.patch, 'providerModelPreferences')}
+            THEN ${tx.json(command.patch.providerModelPreferences ?? {})} ELSE provider_model_preferences END,
+          network_config = CASE WHEN ${hasOwn(command.patch, 'networkConfig')}
+            THEN ${tx.json(command.patch.networkConfig ?? {})} ELSE network_config END,
+          egress_config = CASE WHEN ${hasOwn(command.patch, 'egressConfig')}
+            THEN ${tx.json(command.patch.egressConfig ?? {})} ELSE egress_config END,
+          nix_config = CASE WHEN ${hasOwn(command.patch, 'nixConfig')}
+            THEN ${tx.json(command.patch.nixConfig ?? {})} ELSE nix_config END,
+          mcp_servers = CASE WHEN ${hasOwn(command.patch, 'mcpServers')}
+            THEN ${tx.json(command.patch.mcpServers ?? {})} ELSE mcp_servers END,
+          soul_md = CASE WHEN ${hasOwn(command.patch, 'soulMd')}
+            THEN ${command.patch.soulMd ?? ''} ELSE soul_md END,
+          user_md = CASE WHEN ${hasOwn(command.patch, 'userMd')}
+            THEN ${command.patch.userMd ?? ''} ELSE user_md END,
+          identity_md = CASE WHEN ${hasOwn(command.patch, 'identityMd')}
+            THEN ${command.patch.identityMd ?? ''} ELSE identity_md END,
+          skills_config = CASE WHEN ${hasOwn(command.patch, 'skillsConfig')}
+            THEN ${tx.json(command.patch.skillsConfig ?? { skills: [] })} ELSE skills_config END,
+          tools_config = CASE WHEN ${hasOwn(command.patch, 'toolsConfig')}
+            THEN ${tx.json(command.patch.toolsConfig ?? {})} ELSE tools_config END,
+          plugins_config = CASE WHEN ${hasOwn(command.patch, 'pluginsConfig')}
+            THEN ${tx.json(command.patch.pluginsConfig ?? {})} ELSE plugins_config END,
+          installed_providers = CASE WHEN ${hasOwn(command.patch, 'installedProviders')}
+            THEN ${tx.json(command.patch.installedProviders ?? [])} ELSE installed_providers END,
+          verbose_logging = CASE WHEN ${hasOwn(command.patch, 'verboseLogging')}
+            THEN ${command.patch.verboseLogging ?? false} ELSE verbose_logging END,
+          pre_approved_tools = CASE WHEN ${hasOwn(command.patch, 'preApprovedTools')}
+            THEN ${tx.json(command.patch.preApprovedTools ?? [])} ELSE pre_approved_tools END,
+          guardrails = CASE WHEN ${hasOwn(command.patch, 'guardrails')}
+            THEN ${tx.json(command.patch.guardrails ?? [])} ELSE guardrails END,
+          updated_at = NOW()
       WHERE organization_id = ${command.organizationId} AND id = ${command.agentId}
     `;
   }
 
-  const resultingSettingsDigest = sha256Canonical({
-    ...settingsProjection(agent),
-    verboseLogging: resultingVerboseLogging,
-  });
+  const resultingSettingsDigest = sha256Canonical(resultingSettings);
   await tx`
     UPDATE agent_configuration_controls
     SET configuration_revision = ${resultingRevision}::bigint,
@@ -212,7 +344,7 @@ export async function applyNativePatchInTransaction(
     ) VALUES (
       ${command.organizationId}, ${command.agentId}, ${command.commandId},
       ${command.commandDigest}, 'native_patch', ${resultingRevision}::bigint,
-      'native', ${resultingSettingsDigest}, ${resultStatus}
+      ${control.management_mode}, ${resultingSettingsDigest}, ${resultStatus}
     )
   `;
 
@@ -221,7 +353,7 @@ export async function applyNativePatchInTransaction(
     state: {
       organizationId: command.organizationId,
       agentId: command.agentId,
-      managementMode: 'native',
+      managementMode: control.management_mode,
       configurationRevision: resultingRevision,
       settingsDigest: resultingSettingsDigest,
       lastMutation: {

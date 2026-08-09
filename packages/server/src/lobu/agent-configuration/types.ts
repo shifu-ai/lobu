@@ -26,7 +26,7 @@ export interface AgentConfigurationCommandEnvelope {
   agentId: string;
   commandId: string;
   commandDigest: Sha256Digest;
-  expectedConfigurationRevision: string;
+  expectedConfigurationRevision: string | null;
   actor: ConfigurationActor;
 }
 
@@ -52,6 +52,18 @@ export interface AppliedAgentConfigurationState {
   };
 }
 
+export type AgentConfigurationRejectionReason =
+  | 'field_owned_by_managed_release'
+  | 'unknown_configuration_field'
+  | 'runtime_field_requires_runtime_api'
+  | 'credential_field_requires_credential_api'
+  | 'managed_configuration_sealed'
+  | 'invalid_release'
+  | 'stale_release'
+  | 'environment_mismatch'
+  | 'capability_inactive'
+  | 'enrollment_drifted';
+
 export type AgentConfigurationMutationResult =
   | {
       status: 'applied' | 'already_applied' | 'no_change';
@@ -64,7 +76,7 @@ export type AgentConfigurationMutationResult =
     }
   | {
       status: 'rejected';
-      reason: string;
+      reason: AgentConfigurationRejectionReason;
     };
 
 export type NativePatchCommandInput = Omit<NativePatchCommand, 'kind' | 'commandDigest'>;

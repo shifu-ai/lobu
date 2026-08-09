@@ -467,6 +467,121 @@ describe('PATCH /:agentId/config — native configuration authority', () => {
     });
   });
 
+  test('applies mcpServers without changing omitted userMd through the authority', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-partial-mcp';
+    await seedAgent(ORG_A, agentId);
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      UPDATE agents SET user_md = 'keep user prompt'
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mcpServers: { new: { url: 'https://new.example' } } }),
+    });
+
+    expect(response.status).toBe(200);
+    const rows = await sql`
+      SELECT user_md, mcp_servers FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(rows).toEqual([
+      {
+        user_md: 'keep user prompt',
+        mcp_servers: { new: { url: 'https://new.example' } },
+      },
+    ]);
+    const commands = await sql`
+      SELECT result_status FROM agent_configuration_commands
+      WHERE organization_id = ${ORG_A} AND agent_id = ${agentId}
+    `;
+    expect(commands).toEqual([{ result_status: 'applied' }]);
+  });
+
+  test('rejects unknown configuration fields before authority mutation', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-unknown-field';
+    await seedAgent(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ futureField: true }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: 'unknown_configuration_field',
+    });
+  });
+
+  test('in toolbox_managed mode rejects every release-owned field and permits only operator mutation', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-toolbox-managed-ownership';
+    await seedAgent(ORG_A, agentId);
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      INSERT INTO agent_configuration_controls (
+        organization_id, agent_id, management_mode
+      ) VALUES (${ORG_A}, ${agentId}, 'toolbox_managed')
+    `;
+    const releaseOwnedPatches = [
+      { model: 'legacy-model' },
+      { modelSelection: { mode: 'auto' } },
+      { providerModelPreferences: { openai: 'gpt-test' } },
+      { networkConfig: { allowedDomains: ['example.com'] } },
+      { egressConfig: { enabled: true } },
+      { nixConfig: { packages: ['jq'] } },
+      { mcpServers: { test: { url: 'https://mcp.example' } } },
+      { soulMd: 'soul' },
+      { userMd: 'user' },
+      { identityMd: 'identity' },
+      { skillsConfig: { skills: [] } },
+      { toolsConfig: { allow: ['read'] } },
+      { guardrails: ['secret-scan'] },
+      { pluginsConfig: { plugin: { enabled: true } } },
+      { installedProviders: [] },
+      { preApprovedTools: ['/mcp/test/tools/read'] },
+    ];
+
+    for (const [index, body] of releaseOwnedPatches.entries()) {
+      const response = await app.request(`/${agentId}/config`, {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json',
+          'if-match': '"agent-config:0"',
+          'idempotency-key': `managed-release-field-${index}`,
+        },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        error: 'agent_configuration_rejected',
+        reason: 'field_owned_by_managed_release',
+      });
+    }
+
+    const operatorResponse = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': '"agent-config:0"',
+        'idempotency-key': 'managed-operator-field',
+      },
+      body: JSON.stringify({ verboseLogging: true }),
+    });
+    expect(operatorResponse.status).toBe(200);
+    expect((await sql`
+      SELECT verbose_logging FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `)[0]?.verbose_logging).toBe(true);
+  });
+
   test('rejects malformed native revision preconditions', async () => {
     const app = await importAgentRoutes();
     const agentId = 'native-invalid-etag';
@@ -504,7 +619,32 @@ describe('PATCH /:agentId/config — native configuration authority', () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({
-      error: 'missing_idempotency_key',
+      error: 'agent_configuration_idempotency_key_required',
+    });
+  });
+
+  test.each([
+    ['empty', ''],
+    ['too-long', 'x'.repeat(201)],
+    ['unsafe-ascii', 'unsafe-é'],
+  ])('rejects %s idempotency keys for revisioned patches', async (_label, commandId) => {
+    const app = await importAgentRoutes();
+    const agentId = `native-invalid-idempotency-${commandId.length}`;
+    await seedAgent(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': '"agent-config:0"',
+        'idempotency-key': commandId,
+      },
+      body: JSON.stringify({ verboseLogging: true }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: 'agent_configuration_idempotency_key_required',
     });
   });
 

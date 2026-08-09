@@ -3,6 +3,7 @@ import { canonicalize } from 'json-canonicalize';
 import type { DbClient } from '../../db/client';
 import { getDb } from '../../db/client';
 import { AgentConfigurationError } from './errors';
+import { parseNativeSettingsPatch } from './field-ownership';
 import { applyNativePatchInTransaction } from './postgres-repository';
 import type {
   AgentConfigurationMutationResult,
@@ -19,10 +20,14 @@ export interface AgentConfigurationAuthority {
 }
 
 function materializeNativePatchCommand(input: NativePatchCommandInput): NativePatchCommand {
-  if (!DECIMAL_REVISION_PATTERN.test(input.expectedConfigurationRevision)) {
+  if (
+    input.expectedConfigurationRevision !== null &&
+    !DECIMAL_REVISION_PATTERN.test(input.expectedConfigurationRevision)
+  ) {
     throw new AgentConfigurationError('invalid_revision_precondition');
   }
-  const patch = JSON.parse(canonicalize(input.patch)) as NativeSettingsPatch;
+  const parsedPatch = parseNativeSettingsPatch(input.patch);
+  const patch = JSON.parse(canonicalize(parsedPatch)) as NativeSettingsPatch;
   const canonicalCommand = {
     kind: 'native_patch',
     agentId: input.agentId,

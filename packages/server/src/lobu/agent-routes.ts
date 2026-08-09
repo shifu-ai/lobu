@@ -4,7 +4,7 @@
  * All routes are org-scoped via mcpAuth middleware and orgContext.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { encrypt, type AuthProfile, type StoredConnection } from '@lobu/core';
@@ -18,6 +18,7 @@ import { ChannelBindingService } from '../gateway/channels/binding-service';
 import { createAuthProfileLabel } from '../gateway/auth/settings/auth-profiles-manager';
 import type { Env } from '../index';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
+import logger from '../utils/logger';
 import { countRuntimeMessagingClientsByAgent } from './client-routes';
 import { memoryRoutes } from './memory-routes';
 import { getChatInstanceManager, getLobuCoreServices } from './gateway';
@@ -43,9 +44,9 @@ import { buildMcpConnectUrl } from '../gateway/auth/mcp/connect-link-url';
 import { emitAgentObsEvent } from '@lobu/core';
 import { parseShifuTraceHeaders } from '../observability/trace-context';
 import {
-  AgentSettingsManagedByReleaseError,
-  patchLegacyAgentSettings,
-} from './legacy-agent-settings-service';
+  AgentConfigurationFieldError,
+  parseNativeSettingsPatch,
+} from './agent-configuration/field-ownership';
 import {
   AgentConfigurationError,
   createAgentConfigurationAuthority,
@@ -79,6 +80,21 @@ function parseAgentConfigurationEtag(value: string | undefined): string | null {
   const match = /^"agent-config:(0|[1-9][0-9]*)"$/.exec(value);
   if (!match) throw new AgentConfigurationError('invalid_revision_precondition');
   return match[1];
+}
+
+const IDEMPOTENCY_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
+
+function parseAgentConfigurationCommandId(value: string | undefined): string {
+  if (!value || !IDEMPOTENCY_KEY_PATTERN.test(value)) {
+    throw new AgentConfigurationError('missing_idempotency_key');
+  }
+  return value;
+}
+
+function compatibilityCommandId(requestId: string | undefined): string {
+  return `compat:${
+    requestId && IDEMPOTENCY_KEY_PATTERN.test(requestId) ? requestId : randomUUID()
+  }`;
 }
 
 type ProviderAuthType = 'oauth' | 'device-code' | 'api-key';
@@ -2114,10 +2130,14 @@ routes.patch('/:agentId/config', async (c) => {
   const denied = requireSessionOrAdminPat(c);
   if (denied) return denied;
   const { agentId } = c.req.param();
-  const updates = await c.req.json();
-
-  if (!(await configStore.hasAgent(agentId))) {
-    return c.json({ error: 'Agent not found' }, 404);
+  let updates: unknown;
+  try {
+    updates = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid or missing JSON body' }, 400);
+  }
+  if (updates === null || typeof updates !== 'object' || Array.isArray(updates)) {
+    return c.json({ error: 'unknown_configuration_field' }, 400);
   }
 
   // Auth profiles aren't part of the agent settings row — they're
@@ -2139,6 +2159,16 @@ routes.patch('/:agentId/config', async (c) => {
     );
   }
 
+  let settingsPatch;
+  try {
+    settingsPatch = parseNativeSettingsPatch(settingsUpdates);
+  } catch (error) {
+    if (error instanceof AgentConfigurationFieldError) {
+      return c.json({ error: error.reason }, 400);
+    }
+    throw error;
+  }
+
   const organizationId = c.get('organizationId');
   if (!organizationId) return c.json({ error: 'Organization required' }, 401);
 
@@ -2152,66 +2182,83 @@ routes.patch('/:agentId/config', async (c) => {
     throw error;
   }
 
-  let revisionedResponse: {
-    configurationRevision: string;
-    managementMode: 'native' | 'toolbox_managed';
-  } | null = null;
+  let commandId: string;
   if (expectedConfigurationRevision !== null) {
-    const commandId = c.req.header('idempotency-key')?.trim();
-    if (!commandId) {
-      return c.json({ error: 'missing_idempotency_key' }, 400);
-    }
-    const authSource = c.get('authSource');
-    const actor = {
-      kind: authSource === 'session' ? ('session' as const) : ('admin_pat' as const),
-    };
-
     try {
-      const result = await agentConfigurationAuthority.apply({
-        organizationId,
-        agentId,
-        commandId,
-        expectedConfigurationRevision,
-        actor,
-        patch: settingsUpdates,
-      });
-      if (result.status === 'conflict') {
-        return c.json(
-          {
-            error: `agent_configuration_${result.conflict}`,
-            currentRevision: result.currentRevision,
-          },
-          409
-        );
-      }
-      if (result.status === 'rejected') {
-        return c.json(
-          { error: 'agent_configuration_rejected', reason: result.reason },
-          409
-        );
-      }
-      revisionedResponse = {
-        configurationRevision: result.state.configurationRevision,
-        managementMode: result.state.managementMode,
-      };
+      commandId = parseAgentConfigurationCommandId(c.req.header('idempotency-key'));
     } catch (error) {
       if (error instanceof AgentConfigurationError) {
-        if (error.code === 'agent_configuration_not_found') {
-          return c.json({ error: error.code }, 404);
-        }
-        return c.json({ error: error.code }, 400);
+        return c.json({ error: 'agent_configuration_idempotency_key_required' }, 400);
       }
       throw error;
     }
   } else {
-    try {
-      await patchLegacyAgentSettings(organizationId, agentId, settingsUpdates);
-    } catch (error) {
-      if (error instanceof AgentSettingsManagedByReleaseError) {
-        return c.json({ error: error.code, error_description: error.message }, 409);
-      }
-      throw error;
+    commandId = compatibilityCommandId(
+      c.req.header('x-shifu-trace-id') ?? c.req.header('x-request-id')
+    );
+    logger.warn({ organizationId, agentId }, 'missing_revision_precondition');
+  }
+
+  let revisionedResponse: {
+    configurationRevision: string;
+    managementMode: 'native' | 'toolbox_managed';
+  } | null = null;
+  const authSource = c.get('authSource');
+  const actor = {
+    kind: authSource === 'session' ? ('session' as const) : ('admin_pat' as const),
+  };
+
+  try {
+    const result = await agentConfigurationAuthority.apply({
+      organizationId,
+      agentId,
+      commandId,
+      expectedConfigurationRevision,
+      actor,
+      patch: settingsPatch,
+    });
+    if (result.status === 'conflict') {
+      return c.json(
+        {
+          error: `agent_configuration_${result.conflict}`,
+          currentRevision: result.currentRevision,
+        },
+        409
+      );
     }
+    if (result.status === 'rejected') {
+      if (
+        expectedConfigurationRevision === null &&
+        result.reason === 'managed_configuration_sealed'
+      ) {
+        return c.json(
+          {
+            error: 'agent_settings_managed_by_release',
+            error_description:
+              'Agent release-owned settings must be changed through managed release apply',
+          },
+          409
+        );
+      }
+      return c.json(
+        { error: 'agent_configuration_rejected', reason: result.reason },
+        409
+      );
+    }
+    if (expectedConfigurationRevision !== null) {
+      revisionedResponse = {
+        configurationRevision: result.state.configurationRevision,
+        managementMode: result.state.managementMode,
+      };
+    }
+  } catch (error) {
+    if (error instanceof AgentConfigurationError) {
+      if (error.code === 'agent_configuration_not_found') {
+        return c.json({ error: 'Agent not found' }, 404);
+      }
+      return c.json({ error: error.code }, 400);
+    }
+    throw error;
   }
 
   if (Array.isArray(authProfiles)) {
