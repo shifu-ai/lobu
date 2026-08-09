@@ -418,6 +418,96 @@ describe('PATCH /:agentId/config — managed release fence', () => {
   });
 });
 
+describe('PATCH /:agentId/config — native configuration authority', () => {
+  beforeEach(async () => {
+    await resetTestDatabase();
+    resetApplyRouteStores();
+    await seedOrg(ORG_A);
+    resetApplyAuth();
+  });
+
+  test('applies one revisioned native patch and rejects a stale writer', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-cas-tracer';
+    await seedAgent(ORG_A, agentId);
+
+    const first = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': '"agent-config:0"',
+        'idempotency-key': 'native-cas-tracer-1',
+      },
+      body: JSON.stringify({ verboseLogging: true }),
+    });
+
+    expect(first.status).toBe(200);
+    expect(first.headers.get('etag')).toBe('"agent-config:1"');
+    await expect(first.json()).resolves.toMatchObject({
+      success: true,
+      configurationRevision: '1',
+      managementMode: 'native',
+    });
+
+    const stale = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': '"agent-config:0"',
+        'idempotency-key': 'native-cas-tracer-2',
+      },
+      body: JSON.stringify({ verboseLogging: false }),
+    });
+
+    expect(stale.status).toBe(409);
+    await expect(stale.json()).resolves.toEqual({
+      error: 'agent_configuration_revision_mismatch',
+      currentRevision: '1',
+    });
+  });
+
+  test('rejects malformed native revision preconditions', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-invalid-etag';
+    await seedAgent(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': 'agent-config:0',
+        'idempotency-key': 'native-invalid-etag-1',
+      },
+      body: JSON.stringify({ verboseLogging: true }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: 'invalid_revision_precondition',
+    });
+  });
+
+  test('requires an idempotency key for revisioned native patches', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-missing-command';
+    await seedAgent(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': '"agent-config:0"',
+      },
+      body: JSON.stringify({ verboseLogging: true }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: 'missing_idempotency_key',
+    });
+  });
+});
+
 describe('PATCH /:agentId/config — mixed settings and auth profiles', () => {
   const oldMcpServers = { existing: { url: 'https://old.example' } };
   const mixedBody = {

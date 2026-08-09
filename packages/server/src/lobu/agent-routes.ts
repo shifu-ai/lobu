@@ -46,6 +46,11 @@ import {
   AgentSettingsManagedByReleaseError,
   patchLegacyAgentSettings,
 } from './legacy-agent-settings-service';
+import {
+  AgentConfigurationError,
+  createAgentConfigurationAuthority,
+  createNativePatchCommand,
+} from './agent-configuration';
 
 const routes = new Hono<{ Bindings: Env }>();
 const toolboxMcpRoutes = new Hono<{ Bindings: Env }>();
@@ -68,6 +73,14 @@ function toStringArray(value: unknown): string[] {
 
 const configStore = createPostgresAgentConfigStore();
 const connectionStore = createPostgresAgentConnectionStore();
+const agentConfigurationAuthority = createAgentConfigurationAuthority();
+
+function parseAgentConfigurationEtag(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const match = /^"agent-config:(0|[1-9][0-9]*)"$/.exec(value);
+  if (!match) throw new AgentConfigurationError('invalid_revision_precondition');
+  return match[1];
+}
 
 type ProviderAuthType = 'oauth' | 'device-code' | 'api-key';
 
@@ -2129,6 +2142,84 @@ routes.patch('/:agentId/config', async (c) => {
 
   const organizationId = c.get('organizationId');
   if (!organizationId) return c.json({ error: 'Organization required' }, 401);
+
+  let expectedConfigurationRevision: string | null;
+  try {
+    expectedConfigurationRevision = parseAgentConfigurationEtag(c.req.header('if-match'));
+  } catch (error) {
+    if (error instanceof AgentConfigurationError) {
+      return c.json({ error: error.code }, 400);
+    }
+    throw error;
+  }
+
+  const commandId = c.req.header('idempotency-key')?.trim();
+  if (expectedConfigurationRevision !== null && !commandId) {
+    return c.json({ error: 'missing_idempotency_key' }, 400);
+  }
+
+  if (
+    expectedConfigurationRevision !== null &&
+    commandId &&
+    Object.keys(settingsUpdates).length > 0
+  ) {
+    const authSource = c.get('authSource');
+    const actor = {
+      kind: authSource === 'session' ? ('session' as const) : ('admin_pat' as const),
+    };
+
+    try {
+      const result = await agentConfigurationAuthority.apply(
+        createNativePatchCommand({
+          organizationId,
+          agentId,
+          commandId,
+          expectedConfigurationRevision,
+          actor,
+          patch: settingsUpdates,
+        })
+      );
+      if (result.status === 'conflict') {
+        return c.json(
+          {
+            error: `agent_configuration_${result.conflict}`,
+            currentRevision: result.currentRevision,
+          },
+          409
+        );
+      }
+      if (result.status === 'rejected') {
+        return c.json(
+          { error: 'agent_configuration_rejected', reason: result.reason },
+          409
+        );
+      }
+      c.header('ETag', `"agent-config:${result.state.configurationRevision}"`);
+      return c.json({
+        success: true,
+        configurationRevision: result.state.configurationRevision,
+        managementMode: result.state.managementMode,
+      });
+    } catch (error) {
+      if (error instanceof AgentConfigurationError) {
+        if (
+          error.code === 'agent_configuration_revision_mismatch' ||
+          error.code === 'agent_configuration_command_conflict'
+        ) {
+          return c.json(
+            { error: error.code, currentRevision: error.currentRevision },
+            409
+          );
+        }
+        if (error.code === 'agent_configuration_not_found') {
+          return c.json({ error: error.code }, 404);
+        }
+        return c.json({ error: error.code }, 400);
+      }
+      throw error;
+    }
+  }
+
   try {
     await patchLegacyAgentSettings(organizationId, agentId, settingsUpdates);
   } catch (error) {

@@ -30,6 +30,90 @@ describe('migration invariants', () => {
   });
 
   describe('schema (DDL applied by the migration chain)', () => {
+    it('has durable agent configuration CAS controls and command identity', async () => {
+      const sql = getTestDb();
+      const tables = await sql`
+        SELECT tablename
+        FROM pg_tables
+        WHERE schemaname = 'public'
+          AND tablename IN (
+            'agent_configuration_controls',
+            'agent_configuration_commands'
+          )
+        ORDER BY tablename
+      `;
+      expect(tables.map((row) => row.tablename)).toEqual([
+        'agent_configuration_commands',
+        'agent_configuration_controls',
+      ]);
+
+      const constraints = await sql`
+        SELECT conname, contype, confdeltype, pg_get_constraintdef(oid) AS definition
+        FROM pg_constraint
+        WHERE conname IN (
+          'agent_configuration_controls_pkey',
+          'agent_configuration_controls_agent_fkey',
+          'agent_configuration_controls_mode_check',
+          'agent_configuration_controls_revision_check',
+          'agent_configuration_controls_last_command_closed',
+          'agent_configuration_commands_pkey',
+          'agent_configuration_commands_agent_fkey',
+          'agent_configuration_commands_digest_check',
+          'agent_configuration_commands_id_check',
+          'agent_configuration_commands_kind_check',
+          'agent_configuration_commands_revision_check',
+          'agent_configuration_commands_mode_check',
+          'agent_configuration_commands_settings_digest_check',
+          'agent_configuration_commands_status_check'
+        )
+        ORDER BY conname
+      `;
+      expect(constraints).toHaveLength(14);
+      expect(
+        constraints
+          .filter((row) => row.contype === 'f')
+          .map((row) => ({ conname: row.conname, confdeltype: row.confdeltype }))
+      ).toEqual([
+        {
+          conname: 'agent_configuration_commands_agent_fkey',
+          confdeltype: 'c',
+        },
+        {
+          conname: 'agent_configuration_controls_agent_fkey',
+          confdeltype: 'c',
+        },
+      ]);
+      expect(
+        constraints.find((row) => row.conname === 'agent_configuration_commands_pkey')
+          ?.definition
+      ).toContain('PRIMARY KEY (organization_id, agent_id, command_id)');
+      const constraintDefinition = (name: string) =>
+        String(constraints.find((row) => row.conname === name)?.definition);
+      expect(
+        constraintDefinition('agent_configuration_controls_last_command_closed')
+      ).toContain('last_command_digest');
+      expect(constraintDefinition('agent_configuration_commands_digest_check')).toContain(
+        'sha256:'
+      );
+      const statusDefinition = constraintDefinition(
+        'agent_configuration_commands_status_check'
+      );
+      expect(statusDefinition).toContain('applied');
+      expect(statusDefinition).toContain('no_change');
+      expect(statusDefinition).not.toContain('already_applied');
+
+      const index = await sql`
+        SELECT indexdef
+        FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname = 'agent_configuration_commands_agent_applied_idx'
+      `;
+      expect(index).toHaveLength(1);
+      expect(String(index[0]?.indexdef)).toContain(
+        '(organization_id, agent_id, applied_at DESC)'
+      );
+    });
+
     it('has durable course memory head and receipt constraints for multi-replica apply', async () => {
       const sql = getTestDb();
       const tables = await sql`
