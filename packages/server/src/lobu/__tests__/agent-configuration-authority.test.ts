@@ -323,6 +323,218 @@ describe('AgentConfigurationAuthority', () => {
     expect(rows).toEqual([{ user_md: 'revision one' }]);
   });
 
+  test('repairs Toolbox membership truth on exact native-mode replay but seals before repair when managed', async () => {
+    const authority = createAgentConfigurationAuthority();
+    const agentId = 'toolbox-replay-membership-repair';
+    const ownerUserId = 'toolbox-replay-owner';
+    const command = {
+      kind: 'bootstrap' as const,
+      profile: 'toolbox_personal' as const,
+      organizationId: ORGANIZATION_ID,
+      agentId,
+      commandId: 'toolbox-replay-membership-repair-command',
+      expectedConfigurationRevision: '0',
+      actor: { kind: 'provisioning' as const },
+      name: 'Replay membership repair',
+      settings: { userMd: 'stable replay settings' },
+      requestDigest: canonicalDigest({ request: 'membership repair' }),
+      ownerUserId,
+      patUserId: 'toolbox-replay-pat',
+      membershipId: 'toolbox-replay-member',
+      ownerEmail: 'toolbox-replay-owner@example.invalid',
+    };
+
+    expect((await authority.bootstrap(command)).status).toBe('applied');
+    const sql = getDb();
+    await sql`
+      DELETE FROM agent_users
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${agentId}
+    `;
+    await sql`
+      DELETE FROM "member"
+      WHERE "organizationId" = ${ORGANIZATION_ID} AND "userId" = ${ownerUserId}
+    `;
+
+    await expect(authority.bootstrap(command)).resolves.toMatchObject({
+      status: 'already_applied',
+      membership: { ensured: true, role: 'member' },
+      state: { configurationRevision: '1' },
+    });
+    const repaired = await sql`
+      SELECT
+        (SELECT role FROM "member"
+          WHERE "organizationId" = ${ORGANIZATION_ID} AND "userId" = ${ownerUserId}) AS role,
+        (SELECT count(*)::int FROM agent_users
+          WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${agentId}) AS mapping_count,
+        (SELECT configuration_revision::text FROM agent_configuration_controls
+          WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${agentId}) AS revision,
+        (SELECT count(*)::int FROM agent_configuration_commands
+          WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${agentId}) AS command_count
+    `;
+    expect(repaired).toEqual([{
+      role: 'member',
+      mapping_count: 2,
+      revision: '1',
+      command_count: 1,
+    }]);
+
+    await sql`
+      UPDATE "member" SET role = 'admin'
+      WHERE "organizationId" = ${ORGANIZATION_ID} AND "userId" = ${ownerUserId}
+    `;
+    await expect(authority.bootstrap(command)).resolves.toMatchObject({
+      status: 'already_applied',
+      membership: { ensured: true, role: 'admin' },
+      state: { configurationRevision: '1' },
+    });
+
+    await sql`
+      DELETE FROM agent_users
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${agentId}
+    `;
+    await sql`
+      DELETE FROM "member"
+      WHERE "organizationId" = ${ORGANIZATION_ID} AND "userId" = ${ownerUserId}
+    `;
+    await sql`
+      UPDATE agent_configuration_controls SET management_mode = 'toolbox_managed'
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${agentId}
+    `;
+
+    await expect(authority.bootstrap(command)).resolves.toEqual({
+      status: 'rejected',
+      reason: 'managed_configuration_sealed',
+    });
+    const sealed = await sql`
+      SELECT
+        (SELECT count(*)::int FROM "member"
+          WHERE "organizationId" = ${ORGANIZATION_ID} AND "userId" = ${ownerUserId}) AS membership_count,
+        (SELECT count(*)::int FROM agent_users
+          WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${agentId}) AS mapping_count,
+        (SELECT configuration_revision::text FROM agent_configuration_controls
+          WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${agentId}) AS revision,
+        (SELECT count(*)::int FROM agent_configuration_commands
+          WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${agentId}) AS command_count
+    `;
+    expect(sealed).toEqual([{
+      membership_count: 0,
+      mapping_count: 0,
+      revision: '1',
+      command_count: 1,
+    }]);
+  });
+
+  test('checks supplied CAS for an unreceipted existing native agent and reports truthful control state', async () => {
+    const authority = createAgentConfigurationAuthority();
+    const base = {
+      kind: 'bootstrap' as const,
+      profile: 'native' as const,
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      commandId: 'unreceipted-existing-native-command',
+      actor: { kind: 'admin_pat' as const },
+      name: 'Existing native agent',
+      settings: { identityMd: 'must remain compatibility no-op' },
+      requestDigest: canonicalDigest({ request: 'existing native' }),
+      ownerPlatform: 'lobu',
+      ownerUserId: null,
+    };
+
+    await expect(authority.bootstrap({
+      ...base,
+      expectedConfigurationRevision: '1',
+    })).rejects.toMatchObject({
+      code: 'agent_configuration_revision_mismatch',
+      currentRevision: '0',
+    });
+
+    await expect(authority.bootstrap(base)).resolves.toMatchObject({
+      status: 'already_applied',
+      created: false,
+      replayed: true,
+      state: {
+        managementMode: 'native',
+        configurationRevision: '0',
+        lastMutation: null,
+      },
+    });
+    const commands = await getDb()`
+      SELECT command_id FROM agent_configuration_commands
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `;
+    expect(commands).toEqual([]);
+  });
+
+  test('emits one lifecycle event only after applied commit and treats recorder failure as nonfatal', async () => {
+    const events: Array<{ entityId: string }> = [];
+    const commandFor = (agentId: string, commandId: string) => ({
+      kind: 'bootstrap' as const,
+      profile: 'toolbox_personal' as const,
+      organizationId: ORGANIZATION_ID,
+      agentId,
+      commandId,
+      expectedConfigurationRevision: '0',
+      actor: { kind: 'provisioning' as const },
+      name: `Lifecycle ${agentId}`,
+      settings: { userMd: agentId },
+      requestDigest: canonicalDigest({ agentId }),
+      ownerUserId: `${agentId}-owner`,
+      patUserId: `${agentId}-pat`,
+      membershipId: `${agentId}-member`,
+      ownerEmail: `${agentId}@example.invalid`,
+    });
+    const authority = createAgentConfigurationAuthority(undefined, {
+      lifecycleRecorder: (event) => {
+        events.push(event);
+      },
+    });
+    const command = commandFor('lifecycle-applied', 'lifecycle-applied-command');
+
+    expect((await authority.bootstrap(command)).status).toBe('applied');
+    expect(events).toEqual([
+      expect.objectContaining({ entityId: command.agentId }),
+    ]);
+    expect((await authority.bootstrap(command)).status).toBe('already_applied');
+    expect(events).toHaveLength(1);
+
+    const rollbackAuthority = createAgentConfigurationAuthority(undefined, {
+      lifecycleRecorder: (event) => {
+        events.push(event);
+      },
+      bootstrapTransactionHooks: {
+        afterAgentLock: async () => {
+          throw new Error('forced bootstrap rollback');
+        },
+      },
+    });
+    await expect(rollbackAuthority.bootstrap(
+      commandFor('lifecycle-rollback', 'lifecycle-rollback-command')
+    )).rejects.toThrow('forced bootstrap rollback');
+    expect(events).toHaveLength(1);
+
+    const failingRecorder = createAgentConfigurationAuthority(undefined, {
+      lifecycleRecorder: async () => {
+        throw new Error('lifecycle unavailable');
+      },
+    });
+    const committed = commandFor('lifecycle-recorder-failure', 'lifecycle-recorder-failure-command');
+    await expect(failingRecorder.bootstrap(committed)).resolves.toMatchObject({
+      status: 'applied',
+      state: { configurationRevision: '1' },
+    });
+    const aggregate = await getDb()`
+      SELECT c.configuration_revision::text AS revision,
+             count(command_row.command_id)::int AS command_count
+      FROM agent_configuration_controls c
+      JOIN agent_configuration_commands command_row
+        ON command_row.organization_id = c.organization_id
+       AND command_row.agent_id = c.agent_id
+      WHERE c.organization_id = ${ORGANIZATION_ID} AND c.agent_id = ${committed.agentId}
+      GROUP BY c.configuration_revision
+    `;
+    expect(aggregate).toEqual([{ revision: '1', command_count: 1 }]);
+  });
+
   test('enrolls a fresh exact applied release claim and persists a monotonic command receipt', async () => {
     const settingsHash = await seedAppliedEnrollmentRelease();
     const result = await createAgentConfigurationAuthority().enrollToolboxManaged(

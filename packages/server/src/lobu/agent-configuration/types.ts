@@ -77,6 +77,13 @@ export interface AppliedAgentConfigurationState {
   };
 }
 
+export type BootstrapAgentConfigurationState = Omit<
+  AppliedAgentConfigurationState,
+  'lastMutation'
+> & {
+  lastMutation: AppliedAgentConfigurationState['lastMutation'] | null;
+};
+
 export type AgentConfigurationRejectionReason =
   | 'field_owned_by_managed_release'
   | 'unknown_configuration_field'
@@ -182,7 +189,7 @@ export type AgentConfigurationBootstrapResult =
       created: boolean;
       replayed: boolean;
       membership?: { ensured: true; role: string };
-      state: AppliedAgentConfigurationState;
+      state: BootstrapAgentConfigurationState;
       metadata: { name: string; description?: string };
     }
   | { status: 'rejected'; reason: 'managed_configuration_sealed' };

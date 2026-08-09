@@ -1802,7 +1802,6 @@ routes.post('/', async (c) => {
       organizationId: orgId,
       agentId,
       commandId: `native-bootstrap:${requestDigest}`,
-      expectedConfigurationRevision: '0',
       actor: { kind: 'session' },
       name,
       description,

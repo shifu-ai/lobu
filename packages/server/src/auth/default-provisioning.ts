@@ -140,8 +140,7 @@ async function backfillDefaultAgent(
   client: DbClient
 ): Promise<void> {
   const rows = (await client`
-    SELECT a.owner_platform, a.owner_user_id, a.identity_md,
-           a.installed_providers,
+    SELECT a.identity_md, a.installed_providers,
            COALESCE(c.configuration_revision, 0)::text AS configuration_revision
       FROM agents a
       LEFT JOIN agent_configuration_controls c
@@ -150,8 +149,6 @@ async function backfillDefaultAgent(
        AND a.id = ${DEFAULT_AGENT_ID}
      LIMIT 1
   `) as unknown as Array<{
-    owner_platform: string | null;
-    owner_user_id: string | null;
     identity_md: string | null;
     installed_providers: unknown;
     configuration_revision: string;
@@ -166,6 +163,20 @@ async function backfillDefaultAgent(
       ? ownerUserIdRaw
       : null;
 
+  const ownerRepair = ownerUserId
+    ? await repairDefaultAgentOwner(organizationId, ownerUserId, client)
+    : { status: 'unchanged' as const, ownerFixed: false, mappingEnsured: false };
+  if (ownerRepair.status === 'managed') {
+    logger.warn(
+      {
+        organizationId,
+        agentId: DEFAULT_AGENT_ID,
+        reason: 'managed_configuration_sealed',
+      },
+      '[default-provisioning] Managed default-agent owner backfill deferred'
+    );
+  }
+
   const installedNow = Array.isArray(row.installed_providers)
     ? (row.installed_providers as Array<{ providerId: string }>)
     : [];
@@ -174,27 +185,14 @@ async function backfillDefaultAgent(
     .filter((m) => m.hasSystemKey() && !installedIds.has(m.providerId))
     .map((m) => ({ providerId: m.providerId, installedAt: Date.now() }));
 
-  const needsOwnerFix =
-    ownerUserId &&
-    (row.owner_user_id !== ownerUserId || row.owner_platform !== 'external');
   const needsProvidersFix =
     installedNow.length === 0 && missingSystemProviders.length > 0;
   const needsIdentityFix =
     typeof row.identity_md !== 'string' || row.identity_md.trim().length === 0;
 
-  if (needsOwnerFix) {
-    await client`
-      UPDATE agents SET
-        owner_platform = 'external',
-        owner_user_id = ${ownerUserId},
-        updated_at = NOW()
-      WHERE organization_id = ${organizationId}
-        AND id = ${DEFAULT_AGENT_ID}
-    `;
-  }
-
   let providersAdded: string[] = [];
   let identityFixed = false;
+  let settingsApplied = false;
   if (needsIdentityFix || needsProvidersFix) {
     const patch = {
       ...(needsIdentityFix ? { identityMd: DEFAULT_AGENT_IDENTITY } : {}),
@@ -232,32 +230,90 @@ async function backfillDefaultAgent(
         },
         '[default-provisioning] Default-agent settings backfill deferred after revision conflict'
       );
-    } else {
+    } else if (patchResult.status === 'applied') {
       providersAdded = missingSystemProviders.map((provider) => provider.providerId);
       identityFixed = needsIdentityFix;
+      settingsApplied = true;
     }
   }
 
-  if (needsOwnerFix || needsIdentityFix || needsProvidersFix) {
+  if (ownerRepair.ownerFixed || ownerRepair.mappingEnsured || settingsApplied) {
     logger.info(
       {
         organizationId,
         agentId: DEFAULT_AGENT_ID,
-        ownerFixed: !!needsOwnerFix,
+        ownerFixed: ownerRepair.ownerFixed,
+        mappingEnsured: ownerRepair.mappingEnsured,
         identityFixed,
         providersAdded,
       },
       '[default-provisioning] Backfilled default agent'
     );
   }
+}
 
-  if (ownerUserId) {
-    await client`
-      INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
-      VALUES (${organizationId}, ${DEFAULT_AGENT_ID}, 'external', ${ownerUserId}, now())
-      ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
+async function repairDefaultAgentOwner(
+  organizationId: string,
+  ownerUserId: string,
+  client: DbClient
+): Promise<
+  | { status: 'missing' | 'managed'; ownerFixed: false; mappingEnsured: false }
+  | { status: 'repaired' | 'unchanged'; ownerFixed: boolean; mappingEnsured: boolean }
+> {
+  return client.begin(async (tx) => {
+    const agents = await tx<{
+      owner_platform: string | null;
+      owner_user_id: string | null;
+    }>`
+      SELECT owner_platform, owner_user_id
+      FROM agents
+      WHERE organization_id = ${organizationId} AND id = ${DEFAULT_AGENT_ID}
+      FOR UPDATE
     `;
-  }
+    const agent = agents[0];
+    if (!agent) {
+      return { status: 'missing', ownerFixed: false, mappingEnsured: false } as const;
+    }
+
+    await tx`
+      INSERT INTO agent_configuration_controls (
+        organization_id, agent_id, management_mode, configuration_revision,
+        created_at, updated_at
+      ) VALUES (${organizationId}, ${DEFAULT_AGENT_ID}, 'native', 0, NOW(), NOW())
+      ON CONFLICT (organization_id, agent_id) DO NOTHING
+    `;
+    const controls = await tx<{ management_mode: 'native' | 'toolbox_managed' }>`
+      SELECT management_mode
+      FROM agent_configuration_controls
+      WHERE organization_id = ${organizationId} AND agent_id = ${DEFAULT_AGENT_ID}
+      FOR UPDATE
+    `;
+    if (controls[0]?.management_mode === 'toolbox_managed') {
+      return { status: 'managed', ownerFixed: false, mappingEnsured: false } as const;
+    }
+
+    const ownerFixed =
+      agent.owner_platform !== 'external' || agent.owner_user_id !== ownerUserId;
+    if (ownerFixed) {
+      await tx`
+        UPDATE agents SET owner_platform = 'external', owner_user_id = ${ownerUserId},
+          updated_at = NOW()
+        WHERE organization_id = ${organizationId} AND id = ${DEFAULT_AGENT_ID}
+      `;
+    }
+    const mappings = await tx`
+      INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
+      VALUES (${organizationId}, ${DEFAULT_AGENT_ID}, 'external', ${ownerUserId}, NOW())
+      ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
+      RETURNING 1
+    `;
+    const mappingEnsured = mappings.length > 0;
+    return {
+      status: ownerFixed || mappingEnsured ? 'repaired' : 'unchanged',
+      ownerFixed,
+      mappingEnsured,
+    } as const;
+  });
 }
 
 /**

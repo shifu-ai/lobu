@@ -4,6 +4,7 @@ import { canonicalize } from 'json-canonicalize';
 import type { DbClient } from '../../db/client';
 import { getDb } from '../../db/client';
 import { recordLifecycleEvent } from '../../utils/insert-event';
+import logger from '../../utils/logger';
 import { AgentConfigurationError, ProvisioningFenceError } from './errors';
 import {
   normalizeNativeSettingsPatchForPersistence,
@@ -22,6 +23,7 @@ import type {
   AgentConfigurationBootstrapResult,
   ApplyBootstrapConfigurationInput,
   AppliedAgentConfigurationState,
+  BootstrapAgentConfigurationState,
   ProvisioningFence,
   Sha256Digest,
 } from './types';
@@ -147,6 +149,64 @@ function stateFromReplay(
   };
 }
 
+function stateFromControl(
+  command: MaterializedBootstrap,
+  control: Awaited<ReturnType<typeof lockAgentAndConfigurationControl>>,
+  settingsDigest: Sha256Digest
+): BootstrapAgentConfigurationState {
+  const lastMutation =
+    control.lastMutationKind &&
+    control.lastCommandId &&
+    control.lastCommandDigest
+      ? {
+          kind: control.lastMutationKind,
+          commandId: control.lastCommandId,
+          commandDigest: control.lastCommandDigest,
+        }
+      : null;
+  return {
+    organizationId: command.organizationId,
+    agentId: command.agentId,
+    managementMode: control.managementMode,
+    configurationRevision: control.configurationRevision,
+    settingsDigest,
+    lastMutation,
+  };
+}
+
+async function ensureToolboxPrincipalAndMembership(
+  tx: DbClient,
+  command: Extract<MaterializedBootstrap, { profile: 'toolbox_personal' }>
+): Promise<string> {
+  await tx`
+    INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+    VALUES (${command.ownerUserId}, ${command.ownerUserId}, ${command.ownerEmail}, true, NOW(), NOW())
+    ON CONFLICT (id) DO NOTHING
+  `;
+  await tx`
+    INSERT INTO "member" (id, "organizationId", "userId", role, "createdAt")
+    VALUES (${command.membershipId}, ${command.organizationId}, ${command.ownerUserId}, 'member', NOW())
+    ON CONFLICT ("organizationId", "userId") DO NOTHING
+  `;
+  await tx`
+    INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
+    VALUES
+      (${command.organizationId}, ${command.agentId}, 'toolbox', ${command.ownerUserId}, NOW()),
+      (${command.organizationId}, ${command.agentId}, 'external', ${command.patUserId}, NOW())
+    ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
+  `;
+  const memberships = await tx<{ role: string }>`
+    SELECT role FROM "member"
+    WHERE "organizationId" = ${command.organizationId}
+      AND "userId" = ${command.ownerUserId}
+    LIMIT 1
+  `;
+  if (!memberships[0]) {
+    throw new Error('Toolbox membership repair did not produce a durable membership');
+  }
+  return String(memberships[0].role);
+}
+
 function metadataWithDescription(
   name: string,
   description: string | null | undefined
@@ -156,7 +216,7 @@ function metadataWithDescription(
 
 export function createAgentConfigurationBootstrap(
   sql?: DbClient,
-  options: { transactionHooks?: { afterAgentLock?: () => Promise<void> } } = {}
+  options: AgentConfigurationBootstrapOptions = {}
 ): {
   apply(
     input: ApplyBootstrapConfigurationInput
@@ -218,6 +278,15 @@ export function createAgentConfigurationBootstrap(
               ),
             };
           }
+          if (
+            command.expectedConfigurationRevision !== undefined &&
+            command.expectedConfigurationRevision !== control.configurationRevision
+          ) {
+            throw new AgentConfigurationError(
+              'agent_configuration_revision_mismatch',
+              control.configurationRevision
+            );
+          }
           const settingsDigest = await readAgentConfigurationSettingsDigest(
             tx,
             command
@@ -226,19 +295,7 @@ export function createAgentConfigurationBootstrap(
             status: 'already_applied' as const,
             created: false,
             replayed: true,
-            state: {
-              organizationId: command.organizationId,
-              agentId: command.agentId,
-              managementMode: control.managementMode,
-              configurationRevision: control.configurationRevision,
-              settingsDigest,
-              lastMutation: {
-                kind: control.lastMutationKind ?? 'bootstrap',
-                commandId: control.lastCommandId ?? command.commandId,
-                commandDigest:
-                  control.lastCommandDigest ?? command.commandDigest,
-              },
-            },
+            state: stateFromControl(command, control, settingsDigest),
             metadata: metadataWithDescription(
               existingMetadata[0]?.name ?? command.name,
               existingMetadata[0]?.description
@@ -294,12 +351,7 @@ export function createAgentConfigurationBootstrap(
                   control.configurationRevision
                 );
               }
-              const memberships = await tx<{ role: string }>`
-                SELECT role FROM "member"
-                WHERE "organizationId" = ${command.organizationId}
-                  AND "userId" = ${command.ownerUserId}
-                LIMIT 1
-              `;
+              const role = await ensureToolboxPrincipalAndMembership(tx, command);
               const prior = replay;
               const settingsDigest =
                 prior?.resultingSettingsDigest ??
@@ -310,23 +362,11 @@ export function createAgentConfigurationBootstrap(
                 replayed: true,
                 membership: {
                   ensured: true as const,
-                  role: String(memberships[0]?.role ?? 'member'),
+                  role,
                 },
                 state: prior
                   ? stateFromReplay(command, prior)
-                  : {
-                      organizationId: command.organizationId,
-                      agentId: command.agentId,
-                      managementMode: control.managementMode,
-                      configurationRevision: control.configurationRevision,
-                      settingsDigest,
-                      lastMutation: {
-                        kind: control.lastMutationKind ?? 'bootstrap',
-                        commandId: control.lastCommandId ?? command.commandId,
-                        commandDigest:
-                          control.lastCommandDigest ?? command.commandDigest,
-                      },
-                    },
+                  : stateFromControl(command, control, settingsDigest),
                 metadata: metadataWithDescription(
                   existingMetadata[0]?.name ?? command.name,
                   existingMetadata[0]?.description
@@ -341,19 +381,14 @@ export function createAgentConfigurationBootstrap(
             );
           }
           if (replay) {
-            const memberships = await tx<{ role: string }>`
-              SELECT role FROM "member"
-              WHERE "organizationId" = ${command.organizationId}
-                AND "userId" = ${command.ownerUserId}
-              LIMIT 1
-            `;
+            const role = await ensureToolboxPrincipalAndMembership(tx, command);
             return {
               status: 'already_applied' as const,
               created: false,
               replayed: true,
               membership: {
                 ensured: true as const,
-                role: String(memberships[0]?.role ?? 'member'),
+                role,
               },
               state: stateFromReplay(command, replay),
               metadata: metadataWithDescription(
@@ -507,17 +542,45 @@ export function createAgentConfigurationBootstrap(
       });
 
       if (result.status === 'applied' && input.profile === 'toolbox_personal') {
-        recordLifecycleEvent({
-          organizationId: input.organizationId,
-          entityType: 'agent',
-          op: result.created ? 'created' : 'updated',
-          entityId: input.agentId,
-          summary: result.created
-            ? `Agent "${input.name}" created`
-            : `Agent "${input.name}" updated`,
-        });
+        try {
+          const lifecycleRecorder: NonNullable<
+            AgentConfigurationBootstrapOptions['lifecycleRecorder']
+          > = options.lifecycleRecorder ?? recordLifecycleEvent;
+          const lifecycleResult = lifecycleRecorder({
+            organizationId: input.organizationId,
+            entityType: 'agent',
+            op: result.created ? 'created' : 'updated',
+            entityId: input.agentId,
+            summary: result.created
+              ? `Agent "${input.name}" created`
+              : `Agent "${input.name}" updated`,
+          });
+          if (
+            lifecycleResult &&
+            typeof (lifecycleResult as Promise<void>).catch === 'function'
+          ) {
+            void (lifecycleResult as Promise<void>).catch((error) => {
+              logger.warn(
+                { error, organizationId: input.organizationId, agentId: input.agentId },
+                '[agent-configuration] Failed to record committed bootstrap lifecycle event'
+              );
+            });
+          }
+        } catch (error) {
+          logger.warn(
+            { error, organizationId: input.organizationId, agentId: input.agentId },
+            '[agent-configuration] Failed to record committed bootstrap lifecycle event'
+          );
+        }
       }
       return result;
     },
   };
 }
+
+export type AgentConfigurationBootstrapOptions = {
+  transactionHooks?: { afterAgentLock?: () => Promise<void> };
+  lifecycleRecorder?: (
+    event: Parameters<typeof recordLifecycleEvent>[0]
+  ) => void | Promise<void>;
+};

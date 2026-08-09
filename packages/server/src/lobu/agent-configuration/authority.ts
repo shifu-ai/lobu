@@ -7,7 +7,10 @@ import {
   type createAgentReleaseService,
   type PreparedAgentReleaseApply,
 } from '../agent-release-service';
-import { createAgentConfigurationBootstrap } from './bootstrap';
+import {
+  type AgentConfigurationBootstrapOptions,
+  createAgentConfigurationBootstrap,
+} from './bootstrap';
 import { AgentConfigurationError } from './errors';
 import {
   LEGACY_MANAGED_RELEASE_SETTING_KEYS,
@@ -150,10 +153,12 @@ export function createAgentConfigurationAuthority(
     readHooks?: { afterEvidenceRead?: () => Promise<void> };
     transactionHooks?: { beforeAgentLock?: () => Promise<void> };
     bootstrapTransactionHooks?: { afterAgentLock?: () => Promise<void> };
+    lifecycleRecorder?: AgentConfigurationBootstrapOptions['lifecycleRecorder'];
   } = {},
 ): AgentConfigurationAuthority {
   const bootstrap = createAgentConfigurationBootstrap(sql, {
     transactionHooks: options.bootstrapTransactionHooks,
+    lifecycleRecorder: options.lifecycleRecorder,
   });
   return {
     bootstrap: (input) => bootstrap.apply(input),
