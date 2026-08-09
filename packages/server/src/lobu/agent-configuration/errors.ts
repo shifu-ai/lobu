@@ -28,3 +28,10 @@ export class AgentConfigurationError extends Error {
     this.currentRevision = currentRevision;
   }
 }
+
+export class ProvisioningFenceError extends Error {
+  constructor(readonly code: 'provisioning_fence_stale' | 'provisioning_fence_conflict') {
+    super(code);
+    this.name = 'ProvisioningFenceError';
+  }
+}

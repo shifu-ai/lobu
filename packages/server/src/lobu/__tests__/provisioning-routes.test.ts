@@ -838,6 +838,72 @@ describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll
 		}]);
 	});
 
+	test("seals broad and fenced bootstrap before any side effect after durable enrollment", async () => {
+		await seedEnrollmentRouteTruth();
+		const app = await buildApp(["mcp:admin"], {
+			agentReleaseEnvironment: "production",
+			runtimeCapabilitySnapshotResolver: async () => enrollmentRouteSnapshot(),
+		});
+		expect((await requestManagedEnrollment(app)).status).toBe(200);
+		const sql = (await import("../../db/client.js")).getDb();
+		const snapshot = async () => ({
+			agent: await sql`
+				SELECT name, description, owner_platform, owner_user_id, user_md
+				FROM agents WHERE organization_id = ${ORG_ID} AND id = ${ENROLLMENT_ROUTE_AGENT_ID}
+			`,
+			users: await sql`SELECT id FROM "user" WHERE id IN ('sealed-broad-owner', 'toolbox-user-fenced')`,
+			members: await sql`
+				SELECT "userId", role FROM "member"
+				WHERE "organizationId" = ${ORG_ID}
+				  AND "userId" IN ('sealed-broad-owner', 'toolbox-user-fenced')
+			`,
+			owners: await sql`
+				SELECT platform, user_id FROM agent_users
+				WHERE organization_id = ${ORG_ID} AND agent_id = ${ENROLLMENT_ROUTE_AGENT_ID}
+				ORDER BY platform, user_id
+			`,
+			grants: await sql`
+				SELECT kind, pattern FROM grants
+				WHERE organization_id = ${ORG_ID} AND agent_id = ${ENROLLMENT_ROUTE_AGENT_ID}
+			`,
+			fences: await sql`
+				SELECT target_id FROM agent_provisioning_fences
+				WHERE organization_id = ${ORG_ID} AND agent_id = ${ENROLLMENT_ROUTE_AGENT_ID}
+			`,
+			lifecycle: await sql`
+				SELECT id FROM events
+				WHERE organization_id = ${ORG_ID}
+				  AND metadata->>'entity_id' = ${ENROLLMENT_ROUTE_AGENT_ID}
+			`,
+		});
+		const before = await snapshot();
+
+		const broad = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: ENROLLMENT_ROUTE_AGENT_ID,
+				name: "must not mutate",
+				ownerUserId: "sealed-broad-owner",
+				settings: { userMd: "must not mutate" },
+			}),
+		});
+		expect(broad.status).toBe(409);
+		await expect(broad.json()).resolves.toMatchObject({
+			error: "agent_settings_managed_by_release",
+		});
+		const fenced = await putFencedAgent(
+			app,
+			ENROLLMENT_ROUTE_AGENT_ID,
+			fencedProvisioningBody({ settings: { userMd: "must not mutate" } }),
+		);
+		expect(fenced.status).toBe(409);
+		await expect(fenced.json()).resolves.toEqual({
+			error: "agent_settings_managed_by_release",
+		});
+		expect(await snapshot()).toEqual(before);
+	});
+
 	test.each([
 		["capability absent", enrollmentRouteSnapshot({ capabilities: ["other.v1"] }), undefined, "agent_configuration_capability_inactive"],
 		["release id mismatch", enrollmentRouteSnapshot({ appliedReleaseId: "agent-release-enrollment-route-5" }), undefined, "agent_configuration_stale_release"],
@@ -1086,6 +1152,22 @@ describe("POST /api/provisioning/agents", () => {
 
 		const { getDb } = await import("../../db/client.js");
 		const sql = getDb();
+		const initialControl = await sql`
+			SELECT c.management_mode, c.configuration_revision::text AS configuration_revision,
+			       command_row.mutation_kind, command_row.resulting_revision::text AS resulting_revision
+			FROM agent_configuration_controls c
+			JOIN agent_configuration_commands command_row
+			  ON command_row.organization_id = c.organization_id
+			 AND command_row.agent_id = c.agent_id
+			WHERE c.organization_id = ${ORG_ID}
+			  AND c.agent_id = ${"shifu-u-abc123"}
+		`;
+		expect(initialControl).toEqual([{
+			management_mode: "native",
+			configuration_revision: "1",
+			mutation_kind: "bootstrap",
+			resulting_revision: "1",
+		}]);
 		const grants = await sql`
 			SELECT kind, pattern, denied
 			FROM grants
@@ -1678,6 +1760,82 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 			created: false,
 			provisioningFence: { claimGeneration: 1, claimToken: FENCE_TOKEN_A },
 		});
+		const rows = await (await import("../../db/client.js")).getDb()`
+			SELECT c.configuration_revision::text AS configuration_revision,
+			       count(command_row.command_id)::int AS command_count
+			FROM agent_configuration_controls c
+			JOIN agent_configuration_commands command_row
+			  ON command_row.organization_id = c.organization_id
+			 AND command_row.agent_id = c.agent_id
+			WHERE c.organization_id = ${ORG_ID} AND c.agent_id = ${agentId}
+			GROUP BY c.configuration_revision
+		`;
+		expect(rows).toEqual([{ configuration_revision: "1", command_count: 1 }]);
+	});
+
+	test("rolls back the whole aggregate when final authority control persistence fails", async () => {
+		const sql = (await import("../../db/client.js")).getDb();
+		await sql.unsafe(`
+			CREATE OR REPLACE FUNCTION fail_bootstrap_control_update_for_test()
+			RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN
+				RAISE EXCEPTION 'injected bootstrap control failure';
+			END;
+			$$
+		`);
+		await sql.unsafe(`
+			CREATE TRIGGER fail_bootstrap_control_update_for_test
+			BEFORE UPDATE ON agent_configuration_controls
+			FOR EACH ROW EXECUTE FUNCTION fail_bootstrap_control_update_for_test()
+		`);
+		try {
+			const response = await putFencedAgent(
+				await buildApp(),
+				"shifu-u-bootstrap-rollback",
+				fencedProvisioningBody({
+					settings: {
+						userMd: "must roll back",
+						preApprovedTools: ["/mcp/notion/tools/*"],
+					},
+				}),
+			);
+			expect(response.status).toBe(500);
+		} finally {
+			await sql.unsafe(`
+				DROP TRIGGER IF EXISTS fail_bootstrap_control_update_for_test
+				ON agent_configuration_controls
+			`);
+			await sql.unsafe(`DROP FUNCTION IF EXISTS fail_bootstrap_control_update_for_test()`);
+		}
+
+		const aggregate = await sql`
+			SELECT
+			  (SELECT count(*)::int FROM agents
+			   WHERE organization_id = ${ORG_ID} AND id = 'shifu-u-bootstrap-rollback') AS agents,
+			  (SELECT count(*)::int FROM agent_configuration_controls
+			   WHERE organization_id = ${ORG_ID} AND agent_id = 'shifu-u-bootstrap-rollback') AS controls,
+			  (SELECT count(*)::int FROM agent_configuration_commands
+			   WHERE organization_id = ${ORG_ID} AND agent_id = 'shifu-u-bootstrap-rollback') AS commands,
+			  (SELECT count(*)::int FROM agent_provisioning_fences
+			   WHERE organization_id = ${ORG_ID} AND agent_id = 'shifu-u-bootstrap-rollback') AS fences,
+			  (SELECT count(*)::int FROM grants
+			   WHERE organization_id = ${ORG_ID} AND agent_id = 'shifu-u-bootstrap-rollback') AS grants,
+			  (SELECT count(*)::int FROM agent_users
+			   WHERE organization_id = ${ORG_ID} AND agent_id = 'shifu-u-bootstrap-rollback') AS owners,
+			  (SELECT count(*)::int FROM "member"
+			   WHERE "organizationId" = ${ORG_ID} AND "userId" = 'toolbox-user-fenced') AS members,
+			  (SELECT count(*)::int FROM "user" WHERE id = 'toolbox-user-fenced') AS users
+		`;
+		expect(aggregate).toEqual([{
+			agents: 0,
+			controls: 0,
+			commands: 0,
+			fences: 0,
+			grants: 0,
+			owners: 0,
+			members: 0,
+			users: 0,
+		}]);
 	});
 
 	test("rejects same-generation conflicts without changing observable settings", async () => {
@@ -1793,6 +1951,17 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 		await expect(takeover.json()).resolves.toMatchObject({
 			provisioningFence: { claimGeneration: 2, claimToken: FENCE_TOKEN_B },
 		});
+		const control = await (await import("../../db/client.js")).getDb()`
+			SELECT c.configuration_revision::text AS configuration_revision,
+			       count(command_row.command_id)::int AS command_count
+			FROM agent_configuration_controls c
+			JOIN agent_configuration_commands command_row
+			  ON command_row.organization_id = c.organization_id
+			 AND command_row.agent_id = c.agent_id
+			WHERE c.organization_id = ${ORG_ID} AND c.agent_id = ${agentId}
+			GROUP BY c.configuration_revision
+		`;
+		expect(control).toEqual([{ configuration_revision: "2", command_count: 2 }]);
 
 		const late = await putFencedAgent(app, agentId, generationOne);
 		expect(late.status).toBe(409);
@@ -2061,6 +2230,7 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 			{ ...fencedProvisioningBody(), baselineVersionId: "draft" },
 			{ ...fencedProvisioningBody(), effectiveSettingsDigest: "sha256:nope" },
 			{ ...fencedProvisioningBody(), name: "x".repeat(201) },
+			{ ...fencedProvisioningBody(), settings: { guardrails: "not-an-array" } },
 		];
 
 		for (const [index, body] of invalidBodies.entries()) {

@@ -29,21 +29,18 @@ import {
   AGENT_CONFIGURATION_RESPONSE_VERSION,
   AGENT_CONFIGURATION_VERSION_HEADER,
   AgentConfigurationError,
+  AgentProvisioningModeError,
+  ProvisioningFenceError,
   type AgentConfigurationAuthority,
   type AgentConfigurationResponseVersion,
   createAgentConfigurationAuthority,
+  type Sha256Digest,
 } from "./agent-configuration/index.js";
+import { parseNativeSettingsPatch } from "./agent-configuration/field-ownership.js";
 import {
   AgentReleaseError,
   createAgentReleaseService,
 } from "./agent-release-service.js";
-import {
-  AgentSettingsManagedByFencedProvisioningError,
-  AgentSettingsManagedByReleaseError,
-  ProvisioningFenceError,
-  provisionFencedAgent,
-  provisionLegacyAgent,
-} from "./legacy-agent-settings-service.js";
 import {
   validateExpectedGrantPatterns,
   verifyRuntimeGrantPatterns,
@@ -139,6 +136,7 @@ function validateSettings(settings: unknown): Omit<AgentSettings, "updatedAt"> {
   if (!isObject(settings)) {
     throw new Error("settings must be an object");
   }
+  parseNativeSettingsPatch(settings);
   return settings as Omit<AgentSettings, "updatedAt">;
 }
 
@@ -163,7 +161,7 @@ const SHA256_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const CONFIGURATION_ETAG_PATTERN = /^"agent-config:(0|[1-9][0-9]*)"$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
 
-function requestDigest(value: unknown): string {
+function requestDigest(value: unknown): Sha256Digest {
   return `sha256:${createHash("sha256").update(canonicalize(value)).digest("hex")}`;
 }
 
@@ -255,19 +253,6 @@ async function ensureUsableOAuthCredential(
   return refreshed;
 }
 
-async function syncProvisioningGrants(
-  agentId: string,
-  settings: Omit<AgentSettings, "updatedAt">,
-  organizationId: string
-): Promise<void> {
-  for (const domain of settings.networkConfig?.allowedDomains ?? []) {
-    await grantStore.grant(agentId, domain, null, undefined, organizationId);
-  }
-  for (const pattern of settings.preApprovedTools ?? []) {
-    await grantStore.grant(agentId, pattern, null, undefined, organizationId);
-  }
-}
-
 export function createProvisioningRoutes(
   options: ProvisioningRoutesOptions = {}
 ): Hono<{ Bindings: Env }> {
@@ -289,6 +274,7 @@ export function createProvisioningRoutes(
       agentReleaseService,
       readHooks: options.agentConfigurationReadHooks,
       transactionHooks: options.agentConfigurationTransactionHooks,
+      bootstrapTransactionHooks: options.legacyProvisioningHooks,
     });
   const runtimeCapabilitySnapshotResolver =
     options.runtimeCapabilitySnapshotResolver ?? resolveRuntimeCapabilitySnapshot;
@@ -580,9 +566,21 @@ export function createProvisioningRoutes(
         effectiveSettingsDigest,
       };
       try {
-        const result = await provisionFencedAgent({
+        const digest = requestDigest({
+          agentId,
+          name,
+          description: description ?? null,
+          ownerUserId,
+          settings,
+          ...fence,
+        });
+        const result = await agentConfigurationAuthority.bootstrap({
+          kind: "bootstrap",
+          profile: "toolbox_personal",
           organizationId,
           agentId,
+          commandId: `toolbox-fence:${targetId}:${claimGeneration}`,
+          actor: { kind: "provisioning" },
           name,
           description,
           ownerUserId,
@@ -594,15 +592,11 @@ export function createProvisioningRoutes(
           ),
           settings,
           fence,
-          requestDigest: requestDigest({
-            agentId,
-            name,
-            description: description ?? null,
-            ownerUserId,
-            settings,
-            ...fence,
-          }),
+          requestDigest: digest,
         });
+        if (result.status === "rejected") {
+          return c.json({ error: "agent_settings_managed_by_release" }, 409);
+        }
         return c.json(
           {
             ok: true,
@@ -616,9 +610,6 @@ export function createProvisioningRoutes(
         );
       } catch (error) {
         if (error instanceof ProvisioningFenceError) {
-          return c.json({ error: error.code }, 409);
-        }
-        if (error instanceof AgentSettingsManagedByReleaseError) {
           return c.json({ error: error.code }, 409);
         }
         throw error;
@@ -686,11 +677,22 @@ export function createProvisioningRoutes(
       );
     }
 
-    let provisioned: Awaited<ReturnType<typeof provisionLegacyAgent>>;
+    let provisioned;
     try {
-      provisioned = await provisionLegacyAgent({
+      const digest = requestDigest({
+        agentId,
+        name,
+        description: description ?? null,
+        ownerUserId,
+        settings,
+      });
+      provisioned = await agentConfigurationAuthority.bootstrap({
+        kind: "bootstrap",
+        profile: "toolbox_personal",
         organizationId,
         agentId,
+        commandId: `toolbox-bootstrap:${digest}`,
+        actor: { kind: "provisioning" },
         name,
         description,
         ownerUserId,
@@ -698,21 +700,24 @@ export function createProvisioningRoutes(
         membershipId: deterministicMembershipId(organizationId, ownerUserId),
         ownerEmail: deterministicToolboxOwnerEmail(organizationId, ownerUserId),
         settings,
-        transactionHooks: options.legacyProvisioningHooks,
+        requestDigest: digest,
       });
-    } catch (error) {
-      if (error instanceof AgentSettingsManagedByFencedProvisioningError) {
-        return c.json({ error: error.code }, 409);
-      }
-      if (error instanceof AgentSettingsManagedByReleaseError) {
+      if (provisioned.status === "rejected") {
         return c.json(
-          { error: error.code, error_description: error.message },
+          {
+            error: "agent_settings_managed_by_release",
+            error_description:
+              "Agent release-owned settings must be changed through managed release apply",
+          },
           409
         );
       }
+    } catch (error) {
+      if (error instanceof AgentProvisioningModeError) {
+        return c.json({ error: error.code }, 409);
+      }
       throw error;
     }
-    await syncProvisioningGrants(agentId, settings, organizationId);
 
     return c.json(
       {

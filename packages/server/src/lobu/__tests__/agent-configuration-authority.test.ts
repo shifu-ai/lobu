@@ -152,6 +152,121 @@ describe('AgentConfigurationAuthority', () => {
     await seedAgentRow(AGENT_ID, { organizationId: ORGANIZATION_ID });
   });
 
+  test('rejects a stale initial bootstrap revision and rolls back the placeholder agent', async () => {
+    const agentId = 'native-bootstrap-stale-create';
+
+    await expect(
+      createAgentConfigurationAuthority().bootstrap({
+        kind: 'bootstrap',
+        profile: 'native',
+        organizationId: ORGANIZATION_ID,
+        agentId,
+        commandId: 'native-bootstrap-stale-create-command',
+        expectedConfigurationRevision: '1',
+        actor: { kind: 'admin_pat' },
+        name: 'Stale bootstrap',
+        settings: { identityMd: 'stale bootstrap identity' },
+        requestDigest: canonicalDigest({ request: 'stale bootstrap create' }),
+        ownerPlatform: 'lobu',
+        ownerUserId: null,
+      })
+    ).rejects.toMatchObject({
+      code: 'agent_configuration_revision_mismatch',
+      currentRevision: '0',
+    });
+
+    const agents = await getDb()`
+      SELECT id FROM agents
+      WHERE organization_id = ${ORGANIZATION_ID} AND id = ${agentId}
+    `;
+    expect(agents).toEqual([]);
+  });
+
+  test('rejects exact fence replay when the command durable effects changed', async () => {
+    const authority = createAgentConfigurationAuthority();
+    const agentId = 'toolbox-fence-command-conflict';
+    const command = {
+      kind: 'bootstrap' as const,
+      profile: 'toolbox_personal' as const,
+      organizationId: ORGANIZATION_ID,
+      agentId,
+      commandId: 'toolbox-fence-command-conflict:1',
+      expectedConfigurationRevision: '0',
+      actor: { kind: 'provisioning' as const },
+      name: 'Fenced bootstrap',
+      ownerUserId: 'toolbox-fence-owner',
+      patUserId: 'toolbox-fence-pat',
+      membershipId: 'toolbox-fence-member',
+      ownerEmail: 'toolbox-fence-owner@example.invalid',
+      fence: {
+        targetId: 'a49ef354-e14f-4b42-a030-bd5f9a78f17f',
+        claimGeneration: 1,
+        claimToken: '02a3b3ca-e30a-4c3f-8317-2a5da9b4a52a',
+        baselineVersionId: `personal-agent-baseline-v1-${'a'.repeat(64)}`,
+        effectiveSettingsDigest: canonicalDigest({ settings: 'generation-one' }),
+      },
+      requestDigest: canonicalDigest({ request: 'generation-one' }),
+    };
+
+    await authority.bootstrap({
+      ...command,
+      settings: { userMd: 'generation one' },
+    });
+
+    await expect(
+      authority.bootstrap({
+        ...command,
+        settings: { userMd: 'altered behind the same fence identity' },
+      })
+    ).rejects.toMatchObject({
+      code: 'agent_configuration_command_conflict',
+      currentRevision: '1',
+    });
+  });
+
+  test('enforces a supplied bootstrap revision after compatibility replay checks', async () => {
+    const authority = createAgentConfigurationAuthority();
+    const agentId = 'toolbox-bootstrap-stale-revision';
+    const base = {
+      kind: 'bootstrap' as const,
+      profile: 'toolbox_personal' as const,
+      organizationId: ORGANIZATION_ID,
+      agentId,
+      actor: { kind: 'provisioning' as const },
+      name: 'Compatibility bootstrap',
+      ownerUserId: 'toolbox-bootstrap-owner',
+      patUserId: 'toolbox-bootstrap-pat',
+      membershipId: 'toolbox-bootstrap-member',
+      ownerEmail: 'toolbox-bootstrap-owner@example.invalid',
+    };
+
+    await authority.bootstrap({
+      ...base,
+      commandId: 'toolbox-bootstrap-compatible-first',
+      settings: { userMd: 'revision one' },
+      requestDigest: canonicalDigest({ request: 'compatible-first' }),
+    });
+
+    await expect(
+      authority.bootstrap({
+        ...base,
+        commandId: 'toolbox-bootstrap-stale-second',
+        expectedConfigurationRevision: '0',
+        settings: { userMd: 'must not overwrite revision one' },
+        requestDigest: canonicalDigest({ request: 'stale-second' }),
+      })
+    ).rejects.toMatchObject({
+      code: 'agent_configuration_revision_mismatch',
+      currentRevision: '1',
+    });
+
+    const rows = await getDb()`
+      SELECT user_md FROM agents
+      WHERE organization_id = ${ORGANIZATION_ID} AND id = ${agentId}
+    `;
+    expect(rows).toEqual([{ user_md: 'revision one' }]);
+  });
+
   test('enrolls a fresh exact applied release claim and persists a monotonic command receipt', async () => {
     const settingsHash = await seedAppliedEnrollmentRelease();
     const result = await createAgentConfigurationAuthority().enrollToolboxManaged(

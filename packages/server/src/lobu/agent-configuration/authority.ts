@@ -7,8 +7,11 @@ import {
   type createAgentReleaseService,
   type PreparedAgentReleaseApply,
 } from '../agent-release-service';
+import { createAgentConfigurationBootstrap } from './bootstrap';
 import { AgentConfigurationError } from './errors';
 import {
+  LEGACY_MANAGED_RELEASE_SETTING_KEYS,
+  PERSONAL_BASELINE_RELEASE_SETTING_KEYS,
   normalizeNativeSettingsPatchForPersistence,
   parseNativeSettingsPatch,
 } from './field-ownership';
@@ -22,7 +25,9 @@ import {
 } from './postgres-repository';
 import { AGENT_CONFIGURATION_RESPONSE_VERSION } from './types';
 import type {
+  AgentConfigurationBootstrapResult,
   AgentConfigurationMutationResult,
+  ApplyBootstrapConfigurationInput,
   AgentConfigurationEnrollmentResult,
   AppliedAgentConfigurationState,
   ManagedReleaseCommandInput,
@@ -37,6 +42,7 @@ import type {
 const DECIMAL_REVISION_PATTERN = /^(0|[1-9][0-9]*)$/;
 
 export interface AgentConfigurationAuthority {
+  bootstrap(input: ApplyBootstrapConfigurationInput): Promise<AgentConfigurationBootstrapResult>;
   apply(input: NativePatchCommandInput): Promise<AgentConfigurationMutationResult>;
   enrollToolboxManaged(
     input: EnrollToolboxManagedInput,
@@ -59,29 +65,13 @@ export interface AgentConfigurationAuthority {
 
 type AgentReleaseService = ReturnType<typeof createAgentReleaseService>;
 
-const RELEASE_LEGACY_SETTING_KEYS = new Set([
-  'identityMd',
-  'soulMd',
-  'userMd',
-  'modelSelection',
-  'toolsConfig',
-]);
+const RELEASE_LEGACY_SETTING_KEYS = new Set(LEGACY_MANAGED_RELEASE_SETTING_KEYS);
 const RELEASE_BASELINE_SETTING_KEYS = new Set([
-  ...RELEASE_LEGACY_SETTING_KEYS,
+  ...PERSONAL_BASELINE_RELEASE_SETTING_KEYS,
   'templateKey',
   'scope',
   'baselinePrompt',
   'runtimeConfig',
-  'mcpServers',
-  'skillsConfig',
-  'preApprovedTools',
-  'providerModelPreferences',
-  'networkConfig',
-  'egressConfig',
-  'nixConfig',
-  'pluginsConfig',
-  'guardrails',
-  'installedProviders',
 ]);
 
 function materializeNativePatchCommand(input: NativePatchCommandInput): NativePatchCommand {
@@ -159,9 +149,14 @@ export function createAgentConfigurationAuthority(
     agentReleaseService?: AgentReleaseService;
     readHooks?: { afterEvidenceRead?: () => Promise<void> };
     transactionHooks?: { beforeAgentLock?: () => Promise<void> };
+    bootstrapTransactionHooks?: { afterAgentLock?: () => Promise<void> };
   } = {},
 ): AgentConfigurationAuthority {
+  const bootstrap = createAgentConfigurationBootstrap(sql, {
+    transactionHooks: options.bootstrapTransactionHooks,
+  });
   return {
+    bootstrap: (input) => bootstrap.apply(input),
     apply(input) {
       const command = materializeNativePatchCommand(input);
       return (sql ?? getDb()).begin((tx) => applyNativePatchInTransaction(tx, command));

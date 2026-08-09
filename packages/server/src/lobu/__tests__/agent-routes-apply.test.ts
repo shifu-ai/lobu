@@ -1246,6 +1246,22 @@ describe('concurrent-apply race fixes', () => {
       'lobu-memory': { url: expect.stringContaining('/mcp/'), type: 'streamable-http' },
     });
     expect(settings[0].pre_approved_tools).toEqual(['/mcp/lobu-memory/tools/*']);
+
+    const authorityRows = await sql`
+      SELECT c.configuration_revision::text AS configuration_revision,
+             command_row.mutation_kind,
+             count(*) OVER ()::int AS command_count
+      FROM agent_configuration_controls c
+      JOIN agent_configuration_commands command_row
+        ON command_row.organization_id = c.organization_id
+       AND command_row.agent_id = c.agent_id
+      WHERE c.organization_id = ${ORG_A} AND c.agent_id = 'race-agent'
+    `;
+    expect(authorityRows).toEqual([{
+      configuration_revision: '1',
+      mutation_kind: 'bootstrap',
+      command_count: 1,
+    }]);
   });
 
   test('POST /agents — concurrent create cannot overwrite operator-set MCP servers', async () => {

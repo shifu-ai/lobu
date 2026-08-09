@@ -135,3 +135,54 @@ export interface ManagedReleaseConfigurationResult {
   evidence: AgentReleaseApplyResult | AgentReleasePostApplyEvidence;
   state: AppliedAgentConfigurationState;
 }
+
+export type ProvisioningFence = {
+  targetId: string;
+  claimGeneration: number;
+  claimToken: string;
+  baselineVersionId: string;
+  effectiveSettingsDigest: string;
+};
+
+export type ToolboxBootstrap = {
+  profile: 'toolbox_personal';
+  ownerUserId: string;
+  patUserId: string;
+  membershipId: string;
+  ownerEmail: string;
+  fence?: ProvisioningFence;
+};
+
+export type NativeBootstrap = {
+  profile: 'native';
+  ownerPlatform: string;
+  ownerUserId: string | null;
+};
+
+export type ApplyBootstrapConfigurationInput = {
+  kind: 'bootstrap';
+  organizationId: string;
+  agentId: string;
+  commandId: string;
+  /**
+   * Compatibility provisioning endpoints predate revision preconditions and
+   * omit this field. When supplied, the authority enforces it under the lock.
+   */
+  expectedConfigurationRevision?: string;
+  actor: ConfigurationActor;
+  name: string;
+  description?: string;
+  settings: Record<string, unknown>;
+  requestDigest: Sha256Digest;
+} & (ToolboxBootstrap | NativeBootstrap);
+
+export type AgentConfigurationBootstrapResult =
+  | {
+      status: 'applied' | 'already_applied';
+      created: boolean;
+      replayed: boolean;
+      membership?: { ensured: true; role: string };
+      state: AppliedAgentConfigurationState;
+      metadata: { name: string; description?: string };
+    }
+  | { status: 'rejected'; reason: 'managed_configuration_sealed' };

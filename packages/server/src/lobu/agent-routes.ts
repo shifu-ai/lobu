@@ -1769,18 +1769,9 @@ routes.post('/', async (c) => {
 
   const orgId = c.get('organizationId') as string;
 
-  // Atomic create + auto-inject. Two concurrent `lobu apply` runs from the
-  // same operator can both reach this endpoint with the same agentId. The
-  // previous version did INSERT-then-saveSettings as two separate writes:
-  // a "loser" returning 200 in the idempotent branch could see the row
-  // before the winner's saveSettings landed, then immediately PATCH
-  // `mcpServers` with operator config — only for the winner's deferred
-  // saveSettings to clobber it moments later. Folding `mcp_servers` into
-  // the same INSERT statement closes that gap: the row + auto-injected
-  // MCP server land atomically and the loser's idempotent 200 already
-  // reflects fully-initialized state.
-  const sql = getDb();
-  const now = new Date();
+  // The authority bootstrap commits the agent, auto-injected MCP settings,
+  // ownership, configuration control, and command receipt atomically. A
+  // concurrent idempotent create therefore observes a complete aggregate.
   const orgSlug = c.req.param('orgSlug');
   const publicUrl =
     getConfiguredPublicOrigin() || `http://localhost:${process.env.PORT || '8787'}`;
@@ -1788,39 +1779,39 @@ routes.post('/', async (c) => {
     'lobu-memory': { url: `${publicUrl}/mcp/${orgSlug}`, type: 'streamable-http' },
   };
   const ownerPreApprovedTools = ['/mcp/lobu-memory/tools/*'];
-  const inserted = await sql`
-    INSERT INTO agents (
-      id, organization_id, name, description, owner_platform, owner_user_id,
-      mcp_servers, pre_approved_tools, created_at, updated_at
-    )
-    VALUES (
-      ${agentId}, ${orgId}, ${name}, ${description ?? null},
-      'lobu', ${user.id},
-      ${sql.json(ownerMcpServers)}, ${sql.json(ownerPreApprovedTools)}, ${now}, ${now}
-    )
-    ON CONFLICT (organization_id, id) DO NOTHING
-    RETURNING id
-  `;
-
-  if (inserted.length === 0) {
-    // Another writer (or a previous apply cycle) already owns this id in
-    // *this* org. Return idempotent 200 with the existing row's metadata.
-    // Cross-org collisions are no longer possible — the PK is per-org now.
-    const existing = await configStore.getMetadata(agentId);
-    if (!existing) {
-      return c.json({ error: 'Agent metadata missing' }, 500);
-    }
-    return c.json(
-      {
-        agentId,
-        name: existing.name,
-        description: existing.description,
-      },
-      200
-    );
+  const settings = {
+    mcpServers: ownerMcpServers,
+    preApprovedTools: ownerPreApprovedTools,
+  };
+  const requestDigest = `sha256:${createHash('sha256')
+    .update(JSON.stringify({ agentId, name, description: description ?? null, settings }))
+    .digest('hex')}` as const;
+  const result = await agentConfigurationAuthority.bootstrap({
+    kind: 'bootstrap',
+    profile: 'native',
+    organizationId: orgId,
+    agentId,
+    commandId: `native-bootstrap:${requestDigest}`,
+    expectedConfigurationRevision: '0',
+    actor: { kind: 'session' },
+    name,
+    description,
+    ownerPlatform: 'lobu',
+    ownerUserId: user.id,
+    settings,
+    requestDigest,
+  });
+  if (result.status === 'rejected') {
+    return c.json({ error: result.reason }, 409);
   }
-
-  return c.json({ agentId, name, description }, 201);
+  return c.json(
+    {
+      agentId,
+      name: result.metadata.name,
+      description: result.metadata.description,
+    },
+    result.created ? 201 : 200
+  );
 });
 
 // ── Get agent detail ─────────────────────────────────────────────────────────

@@ -2,13 +2,20 @@ export {
   type AgentConfigurationAuthority,
   createAgentConfigurationAuthority,
 } from './authority';
-export { AgentConfigurationError, type AgentConfigurationErrorCode } from './errors';
+export {
+  AgentConfigurationError,
+  ProvisioningFenceError,
+  type AgentConfigurationErrorCode,
+} from './errors';
+export { AgentProvisioningModeError } from './bootstrap';
 export type {
+  AgentConfigurationBootstrapResult,
   AgentConfigurationCommandEnvelope,
   AgentConfigurationEnrollmentResult,
   AgentConfigurationMutationResult,
   AgentConfigurationResponseVersion,
   AppliedAgentConfigurationState,
+  ApplyBootstrapConfigurationInput,
   ConfigurationActor,
   ConfigurationActorKind,
   ConfigurationManagementMode,
@@ -18,7 +25,10 @@ export type {
   NativeSettingsPatch,
   ManagedReleaseCommandInput,
   ManagedReleaseConfigurationResult,
+  NativeBootstrap,
+  ProvisioningFence,
   Sha256Digest,
+  ToolboxBootstrap,
 } from './types';
 export {
   AGENT_CONFIGURATION_RESPONSE_VERSION,

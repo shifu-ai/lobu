@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { inferGrantKind, normalizeDomainPattern, type AgentSettings } from '@lobu/core';
 import { canonicalize } from 'json-canonicalize';
 import type { DbClient } from '../../db/client';
 import { validateRuntimeCapabilitySnapshot } from '../../gateway/services/runtime-capability-snapshot';
@@ -9,6 +10,8 @@ import {
 } from '../agent-release-service';
 import { AgentConfigurationError } from './errors';
 import {
+  LEGACY_MANAGED_RELEASE_SETTING_KEYS,
+  PERSONAL_BASELINE_RELEASE_SETTING_KEYS,
   decideNativeSettingsPatch,
   normalizeNativeSettingsPatchForPersistence,
 } from './field-ownership';
@@ -87,26 +90,10 @@ export interface ConfigurationCommandReplay {
 }
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
-const LEGACY_RELEASE_OWNED_SETTINGS = new Set([
-  'identityMd',
-  'soulMd',
-  'userMd',
-  'modelSelection',
-  'toolsConfig',
-]);
-const PERSONAL_BASELINE_LOBU_OWNED_SETTINGS = new Set([
-  ...LEGACY_RELEASE_OWNED_SETTINGS,
-  'mcpServers',
-  'skillsConfig',
-  'preApprovedTools',
-  'providerModelPreferences',
-  'networkConfig',
-  'egressConfig',
-  'nixConfig',
-  'pluginsConfig',
-  'guardrails',
-  'installedProviders',
-]);
+const LEGACY_RELEASE_OWNED_SETTINGS = new Set<string>(LEGACY_MANAGED_RELEASE_SETTING_KEYS);
+const PERSONAL_BASELINE_LOBU_OWNED_SETTINGS = new Set<string>(
+  PERSONAL_BASELINE_RELEASE_SETTING_KEYS,
+);
 
 function hasOwn(value: object, key: PropertyKey): boolean {
   return Object.hasOwn(value, key);
@@ -136,6 +123,131 @@ function settingsProjection(row: AgentSettingsRow): Record<string, unknown> {
     preApprovedTools: row.pre_approved_tools ?? [],
     guardrails: row.guardrails ?? [],
   };
+}
+
+export async function replaceAgentConfigurationSettingsInTransaction(
+  tx: DbClient,
+  organizationId: string,
+  agentId: string,
+  settings: Omit<AgentSettings, 'updatedAt'>,
+): Promise<void> {
+  await tx`
+    UPDATE agents SET
+      model = ${settings.model ?? null},
+      model_selection = ${tx.json(settings.modelSelection ?? {})},
+      provider_model_preferences = ${tx.json(settings.providerModelPreferences ?? {})},
+      network_config = ${tx.json(settings.networkConfig ?? {})},
+      egress_config = ${tx.json(settings.egressConfig ?? {})},
+      nix_config = ${tx.json(settings.nixConfig ?? {})},
+      mcp_servers = ${tx.json(settings.mcpServers ?? {})},
+      soul_md = ${settings.soulMd ?? ''},
+      user_md = ${settings.userMd ?? ''},
+      identity_md = ${settings.identityMd ?? ''},
+      skills_config = ${tx.json(settings.skillsConfig ?? { skills: [] })},
+      tools_config = ${tx.json(settings.toolsConfig ?? {})},
+      plugins_config = ${tx.json(settings.pluginsConfig ?? {})},
+      installed_providers = ${tx.json(settings.installedProviders ?? [])},
+      verbose_logging = ${settings.verboseLogging ?? false},
+      pre_approved_tools = ${tx.json(settings.preApprovedTools ?? [])},
+      guardrails = ${tx.json(settings.guardrails ?? [])},
+      updated_at = NOW()
+    WHERE organization_id = ${organizationId} AND id = ${agentId}
+  `;
+}
+
+export async function syncProvisioningGrantsInTransaction(
+  tx: DbClient,
+  organizationId: string,
+  agentId: string,
+  settings: Omit<AgentSettings, 'updatedAt'>,
+): Promise<void> {
+  const desired = new Map<string, { kind: string; pattern: string }>();
+  for (const rawPattern of [
+    ...(settings.networkConfig?.allowedDomains ?? []),
+    ...(settings.preApprovedTools ?? []),
+  ]) {
+    const pattern = normalizeDomainPattern(rawPattern);
+    const kind = inferGrantKind(pattern);
+    desired.set(`${kind}\u0000${pattern}`, { kind, pattern });
+  }
+  const owned = await tx<{ kind: string; pattern: string }>`
+    SELECT owned.kind, owned.pattern
+    FROM agent_fenced_provisioning_grants owned
+    JOIN grants grant_row
+      ON grant_row.organization_id = owned.organization_id
+     AND grant_row.agent_id = owned.agent_id
+     AND grant_row.kind = owned.kind
+     AND grant_row.pattern = owned.pattern
+    WHERE owned.organization_id = ${organizationId} AND owned.agent_id = ${agentId}
+    FOR UPDATE OF owned, grant_row
+  `;
+  const ownedKeys = new Set(owned.map((row) => `${row.kind}\u0000${row.pattern}`));
+  for (const row of owned) {
+    if (desired.has(`${row.kind}\u0000${row.pattern}`)) continue;
+    await tx`
+      DELETE FROM grants
+      WHERE organization_id = ${organizationId} AND agent_id = ${agentId}
+        AND kind = ${row.kind} AND pattern = ${row.pattern}
+        AND EXISTS (
+          SELECT 1 FROM agent_fenced_provisioning_grants owned
+          WHERE owned.organization_id = ${organizationId} AND owned.agent_id = ${agentId}
+            AND owned.kind = ${row.kind} AND owned.pattern = ${row.pattern}
+        )
+    `;
+  }
+  for (const [key, grant] of desired) {
+    if (ownedKeys.has(key)) {
+      const reactivated = await tx`
+        UPDATE grants SET expires_at = NULL, granted_at = NOW(), denied = false
+        WHERE organization_id = ${organizationId} AND agent_id = ${agentId}
+          AND kind = ${grant.kind} AND pattern = ${grant.pattern}
+        RETURNING 1
+      `;
+      if (reactivated.length === 0) {
+        throw new Error('Required unowned grant changed during fenced apply');
+      }
+      continue;
+    }
+    const inserted = await tx`
+      INSERT INTO grants (organization_id, agent_id, kind, pattern, expires_at, granted_at, denied)
+      VALUES (${organizationId}, ${agentId}, ${grant.kind}, ${grant.pattern}, NULL, NOW(), false)
+      ON CONFLICT (organization_id, agent_id, kind, pattern) DO NOTHING
+      RETURNING 1
+    `;
+    if (inserted.length === 0) {
+      await tx`
+        UPDATE grants SET expires_at = NULL, granted_at = NOW(), denied = false
+        WHERE organization_id = ${organizationId} AND agent_id = ${agentId}
+          AND kind = ${grant.kind} AND pattern = ${grant.pattern}
+      `;
+      continue;
+    }
+    await tx`
+      INSERT INTO agent_fenced_provisioning_grants (organization_id, agent_id, kind, pattern)
+      VALUES (${organizationId}, ${agentId}, ${grant.kind}, ${grant.pattern})
+    `;
+  }
+}
+
+export async function addProvisioningGrantsInTransaction(
+  tx: DbClient,
+  organizationId: string,
+  agentId: string,
+  settings: Omit<AgentSettings, 'updatedAt'>,
+): Promise<void> {
+  for (const rawPattern of [
+    ...(settings.networkConfig?.allowedDomains ?? []),
+    ...(settings.preApprovedTools ?? []),
+  ]) {
+    const pattern = normalizeDomainPattern(rawPattern);
+    const kind = inferGrantKind(pattern);
+    await tx`
+      INSERT INTO grants (organization_id, agent_id, kind, pattern, expires_at, granted_at, denied)
+      VALUES (${organizationId}, ${agentId}, ${kind}, ${pattern}, NULL, NOW(), false)
+      ON CONFLICT (organization_id, agent_id, kind, pattern) DO UPDATE SET
+        expires_at = NULL, granted_at = NOW(), denied = false
+    `;
+  }
 }
 
 function stateFromCommandRow(
@@ -715,6 +827,51 @@ export async function recordManagedReleaseConfigurationMutation(
     settingsDigest: input.settingsDigest,
     lastMutation: {
       kind: 'managed_release',
+      commandId: input.commandId,
+      commandDigest: input.commandDigest,
+    },
+  };
+}
+
+export async function recordBootstrapConfigurationMutation(
+  tx: DbClient,
+  input: {
+    organizationId: string;
+    agentId: string;
+    commandId: string;
+    commandDigest: Sha256Digest;
+    currentRevision: string;
+    settingsDigest: Sha256Digest;
+  },
+): Promise<AppliedAgentConfigurationState> {
+  const resultingRevision = (BigInt(input.currentRevision) + 1n).toString();
+  await tx`
+    UPDATE agent_configuration_controls
+    SET configuration_revision = ${resultingRevision}::bigint,
+        last_mutation_kind = 'bootstrap',
+        last_command_id = ${input.commandId},
+        last_command_digest = ${input.commandDigest},
+        updated_at = NOW()
+    WHERE organization_id = ${input.organizationId} AND agent_id = ${input.agentId}
+  `;
+  await tx`
+    INSERT INTO agent_configuration_commands (
+      organization_id, agent_id, command_id, command_digest, mutation_kind,
+      resulting_revision, resulting_mode, resulting_settings_digest, result_status
+    ) VALUES (
+      ${input.organizationId}, ${input.agentId}, ${input.commandId},
+      ${input.commandDigest}, 'bootstrap', ${resultingRevision}::bigint,
+      'native', ${input.settingsDigest}, 'applied'
+    )
+  `;
+  return {
+    organizationId: input.organizationId,
+    agentId: input.agentId,
+    managementMode: 'native',
+    configurationRevision: resultingRevision,
+    settingsDigest: input.settingsDigest,
+    lastMutation: {
+      kind: 'bootstrap',
       commandId: input.commandId,
       commandDigest: input.commandDigest,
     },

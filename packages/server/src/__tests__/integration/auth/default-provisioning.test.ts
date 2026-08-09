@@ -54,11 +54,26 @@ describe('ensureDefaultAgent', () => {
 
     const sql = getTestDb();
     const agents = await sql`
-      SELECT id, name FROM agents WHERE organization_id = ${orgId}
+      SELECT id, name, identity_md FROM agents WHERE organization_id = ${orgId}
     `;
     expect(agents).toHaveLength(1);
     expect(String(agents[0].id)).toBe(DEFAULT_AGENT_ID);
     expect(String(agents[0].name)).toBe('Owletto Personal');
+    expect(String(agents[0].identity_md)).toBeTruthy();
+
+    const authorityRows = await sql`
+      SELECT c.configuration_revision::text AS configuration_revision,
+             command_row.mutation_kind
+      FROM agent_configuration_controls c
+      JOIN agent_configuration_commands command_row
+        ON command_row.organization_id = c.organization_id
+       AND command_row.agent_id = c.agent_id
+      WHERE c.organization_id = ${orgId} AND c.agent_id = ${DEFAULT_AGENT_ID}
+    `;
+    expect(authorityRows).toEqual([{
+      configuration_revision: '1',
+      mutation_kind: 'bootstrap',
+    }]);
 
     const metadata = await readMetadata(orgId);
     expect(metadata[DEFAULT_AGENT_SENTINEL]).toBeDefined();
@@ -74,6 +89,37 @@ describe('ensureDefaultAgent', () => {
     const second = await ensureDefaultAgent(orgId);
     expect(second.created).toBe(false);
     expect(second.reason).toBe('sentinel');
+  });
+
+  it('serializes parallel boots into one complete authority bootstrap', async () => {
+    const orgId = `org-parallel-${generateSecureToken(4)}`;
+    await seedOrg(orgId);
+
+    const results = await Promise.all([
+      ensureDefaultAgent(orgId),
+      ensureDefaultAgent(orgId),
+    ]);
+    expect(results.filter((result) => result.created)).toHaveLength(1);
+
+    const sql = getTestDb();
+    const aggregate = await sql`
+      SELECT a.identity_md,
+             c.configuration_revision::text AS configuration_revision,
+             count(command_row.command_id)::int AS command_count
+      FROM agents a
+      JOIN agent_configuration_controls c
+        ON c.organization_id = a.organization_id AND c.agent_id = a.id
+      JOIN agent_configuration_commands command_row
+        ON command_row.organization_id = a.organization_id
+       AND command_row.agent_id = a.id
+      WHERE a.organization_id = ${orgId} AND a.id = ${DEFAULT_AGENT_ID}
+      GROUP BY a.identity_md, c.configuration_revision
+    `;
+    expect(aggregate).toEqual([{
+      identity_md: expect.any(String),
+      configuration_revision: '1',
+      command_count: 1,
+    }]);
   });
 
   it('is sticky against deletion — recreate refused after sentinel set', async () => {

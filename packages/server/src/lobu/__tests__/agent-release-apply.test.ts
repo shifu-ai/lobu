@@ -202,6 +202,62 @@ describe("signed managed agent release apply", () => {
 		expect(await currentUserMd()).toBe("release user");
 	});
 
+	test("gives release and fenced bootstrap one PostgreSQL row-lock winner without split settings", async () => {
+		const releaseLocked = deferred<void>();
+		const finishRelease = deferred<void>();
+		const app = await buildApp({
+			agentReleaseTransactionHooks: {
+				afterAgentLock: async () => {
+					releaseLocked.resolve(undefined);
+					await finishRelease.promise;
+				},
+			},
+		});
+		const releasePromise = putApply(app, latestSignedApplyRequest());
+		await within(releaseLocked.promise);
+		const fencedPromise = app.request(`/api/provisioning/agents/${AGENT_ID}/fenced-settings`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				name: "fenced loser",
+				ownerUserId: "fenced-loser-owner",
+				settings: { userMd: "fenced loser" },
+				targetId: "00000000-0000-4000-8000-000000000001",
+				claimGeneration: 1,
+				claimToken: "00000000-0000-4000-8000-000000000002",
+				baselineVersionId: `personal-agent-baseline-v1-${"a".repeat(64)}`,
+				effectiveSettingsDigest: `sha256:${"b".repeat(64)}`,
+			}),
+		});
+		try {
+			await waitForBlockedAgentLock();
+		} finally {
+			finishRelease.resolve(undefined);
+		}
+
+		expect((await releasePromise).status).toBe(200);
+		const fenced = await fencedPromise;
+		expect(fenced.status).toBe(409);
+		await expect(fenced.json()).resolves.toEqual({
+			error: "agent_settings_managed_by_release",
+		});
+		const rows = await (await db())`
+			SELECT a.user_md,
+			       (SELECT count(*)::int FROM agent_provisioning_fences f
+			        WHERE f.organization_id = a.organization_id AND f.agent_id = a.id) AS fence_count,
+			       c.configuration_revision::text AS configuration_revision
+			FROM agents a
+			JOIN agent_configuration_controls c
+			  ON c.organization_id = a.organization_id AND c.agent_id = a.id
+			WHERE a.organization_id = ${ORG_ID} AND a.id = ${AGENT_ID}
+		`;
+		expect(rows).toEqual([{
+			user_md: "release user",
+			fence_count: 0,
+			configuration_revision: "1",
+		}]);
+	});
+
 	test("requires release retry when apply observes an absent agent before legacy create", async () => {
 		const app = await buildApp();
 		await (await db())`

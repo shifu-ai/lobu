@@ -11,38 +11,20 @@ import { canonicalize } from "json-canonicalize";
 import { type DbClient, getDb } from "../db/client.js";
 import type { RuntimeCapabilitySnapshot } from "../gateway/services/runtime-capability-snapshot.js";
 import {
-	replaceAgentSettings,
+	replaceAgentConfigurationSettingsInTransaction,
 	syncProvisioningGrantsInTransaction,
-} from "./legacy-agent-settings-service.js";
+} from "./agent-configuration/postgres-repository.js";
+import {
+	LEGACY_MANAGED_RELEASE_SETTING_KEYS,
+	PERSONAL_BASELINE_RELEASE_SETTING_KEYS,
+} from "./agent-configuration/field-ownership.js";
 import { parseStrictJsonBytes } from "./strict-json-parser.js";
 
-const MANAGED_SETTING_KEYS = [
-	"identityMd",
-	"soulMd",
-	"userMd",
-	"modelSelection",
-	"toolsConfig",
-] as const;
+const MANAGED_SETTING_KEYS = LEGACY_MANAGED_RELEASE_SETTING_KEYS;
 // Lobu persists and reads these fields from live agent state. The remaining
 // personal baseline fields are signed, immutable source metadata only; they
 // may seed live digest reconstruction but can never mask a mutable field.
-const PERSONAL_BASELINE_LOBU_OWNED_KEYS = [
-	"identityMd",
-	"soulMd",
-	"userMd",
-	"mcpServers",
-	"skillsConfig",
-	"preApprovedTools",
-	"modelSelection",
-	"providerModelPreferences",
-	"networkConfig",
-	"egressConfig",
-	"nixConfig",
-	"toolsConfig",
-	"pluginsConfig",
-	"guardrails",
-	"installedProviders",
-] as const;
+const PERSONAL_BASELINE_LOBU_OWNED_KEYS = PERSONAL_BASELINE_RELEASE_SETTING_KEYS;
 const PERSONAL_BASELINE_IMMUTABLE_METADATA_KEYS = [
 	"templateKey",
 	"scope",
@@ -1020,7 +1002,7 @@ async function applyCommandSettings(
 			input.command.signedManifest.managedSettings,
 		);
 	}
-	await replaceAgentSettings(
+	await replaceAgentConfigurationSettingsInTransaction(
 		tx,
 		input.organizationId,
 		input.agentId,

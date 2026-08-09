@@ -36,6 +36,22 @@ export const AGENT_SETTING_OWNERS = {
   preApprovedTools: 'release',
 } as const satisfies Record<AgentSettingKey, AgentSettingOwner>;
 
+/** Legacy signed manifests own this narrower subset of release fields. */
+export const LEGACY_MANAGED_RELEASE_SETTING_KEYS = [
+  'identityMd',
+  'soulMd',
+  'userMd',
+  'modelSelection',
+  'toolsConfig',
+] as const satisfies readonly AgentSettingKey[];
+
+/** Personal-baseline releases own every field marked `release` in the registry. */
+export const PERSONAL_BASELINE_RELEASE_SETTING_KEYS = Object.freeze(
+  (Object.entries(AGENT_SETTING_OWNERS) as Array<[AgentSettingKey, AgentSettingOwner]>)
+    .filter(([, owner]) => owner === 'release')
+    .map(([key]) => key)
+);
+
 export type NativeSettingsPatchPolicyDecision = {
   allowedFields: AgentSettingKey[];
   rejectedFields: AgentSettingKey[];
