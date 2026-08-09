@@ -30,9 +30,19 @@ export class InMemoryAgentAggregateNotFoundError extends Error {
   }
 }
 
+export class InMemoryAgentIncarnationMismatchError extends Error {
+  readonly code = "embedded_agent_incarnation_mismatch";
+
+  constructor(readonly agentId: string) {
+    super(`Embedded agent incarnation changed during mutation: ${agentId}`);
+    this.name = "InMemoryAgentIncarnationMismatchError";
+  }
+}
+
 export class InMemoryAgentStore extends BaseAgentStore {
   private settings = new Map<string, AgentSettings>();
   private metadata = new Map<string, AgentMetadata>();
+  private incarnations = new Map<string, symbol>();
   private connections = new Map<string, StoredConnection>();
   private connectionsAll = new Set<string>();
   private connectionsByAgent = new Map<string, Set<string>>();
@@ -73,6 +83,9 @@ export class InMemoryAgentStore extends BaseAgentStore {
   }
 
   async saveMetadata(agentId: string, metadata: AgentMetadata): Promise<void> {
+    if (!this.metadata.has(agentId)) {
+      this.incarnations.set(agentId, Symbol(agentId));
+    }
     this.metadata.set(agentId, metadata);
     if (!this.settings.has(agentId)) {
       this.settings.set(agentId, { updatedAt: Date.now() });
@@ -86,6 +99,20 @@ export class InMemoryAgentStore extends BaseAgentStore {
     const existing = this.metadata.get(agentId);
     if (!existing) return;
     await this.saveMetadata(agentId, { ...existing, ...updates });
+  }
+
+  override async updateSettings(
+    agentId: string,
+    updates: Partial<AgentSettings>
+  ): Promise<void> {
+    const incarnation = this.captureLiveIncarnation(agentId);
+    const existing = await this.readSettings(agentId);
+    this.assertCurrentIncarnation(agentId, incarnation);
+    await this.writeSettings(agentId, {
+      ...(existing || {}),
+      ...updates,
+      updatedAt: Date.now(),
+    } as AgentSettings);
   }
 
   protected async deleteMetadataRaw(agentId: string): Promise<void> {
@@ -119,6 +146,7 @@ export class InMemoryAgentStore extends BaseAgentStore {
 
     this.metadata.delete(agentId);
     this.settings.delete(agentId);
+    this.incarnations.delete(agentId);
   }
 
   protected async hasMetadataRaw(agentId: string): Promise<boolean> {
@@ -156,6 +184,27 @@ export class InMemoryAgentStore extends BaseAgentStore {
         connection.id
       );
     }
+  }
+
+  override async updateConnection(
+    connectionId: string,
+    updates: Partial<StoredConnection>
+  ): Promise<void> {
+    const ownerAtStart = this.connections.get(connectionId)?.agentId;
+    const incarnation = ownerAtStart
+      ? this.captureLiveIncarnation(ownerAtStart)
+      : null;
+    const existing = await this.readConnection(connectionId);
+    if (!existing) return;
+    if (ownerAtStart && incarnation) {
+      this.assertCurrentIncarnation(ownerAtStart, incarnation);
+    }
+    await this.saveConnection({
+      ...existing,
+      ...updates,
+      id: connectionId,
+      updatedAt: Date.now(),
+    });
   }
 
   protected async deleteConnectionRaw(connectionId: string): Promise<void> {
@@ -419,6 +468,19 @@ export class InMemoryAgentStore extends BaseAgentStore {
   private assertLiveAgent(agentId: string): void {
     if (!this.metadata.has(agentId)) {
       throw new InMemoryAgentAggregateNotFoundError(agentId);
+    }
+  }
+
+  private captureLiveIncarnation(agentId: string): symbol {
+    this.assertLiveAgent(agentId);
+    const incarnation = this.incarnations.get(agentId);
+    if (!incarnation) throw new InMemoryAgentAggregateNotFoundError(agentId);
+    return incarnation;
+  }
+
+  private assertCurrentIncarnation(agentId: string, expected: symbol): void {
+    if (this.incarnations.get(agentId) !== expected) {
+      throw new InMemoryAgentIncarnationMismatchError(agentId);
     }
   }
 }

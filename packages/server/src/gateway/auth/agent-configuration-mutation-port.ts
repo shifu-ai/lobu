@@ -282,14 +282,17 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
     agentId: string,
     operation: () => Promise<T>
   ): Promise<T> {
-    const previous = this.agentLifecycleQueues.get(agentId) ?? Promise.resolve();
+    const previous = this.agentLifecycleQueues.get(agentId);
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const tail = previous.then(() => current);
+    const tail = previous ? previous.then(() => current) : current;
     this.agentLifecycleQueues.set(agentId, tail);
-    await previous;
+    // Preserve invocation order without an artificial first-operation yield.
+    // Queued operations still await their predecessor; the first operation
+    // enters its synchronous prefix immediately.
+    if (previous) await previous;
     try {
       return await operation();
     } finally {
