@@ -3,7 +3,10 @@ import { canonicalize } from 'json-canonicalize';
 import type { DbClient } from '../../db/client';
 import logger from '../../utils/logger';
 import { AgentConfigurationError } from './errors';
-import { decideNativeSettingsPatch } from './field-ownership';
+import {
+  decideNativeSettingsPatch,
+  normalizeNativeSettingsPatchForPersistence,
+} from './field-ownership';
 import type {
   AgentConfigurationMutationResult,
   AppliedAgentConfigurationState,
@@ -122,43 +125,15 @@ function assertNativePatchCommand(command: NativePatchCommand): void {
   }
 }
 
-function normalizedPatchValue(key: string, value: unknown): unknown {
-  switch (key) {
-    case 'model':
-      return value ?? null;
-    case 'modelSelection':
-    case 'providerModelPreferences':
-    case 'networkConfig':
-    case 'egressConfig':
-    case 'nixConfig':
-    case 'mcpServers':
-    case 'toolsConfig':
-    case 'pluginsConfig':
-      return value ?? {};
-    case 'soulMd':
-    case 'userMd':
-    case 'identityMd':
-      return value ?? '';
-    case 'skillsConfig':
-      return value ?? { skills: [] };
-    case 'installedProviders':
-    case 'preApprovedTools':
-    case 'guardrails':
-      return value ?? [];
-    case 'verboseLogging':
-      return value ?? false;
-    default:
-      throw new AgentConfigurationError('invalid_native_settings_patch');
-  }
-}
-
 function projectedSettingsAfterPatch(
   agent: AgentSettingsRow,
   patch: NativePatchCommand['patch']
 ): Record<string, unknown> {
   const projected = settingsProjection(agent);
-  for (const key of Object.keys(patch)) {
-    projected[key] = normalizedPatchValue(key, patch[key as keyof typeof patch]);
+  for (const [key, value] of Object.entries(
+    normalizeNativeSettingsPatchForPersistence(patch)
+  )) {
+    projected[key] = value;
   }
   return projected;
 }
@@ -267,6 +242,9 @@ export async function applyNativePatchInTransaction(
   if (!shadowDecisionMatches) {
     logger.warn(
       {
+        organizationId: command.organizationId,
+        agentId: command.agentId,
+        managementMode: control.management_mode,
         legacyRejectedFields,
         policyRejectedFields: policyDecision.rejectedFields,
       },

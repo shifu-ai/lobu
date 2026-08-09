@@ -3,13 +3,15 @@ import { canonicalize } from 'json-canonicalize';
 import type { DbClient } from '../../db/client';
 import { getDb } from '../../db/client';
 import { AgentConfigurationError } from './errors';
-import { parseNativeSettingsPatch } from './field-ownership';
+import {
+  normalizeNativeSettingsPatchForPersistence,
+  parseNativeSettingsPatch,
+} from './field-ownership';
 import { applyNativePatchInTransaction } from './postgres-repository';
 import type {
   AgentConfigurationMutationResult,
   NativePatchCommand,
   NativePatchCommandInput,
-  NativeSettingsPatch,
   Sha256Digest,
 } from './types';
 
@@ -27,12 +29,12 @@ function materializeNativePatchCommand(input: NativePatchCommandInput): NativePa
     throw new AgentConfigurationError('invalid_revision_precondition');
   }
   const parsedPatch = parseNativeSettingsPatch(input.patch);
-  const patch = JSON.parse(canonicalize(parsedPatch)) as NativeSettingsPatch;
+  const patch = parseNativeSettingsPatch(JSON.parse(canonicalize(parsedPatch)));
   const canonicalCommand = {
     kind: 'native_patch',
     agentId: input.agentId,
     expectedRevision: input.expectedConfigurationRevision,
-    patch,
+    patch: normalizeNativeSettingsPatchForPersistence(patch),
   };
   const commandDigest = `sha256:${createHash('sha256')
     .update(canonicalize(canonicalCommand))

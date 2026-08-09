@@ -519,6 +519,28 @@ describe('PATCH /:agentId/config — native configuration authority', () => {
     });
   });
 
+  test.each([
+    ['mcpServers', 'broken'],
+    ['guardrails', {}],
+    ['verboseLogging', 'yes'],
+    ['identityMd', 42],
+  ])('returns stable 400 for malformed %s', async (field, value) => {
+    const app = await importAgentRoutes();
+    const agentId = `native-malformed-${field.toLowerCase()}`;
+    await seedAgent(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ [field]: value }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: 'invalid_configuration_field_value',
+    });
+  });
+
   test('in toolbox_managed mode rejects every release-owned field and permits only operator mutation', async () => {
     const app = await importAgentRoutes();
     const agentId = 'native-toolbox-managed-ownership';
@@ -544,7 +566,7 @@ describe('PATCH /:agentId/config — native configuration authority', () => {
       { skillsConfig: { skills: [] } },
       { toolsConfig: { allow: ['read'] } },
       { guardrails: ['secret-scan'] },
-      { pluginsConfig: { plugin: { enabled: true } } },
+      { pluginsConfig: { plugins: [{ source: 'test-plugin', slot: 'tool' }] } },
       { installedProviders: [] },
       { preApprovedTools: ['/mcp/test/tools/read'] },
     ];

@@ -1,13 +1,15 @@
 import { createHash } from 'node:crypto';
-import { beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { canonicalize } from 'json-canonicalize';
 import { type DbClient, getDb } from '../../db/client';
+import logger from '../../utils/logger';
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from '../../gateway/__tests__/helpers/db-setup';
 import { createAgentConfigurationAuthority } from '../agent-configuration';
+import { parseNativeSettingsPatch } from '../agent-configuration/field-ownership';
 
 const AGENT_ID = 'native-authority-tracer';
 const ORGANIZATION_ID = 'native-authority-org';
@@ -177,6 +179,39 @@ describe('AgentConfigurationAuthority', () => {
     expect(receipts).toEqual([{ result_status: 'applied' }]);
   });
 
+  test('digests explicit null resets as the exact repository default persisted', async () => {
+    const sql = getDb();
+    await sql`
+      UPDATE agents SET identity_md = 'before reset'
+      WHERE organization_id = ${ORGANIZATION_ID} AND id = ${AGENT_ID}
+    `;
+    const commandId = 'native-command-null-reset-digest';
+    const expectedDigest = canonicalDigest({
+      kind: 'native_patch',
+      agentId: AGENT_ID,
+      expectedRevision: '0',
+      patch: { identityMd: '' },
+    });
+
+    const result = await createAgentConfigurationAuthority().apply({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      commandId,
+      expectedConfigurationRevision: '0',
+      actor: { kind: 'session' },
+      patch: { identityMd: null },
+    });
+
+    expect(result).toMatchObject({
+      status: 'applied',
+      state: { lastMutation: { commandDigest: expectedDigest } },
+    });
+    expect((await sql`
+      SELECT identity_md FROM agents
+      WHERE organization_id = ${ORGANIZATION_ID} AND id = ${AGENT_ID}
+    `)[0]?.identity_md).toBe('');
+  });
+
   test('applies a complete native partial patch without resetting omitted fields', async () => {
     const sql = getDb();
     await sql`
@@ -209,6 +244,96 @@ describe('AgentConfigurationAuthority', () => {
     ]);
   });
 
+  test.each([
+    ['model', 'model', null, null],
+    ['modelSelection', 'model_selection', { mode: 'auto' }, { mode: 'auto' }],
+    ['providerModelPreferences', 'provider_model_preferences', {}, {}],
+    ['networkConfig', 'network_config', {}, {}],
+    ['egressConfig', 'egress_config', { extraPolicy: '' }, { extraPolicy: '' }],
+    ['nixConfig', 'nix_config', { packages: [] }, { packages: [] }],
+    ['mcpServers', 'mcp_servers', {}, {}],
+    ['soulMd', 'soul_md', '', ''],
+    ['userMd', 'user_md', 'updated user', 'updated user'],
+    ['identityMd', 'identity_md', null, ''],
+    ['skillsConfig', 'skills_config', { skills: [] }, { skills: [] }],
+    ['toolsConfig', 'tools_config', {}, {}],
+    ['pluginsConfig', 'plugins_config', { plugins: [] }, { plugins: [] }],
+    ['installedProviders', 'installed_providers', [], []],
+    ['verboseLogging', 'verbose_logging', false, false],
+    ['preApprovedTools', 'pre_approved_tools', null, []],
+    ['guardrails', 'guardrails', [], []],
+  ])(
+    'maps %s only to its persistent SQL column',
+    async (field, column, patchValue, expectedValue) => {
+      const sql = getDb();
+      const sentinelRow = {
+        model: 'sentinel-model',
+        model_selection: { mode: 'pinned', pinnedModel: 'sentinel/model' },
+        provider_model_preferences: { sentinel: 'model' },
+        network_config: { allowedDomains: ['sentinel.example'] },
+        egress_config: { extraPolicy: 'sentinel policy' },
+        nix_config: { packages: ['sentinel-package'] },
+        mcp_servers: { sentinel: { url: 'https://sentinel.example' } },
+        soul_md: 'sentinel soul',
+        user_md: 'sentinel user',
+        identity_md: 'sentinel identity',
+        skills_config: {
+          skills: [{ repo: 'sentinel/repo', name: 'sentinel', enabled: true }],
+        },
+        tools_config: { strictMode: true },
+        plugins_config: {
+          plugins: [{ source: 'sentinel-plugin', slot: 'tool' }],
+        },
+        installed_providers: [{ providerId: 'sentinel', installedAt: 1 }],
+        verbose_logging: true,
+        pre_approved_tools: ['sentinel-tool'],
+        guardrails: ['sentinel-guardrail'],
+      };
+      await sql`
+        UPDATE agents SET
+          model = ${sentinelRow.model},
+          model_selection = ${sql.json(sentinelRow.model_selection)},
+          provider_model_preferences = ${sql.json(sentinelRow.provider_model_preferences)},
+          network_config = ${sql.json(sentinelRow.network_config)},
+          egress_config = ${sql.json(sentinelRow.egress_config)},
+          nix_config = ${sql.json(sentinelRow.nix_config)},
+          mcp_servers = ${sql.json(sentinelRow.mcp_servers)},
+          soul_md = ${sentinelRow.soul_md},
+          user_md = ${sentinelRow.user_md},
+          identity_md = ${sentinelRow.identity_md},
+          skills_config = ${sql.json(sentinelRow.skills_config)},
+          tools_config = ${sql.json(sentinelRow.tools_config)},
+          plugins_config = ${sql.json(sentinelRow.plugins_config)},
+          installed_providers = ${sql.json(sentinelRow.installed_providers)},
+          verbose_logging = ${sentinelRow.verbose_logging},
+          pre_approved_tools = ${sql.json(sentinelRow.pre_approved_tools)},
+          guardrails = ${sql.json(sentinelRow.guardrails)}
+        WHERE organization_id = ${ORGANIZATION_ID} AND id = ${AGENT_ID}
+      `;
+
+      const result = await createAgentConfigurationAuthority().apply({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        commandId: `native-column-${field}`,
+        expectedConfigurationRevision: '0',
+        actor: { kind: 'session' },
+        patch: parseNativeSettingsPatch({ [field]: patchValue }),
+      });
+      expect(result.status).toBe('applied');
+
+      const rows = await sql`
+        SELECT model, model_selection, provider_model_preferences,
+               network_config, egress_config, nix_config, mcp_servers,
+               soul_md, user_md, identity_md, skills_config, tools_config,
+               plugins_config, installed_providers, verbose_logging,
+               pre_approved_tools, guardrails
+        FROM agents
+        WHERE organization_id = ${ORGANIZATION_ID} AND id = ${AGENT_ID}
+      `;
+      expect(rows).toEqual([{ ...sentinelRow, [column]: expectedValue }]);
+    }
+  );
+
   test('rejects release-owned fields in toolbox_managed mode but permits operator fields', async () => {
     const sql = getDb();
     await sql`
@@ -217,20 +342,35 @@ describe('AgentConfigurationAuthority', () => {
       ) VALUES (${ORGANIZATION_ID}, ${AGENT_ID}, 'toolbox_managed')
     `;
     const authority = createAgentConfigurationAuthority();
+    const warnSpy = spyOn(logger, 'warn').mockImplementation(() => undefined);
 
-    await expect(
-      authority.apply({
-        organizationId: ORGANIZATION_ID,
-        agentId: AGENT_ID,
-        commandId: 'managed-release-owned-command',
-        expectedConfigurationRevision: '0',
-        actor: { kind: 'session' },
-        patch: { model: 'legacy-model', identityMd: 'managed identity' },
-      })
-    ).resolves.toEqual({
-      status: 'rejected',
-      reason: 'field_owned_by_managed_release',
-    });
+    try {
+      await expect(
+        authority.apply({
+          organizationId: ORGANIZATION_ID,
+          agentId: AGENT_ID,
+          commandId: 'managed-release-owned-command',
+          expectedConfigurationRevision: '0',
+          actor: { kind: 'session' },
+          patch: { model: 'legacy-model', identityMd: 'managed identity' },
+        })
+      ).resolves.toEqual({
+        status: 'rejected',
+        reason: 'field_owned_by_managed_release',
+      });
+      expect(warnSpy).toHaveBeenCalledWith(
+        {
+          organizationId: ORGANIZATION_ID,
+          agentId: AGENT_ID,
+          managementMode: 'toolbox_managed',
+          legacyRejectedFields: [],
+          policyRejectedFields: ['model', 'identityMd'],
+        },
+        'shadow_decision_mismatch'
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
 
     await expect(
       authority.apply({

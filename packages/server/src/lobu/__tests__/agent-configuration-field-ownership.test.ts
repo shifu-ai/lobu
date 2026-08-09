@@ -66,6 +66,86 @@ describe('agent configuration field ownership', () => {
     );
   });
 
+  test.each([
+    ['model', 42],
+    ['modelSelection', []],
+    ['providerModelPreferences', []],
+    ['networkConfig', []],
+    ['egressConfig', []],
+    ['nixConfig', []],
+    ['mcpServers', 'broken'],
+    ['soulMd', 42],
+    ['userMd', 42],
+    ['identityMd', 42],
+    ['skillsConfig', []],
+    ['toolsConfig', []],
+    ['pluginsConfig', []],
+    ['installedProviders', {}],
+    ['verboseLogging', 'yes'],
+    ['preApprovedTools', {}],
+    ['guardrails', {}],
+  ])('rejects malformed outer shape for %s', (field, value) => {
+    expect(() => parseNativeSettingsPatch({ [field]: value })).toThrow(
+      'invalid_configuration_field_value'
+    );
+  });
+
+  test.each([
+    ['modelSelection', { mode: null }],
+    ['providerModelPreferences', { openai: null }],
+    ['mcpServers', { broken: null }],
+    ['skillsConfig', { skills: null }],
+    ['installedProviders', [null]],
+    ['preApprovedTools', [null]],
+    ['guardrails', [null]],
+  ])('rejects invalid nested nulls for %s', (field, value) => {
+    expect(() => parseNativeSettingsPatch({ [field]: value })).toThrow(
+      'invalid_configuration_field_value'
+    );
+  });
+
+  test('preserves explicit null reset markers for persistence normalization', () => {
+    expect(
+      parseNativeSettingsPatch({
+        model: null,
+        modelSelection: null,
+        providerModelPreferences: null,
+        networkConfig: null,
+        egressConfig: null,
+        nixConfig: null,
+        mcpServers: null,
+        soulMd: null,
+        userMd: null,
+        identityMd: null,
+        skillsConfig: null,
+        toolsConfig: null,
+        pluginsConfig: null,
+        installedProviders: null,
+        verboseLogging: null,
+        preApprovedTools: null,
+        guardrails: null,
+      })
+    ).toEqual({
+      model: null,
+      modelSelection: null,
+      providerModelPreferences: null,
+      networkConfig: null,
+      egressConfig: null,
+      nixConfig: null,
+      mcpServers: null,
+      soulMd: null,
+      userMd: null,
+      identityMd: null,
+      skillsConfig: null,
+      toolsConfig: null,
+      pluginsConfig: null,
+      installedProviders: null,
+      verboseLogging: null,
+      preApprovedTools: null,
+      guardrails: null,
+    });
+  });
+
   test('returns pure policy decisions for native and managed targets', () => {
     expect(
       decideNativeSettingsPatch('native', {

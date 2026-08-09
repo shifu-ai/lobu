@@ -30,9 +30,14 @@ export interface AgentConfigurationCommandEnvelope {
   actor: ConfigurationActor;
 }
 
-export type NativeSettingsPatch = Partial<
-  Omit<AgentSettings, 'updatedAt' | 'authProfiles' | 'mcpInstallNotified'>
+type NativeWritableAgentSettingKey = Exclude<
+  keyof AgentSettings,
+  'updatedAt' | 'authProfiles' | 'mcpInstallNotified'
 >;
+
+export type NativeSettingsPatch = {
+  [Key in NativeWritableAgentSettingKey]?: AgentSettings[Key] | null;
+};
 
 export interface NativePatchCommand extends AgentConfigurationCommandEnvelope {
   kind: 'native_patch';
