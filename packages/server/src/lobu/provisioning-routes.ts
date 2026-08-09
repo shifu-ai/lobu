@@ -22,8 +22,11 @@ import {
 import type { WritableSecretStore } from "../gateway/secrets/index.js";
 import type { Env } from "../index";
 import {
+  AGENT_CONFIGURATION_RESPONSE_VERSION,
+  AGENT_CONFIGURATION_VERSION_HEADER,
   AgentConfigurationError,
   type AgentConfigurationAuthority,
+  type AgentConfigurationResponseVersion,
   createAgentConfigurationAuthority,
 } from "./agent-configuration/index.js";
 import {
@@ -95,6 +98,9 @@ interface ProvisioningRoutesOptions {
   agentReleaseEnvironment?: string;
   agentConfigurationAuthority?: AgentConfigurationAuthority;
   agentConfigurationReadHooks?: { afterEvidenceRead?: () => Promise<void> };
+  agentConfigurationTransactionHooks?: {
+    beforeAgentLock?: () => Promise<void>;
+  };
   legacyProvisioningHooks?: {
     afterAgentLock?: () => Promise<void>;
   };
@@ -112,6 +118,15 @@ interface ProvisioningRoutesOptions {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseAgentConfigurationResponseVersion(
+  value: string | undefined
+): AgentConfigurationResponseVersion | undefined | null {
+  if (value === undefined) return undefined;
+  return value.trim() === AGENT_CONFIGURATION_RESPONSE_VERSION
+    ? AGENT_CONFIGURATION_RESPONSE_VERSION
+    : null;
 }
 
 function validateSettings(settings: unknown): Omit<AgentSettings, "updatedAt"> {
@@ -266,6 +281,7 @@ export function createProvisioningRoutes(
     createAgentConfigurationAuthority(undefined, {
       agentReleaseService,
       readHooks: options.agentConfigurationReadHooks,
+      transactionHooks: options.agentConfigurationTransactionHooks,
     });
   const releaseAssuranceReadback =
     options.releaseAssuranceReadback ??
@@ -744,6 +760,12 @@ export function createProvisioningRoutes(
       const agentId = c.req.param("agentId")?.trim() ?? "";
       const agentIdError = validateShifuAgentId(agentId);
       if (agentIdError) return c.json({ error: agentIdError }, 400);
+      const responseVersion = parseAgentConfigurationResponseVersion(
+        c.req.header(AGENT_CONFIGURATION_VERSION_HEADER)
+      );
+      if (responseVersion === null) {
+        return c.json({ error: "unsupported_agent_configuration_version" }, 400);
+      }
 
       let command: unknown;
       try {
@@ -772,6 +794,7 @@ export function createProvisioningRoutes(
           agentId,
           command,
           actor: { kind: "release" },
+          ...(responseVersion === undefined ? {} : { responseVersion }),
         });
         return c.json(result.evidence, 200);
       } catch (error) {
@@ -814,6 +837,12 @@ export function createProvisioningRoutes(
     const agentId = c.req.param("agentId")?.trim() ?? "";
     const agentIdError = validateShifuAgentId(agentId);
     if (agentIdError) return c.json({ error: agentIdError }, 400);
+    const responseVersion = parseAgentConfigurationResponseVersion(
+      c.req.header(AGENT_CONFIGURATION_VERSION_HEADER)
+    );
+    if (responseVersion === null) {
+      return c.json({ error: "unsupported_agent_configuration_version" }, 400);
+    }
 
     try {
       const readback = await agentConfigurationAuthority.readManagedRelease({
@@ -825,8 +854,12 @@ export function createProvisioningRoutes(
       return c.json(
         {
           ...readback.evidence,
-          configurationRevision: readback.state.configurationRevision,
-          managementMode: readback.state.managementMode,
+          ...(responseVersion === AGENT_CONFIGURATION_RESPONSE_VERSION
+            ? {
+                configurationRevision: readback.state.configurationRevision,
+                managementMode: readback.state.managementMode,
+              }
+            : {}),
         },
         200
       );

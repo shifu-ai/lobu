@@ -557,11 +557,31 @@ export function createAgentReleaseService(options: {
 			: { ...evidence, status: "drifted", liveSettingsHash };
 	}
 
+	async function preparedReleaseRequiresConfigurationMutationInTransaction(
+		tx: DbClient,
+		input: {
+			organizationId: string;
+			agentId: string;
+			prepared: PreparedAgentReleaseApply;
+		},
+	): Promise<boolean> {
+		const evidence = await getEvidenceInTransaction(tx, input);
+		if (!evidence) return true;
+		return (
+			evidence.releaseId !== input.prepared.command.signedManifest.releaseId ||
+			evidence.releaseSequence !==
+				input.prepared.command.signedManifest.releaseSequence ||
+			evidence.manifestDigest !== input.prepared.publication.manifestDigest ||
+			evidence.status === "drifted"
+		);
+	}
+
 	return {
 		prepareAgentReleaseApply,
 		applyPreparedAgentReleaseInTransaction,
 		finalizeAgentReleaseApplyEvidence,
 		getEvidenceInTransaction,
+		preparedReleaseRequiresConfigurationMutationInTransaction,
 		async apply(input: {
 			organizationId: string;
 			agentId: string;

@@ -345,8 +345,6 @@ describe("PUT /api/provisioning/agents/:agentId/managed-settings", () => {
 			evidence: {
 				ok: true,
 				marker: "authority-release-evidence",
-				configurationRevision: "7",
-				managementMode: "native",
 			},
 			state: { configurationRevision: "7", managementMode: "native" },
 		}));
@@ -370,8 +368,6 @@ describe("PUT /api/provisioning/agents/:agentId/managed-settings", () => {
 		await expect(response.json()).resolves.toEqual({
 			ok: true,
 			marker: "authority-release-evidence",
-			configurationRevision: "7",
-			managementMode: "native",
 		});
 		expect(applyManagedRelease).toHaveBeenCalledWith({
 			organizationId: ORG_ID,

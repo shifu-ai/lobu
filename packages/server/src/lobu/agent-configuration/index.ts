@@ -6,6 +6,7 @@ export { AgentConfigurationError, type AgentConfigurationErrorCode } from './err
 export type {
   AgentConfigurationCommandEnvelope,
   AgentConfigurationMutationResult,
+  AgentConfigurationResponseVersion,
   AppliedAgentConfigurationState,
   ConfigurationActor,
   ConfigurationActorKind,
@@ -16,4 +17,8 @@ export type {
   ManagedReleaseCommandInput,
   ManagedReleaseConfigurationResult,
   Sha256Digest,
+} from './types';
+export {
+  AGENT_CONFIGURATION_RESPONSE_VERSION,
+  AGENT_CONFIGURATION_VERSION_HEADER,
 } from './types';

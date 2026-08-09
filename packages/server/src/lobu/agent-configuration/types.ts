@@ -6,6 +6,12 @@ import type {
 
 export type ConfigurationManagementMode = 'native' | 'toolbox_managed';
 
+export const AGENT_CONFIGURATION_VERSION_HEADER =
+  'Lobu-Agent-Configuration-Version';
+export const AGENT_CONFIGURATION_RESPONSE_VERSION = '1';
+export type AgentConfigurationResponseVersion =
+  typeof AGENT_CONFIGURATION_RESPONSE_VERSION;
+
 export type ConfigurationMutationKind =
   | 'bootstrap'
   | 'native_patch'
@@ -95,6 +101,7 @@ export interface ManagedReleaseCommandInput {
   agentId: string;
   command: unknown;
   actor: ConfigurationActor;
+  responseVersion?: AgentConfigurationResponseVersion;
 }
 
 export interface ManagedReleaseConfigurationResult {

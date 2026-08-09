@@ -19,6 +19,7 @@ import {
   readAgentConfigurationSettingsDigest,
   recordManagedReleaseConfigurationMutation,
 } from './postgres-repository';
+import { AGENT_CONFIGURATION_RESPONSE_VERSION } from './types';
 import type {
   AgentConfigurationMutationResult,
   AppliedAgentConfigurationState,
@@ -111,6 +112,7 @@ export function createAgentConfigurationAuthority(
   options: {
     agentReleaseService?: AgentReleaseService;
     readHooks?: { afterEvidenceRead?: () => Promise<void> };
+    transactionHooks?: { beforeAgentLock?: () => Promise<void> };
   } = {},
 ): AgentConfigurationAuthority {
   return {
@@ -127,6 +129,7 @@ export function createAgentConfigurationAuthority(
       assertManagedReleaseSettingsOwnership(prepared);
       const authorityCommand = materializeManagedReleaseCommand(input, prepared);
       const transactionResult = await (sql ?? getDb()).begin(async (tx) => {
+        await options.transactionHooks?.beforeAgentLock?.();
         let control: Awaited<ReturnType<typeof lockAgentAndConfigurationControl>>;
         try {
           control = await lockAgentAndConfigurationControl(tx, input);
@@ -143,6 +146,15 @@ export function createAgentConfigurationAuthority(
           }
           throw error;
         }
+        if (
+          control.managementMode === 'toolbox_managed' &&
+          prepared.command.expectedConfigurationRevision === undefined
+        ) {
+          throw new AgentConfigurationError(
+            'agent_configuration_revision_required',
+            control.configurationRevision,
+          );
+        }
         const replay = await findConfigurationCommand(tx, {
           organizationId: input.organizationId,
           agentId: input.agentId,
@@ -155,24 +167,25 @@ export function createAgentConfigurationAuthority(
           );
         }
         if (
-          !replay &&
-          control.managementMode === 'toolbox_managed' &&
-          prepared.command.expectedConfigurationRevision === undefined
-        ) {
-          throw new AgentConfigurationError(
-            'agent_configuration_revision_required',
-            control.configurationRevision,
-          );
-        }
-        if (
-          !replay &&
           prepared.command.expectedConfigurationRevision !== undefined &&
           prepared.command.expectedConfigurationRevision !== control.configurationRevision
         ) {
-          throw new AgentConfigurationError(
-            'agent_configuration_revision_mismatch',
-            control.configurationRevision,
-          );
+          const staleReplayIsProvenNoChange =
+            replay !== null &&
+            !(await releaseService.preparedReleaseRequiresConfigurationMutationInTransaction(
+              tx,
+              {
+                organizationId: input.organizationId,
+                agentId: input.agentId,
+                prepared,
+              },
+            ));
+          if (!staleReplayIsProvenNoChange) {
+            throw new AgentConfigurationError(
+              'agent_configuration_revision_mismatch',
+              control.configurationRevision,
+            );
+          }
         }
 
         const releaseResult = await releaseService.applyPreparedAgentReleaseInTransaction(tx, {
@@ -211,10 +224,12 @@ export function createAgentConfigurationAuthority(
         evidence: releaseService.finalizeAgentReleaseApplyEvidence(
           prepared,
           transactionResult.releaseResult,
-          {
-            configurationRevision: transactionResult.state.configurationRevision,
-            managementMode: transactionResult.state.managementMode,
-          },
+          input.responseVersion === AGENT_CONFIGURATION_RESPONSE_VERSION
+            ? {
+                configurationRevision: transactionResult.state.configurationRevision,
+                managementMode: transactionResult.state.managementMode,
+              }
+            : undefined,
         ),
         state: transactionResult.state,
       };
