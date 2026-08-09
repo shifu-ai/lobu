@@ -298,6 +298,7 @@ async function buildApp(
 		};
 		secretStore?: ReturnType<typeof createMemorySecretStore>;
 		publicGatewayUrl?: string;
+		agentConfigurationAuthority?: unknown;
 	} = {},
 ) {
 	const { createProvisioningRoutes } = await import(
@@ -331,10 +332,50 @@ async function buildApp(
 			secretStore: overrides.secretStore as never,
 			publicGatewayUrl:
 				overrides.publicGatewayUrl ?? "https://gateway.example.test/lobu",
+			agentConfigurationAuthority:
+				overrides.agentConfigurationAuthority as never,
 		}),
 	);
 	return app;
 }
+
+describe("PUT /api/provisioning/agents/:agentId/managed-settings", () => {
+	test("delegates signed managed release mutation to the injected configuration authority", async () => {
+		const applyManagedRelease = mock(async () => ({
+			evidence: { ok: true, marker: "authority-release-evidence" },
+			state: { configurationRevision: "7", managementMode: "native" },
+		}));
+		const app = await buildApp(["mcp:admin"], {
+			agentConfigurationAuthority: {
+				apply: async () => ({ status: "rejected", reason: "invalid_release" }),
+				applyManagedRelease,
+			},
+		});
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-authority-route/managed-settings",
+			{
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ signedReleaseFixture: true }),
+			},
+		);
+
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toEqual({
+			ok: true,
+			marker: "authority-release-evidence",
+			configurationRevision: "7",
+			managementMode: "native",
+		});
+		expect(applyManagedRelease).toHaveBeenCalledWith({
+			organizationId: ORG_ID,
+			agentId: "shifu-u-authority-route",
+			command: { signedReleaseFixture: true },
+			actor: { kind: "release" },
+		});
+	});
+});
 
 const FENCE_TARGET_ID = "a49ef354-e14f-4b42-a030-bd5f9a78f17f";
 const FENCE_TOKEN_A = "02a3b3ca-e30a-4c3f-8317-2a5da9b4a52a";

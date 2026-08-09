@@ -22,6 +22,11 @@ import {
 import type { WritableSecretStore } from "../gateway/secrets/index.js";
 import type { Env } from "../index";
 import {
+  AgentConfigurationError,
+  type AgentConfigurationAuthority,
+  createAgentConfigurationAuthority,
+} from "./agent-configuration/index.js";
+import {
   AgentReleaseError,
   createAgentReleaseService,
 } from "./agent-release-service.js";
@@ -88,6 +93,7 @@ interface ProvisioningRoutesOptions {
   agentReleaseTrustedPublicKeysJson?: string;
   agentReleaseEvidenceSigningPrivateKeysJson?: string;
   agentReleaseEnvironment?: string;
+  agentConfigurationAuthority?: AgentConfigurationAuthority;
   legacyProvisioningHooks?: {
     afterAgentLock?: () => Promise<void>;
   };
@@ -254,6 +260,9 @@ export function createProvisioningRoutes(
       options.agentReleaseEnvironment ?? process.env.AGENT_RELEASE_ENVIRONMENT,
     transactionHooks: options.agentReleaseTransactionHooks,
   });
+  const agentConfigurationAuthority =
+    options.agentConfigurationAuthority ??
+    createAgentConfigurationAuthority(undefined, { agentReleaseService });
   const releaseAssuranceReadback =
     options.releaseAssuranceReadback ??
     createReleaseAssuranceReadback({
@@ -754,17 +763,43 @@ export function createProvisioningRoutes(
       }
 
       try {
-        const result = await agentReleaseService.apply({
+        const result = await agentConfigurationAuthority.applyManagedRelease({
           organizationId,
           agentId,
           command,
+          actor: { kind: "release" },
         });
-        return c.json(result, 200);
+        return c.json(
+          {
+            ...result.evidence,
+            configurationRevision: result.state.configurationRevision,
+            managementMode: result.state.managementMode,
+          },
+          200
+        );
       } catch (error) {
         if (error instanceof AgentReleaseError) {
           return c.json(
             { error: error.code, error_description: error.message },
             error.status
+          );
+        }
+        if (error instanceof AgentConfigurationError) {
+          const status =
+            error.code === "agent_configuration_not_found"
+              ? 404
+              : error.code === "invalid_revision_precondition"
+                ? 400
+                : 409;
+          return c.json(
+            {
+              error: error.code,
+              error_description: error.message,
+              ...(error.currentRevision === undefined
+                ? {}
+                : { currentRevision: error.currentRevision }),
+            },
+            status
           );
         }
         throw error;
@@ -790,7 +825,18 @@ export function createProvisioningRoutes(
       });
       if (!evidence)
         return c.json({ error: "agent_release_evidence_not_found" }, 404);
-      return c.json(evidence, 200);
+      const state = await agentConfigurationAuthority.readConfigurationControl({
+        organizationId,
+        agentId,
+      });
+      return c.json(
+        {
+          ...evidence,
+          configurationRevision: state.configurationRevision,
+          managementMode: state.managementMode,
+        },
+        200
+      );
     } catch (error) {
       if (error instanceof AgentReleaseError) {
         return c.json(

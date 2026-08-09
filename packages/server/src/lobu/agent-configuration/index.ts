@@ -13,5 +13,7 @@ export type {
   ConfigurationMutationKind,
   NativePatchCommandInput,
   NativeSettingsPatch,
+  ManagedReleaseCommandInput,
+  ManagedReleaseConfigurationResult,
   Sha256Digest,
 } from './types';

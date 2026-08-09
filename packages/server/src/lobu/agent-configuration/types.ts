@@ -1,4 +1,8 @@
 import type { AgentSettings } from '@lobu/core';
+import type {
+  AgentReleaseApplyResult,
+  AgentReleasePostApplyEvidence,
+} from '../agent-release-service';
 
 export type ConfigurationManagementMode = 'native' | 'toolbox_managed';
 
@@ -85,3 +89,15 @@ export type AgentConfigurationMutationResult =
     };
 
 export type NativePatchCommandInput = Omit<NativePatchCommand, 'kind' | 'commandDigest'>;
+
+export interface ManagedReleaseCommandInput {
+  organizationId: string;
+  agentId: string;
+  command: unknown;
+  actor: ConfigurationActor;
+}
+
+export interface ManagedReleaseConfigurationResult {
+  evidence: AgentReleaseApplyResult | AgentReleasePostApplyEvidence;
+  state: AppliedAgentConfigurationState;
+}

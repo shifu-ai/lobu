@@ -38,16 +38,41 @@ type AgentSettingsRow = {
 type ControlRow = {
   management_mode: ConfigurationManagementMode;
   configuration_revision: string;
+  last_mutation_kind?:
+    | 'bootstrap'
+    | 'native_patch'
+    | 'managed_release'
+    | 'managed_enrollment'
+    | null;
+  last_command_id?: string | null;
+  last_command_digest?: Sha256Digest | null;
 };
 
 type CommandRow = {
   command_digest: Sha256Digest;
-  mutation_kind: 'native_patch';
+  mutation_kind: 'bootstrap' | 'native_patch' | 'managed_release' | 'managed_enrollment';
   resulting_revision: string;
   resulting_mode: ConfigurationManagementMode;
   resulting_settings_digest: Sha256Digest;
   result_status: 'applied' | 'no_change';
 };
+
+export interface LockedConfigurationControl {
+  managementMode: ConfigurationManagementMode;
+  configurationRevision: string;
+  lastMutationKind: 'bootstrap' | 'native_patch' | 'managed_release' | 'managed_enrollment' | null;
+  lastCommandId: string | null;
+  lastCommandDigest: Sha256Digest | null;
+}
+
+export interface ConfigurationCommandReplay {
+  commandDigest: Sha256Digest;
+  mutationKind: 'bootstrap' | 'native_patch' | 'managed_release' | 'managed_enrollment';
+  resultingRevision: string;
+  resultingMode: ConfigurationManagementMode;
+  resultingSettingsDigest: Sha256Digest;
+  resultStatus: 'applied' | 'no_change';
+}
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const LEGACY_RELEASE_OWNED_SETTINGS = new Set([
@@ -103,7 +128,7 @@ function settingsProjection(row: AgentSettingsRow): Record<string, unknown> {
 
 function stateFromCommandRow(
   command: NativePatchCommand,
-  row: CommandRow
+  row: CommandRow,
 ): AppliedAgentConfigurationState {
   return {
     organizationId: command.organizationId,
@@ -127,12 +152,10 @@ function assertNativePatchCommand(command: NativePatchCommand): void {
 
 function projectedSettingsAfterPatch(
   agent: AgentSettingsRow,
-  patch: NativePatchCommand['patch']
+  patch: NativePatchCommand['patch'],
 ): Record<string, unknown> {
   const projected = settingsProjection(agent);
-  for (const [key, value] of Object.entries(
-    normalizeNativeSettingsPatchForPersistence(patch)
-  )) {
+  for (const [key, value] of Object.entries(normalizeNativeSettingsPatchForPersistence(patch))) {
     projected[key] = value;
   }
   return projected;
@@ -140,7 +163,7 @@ function projectedSettingsAfterPatch(
 
 async function legacyReleasePredicateRejectedFields(
   tx: DbClient,
-  command: NativePatchCommand
+  command: NativePatchCommand,
 ): Promise<string[]> {
   const fields = Object.keys(command.patch);
   if (fields.length === 0) return [];
@@ -163,7 +186,7 @@ async function legacyReleasePredicateRejectedFields(
 
 export async function applyNativePatchInTransaction(
   tx: DbClient,
-  command: NativePatchCommand
+  command: NativePatchCommand,
 ): Promise<AgentConfigurationMutationResult> {
   assertNativePatchCommand(command);
 
@@ -223,8 +246,7 @@ export async function applyNativePatchInTransaction(
     };
   }
 
-  const expectedConfigurationRevision =
-    command.expectedConfigurationRevision ?? currentRevision;
+  const expectedConfigurationRevision = command.expectedConfigurationRevision ?? currentRevision;
   if (expectedConfigurationRevision !== currentRevision) {
     return {
       status: 'conflict',
@@ -248,7 +270,7 @@ export async function applyNativePatchInTransaction(
         legacyRejectedFields,
         policyRejectedFields: policyDecision.rejectedFields,
       },
-      'shadow_decision_mismatch'
+      'shadow_decision_mismatch',
     );
   }
   if (control.management_mode === 'native' && legacyRejected) {
@@ -339,6 +361,130 @@ export async function applyNativePatchInTransaction(
         commandId: command.commandId,
         commandDigest: command.commandDigest,
       },
+    },
+  };
+}
+
+export async function lockAgentAndConfigurationControl(
+  tx: DbClient,
+  input: { organizationId: string; agentId: string },
+): Promise<LockedConfigurationControl> {
+  const agents = await tx`
+    SELECT id
+    FROM agents
+    WHERE organization_id = ${input.organizationId} AND id = ${input.agentId}
+    FOR UPDATE
+  `;
+  if (!agents[0]) throw new AgentConfigurationError('agent_configuration_not_found');
+  await tx`
+    INSERT INTO agent_configuration_controls (organization_id, agent_id)
+    VALUES (${input.organizationId}, ${input.agentId})
+    ON CONFLICT (organization_id, agent_id) DO NOTHING
+  `;
+  const controls = await tx<ControlRow>`
+    SELECT management_mode, configuration_revision::text AS configuration_revision,
+           last_mutation_kind, last_command_id, last_command_digest
+    FROM agent_configuration_controls
+    WHERE organization_id = ${input.organizationId} AND agent_id = ${input.agentId}
+    FOR UPDATE
+  `;
+  const control = controls[0];
+  if (!control) throw new AgentConfigurationError('agent_configuration_not_found');
+  return {
+    managementMode: control.management_mode,
+    configurationRevision: String(control.configuration_revision),
+    lastMutationKind: control.last_mutation_kind ?? null,
+    lastCommandId: control.last_command_id ?? null,
+    lastCommandDigest: control.last_command_digest ?? null,
+  };
+}
+
+export async function findConfigurationCommand(
+  tx: DbClient,
+  input: { organizationId: string; agentId: string; commandId: string },
+): Promise<ConfigurationCommandReplay | null> {
+  const rows = await tx<CommandRow>`
+    SELECT command_digest, mutation_kind,
+           resulting_revision::text AS resulting_revision, resulting_mode,
+           resulting_settings_digest, result_status
+    FROM agent_configuration_commands
+    WHERE organization_id = ${input.organizationId}
+      AND agent_id = ${input.agentId}
+      AND command_id = ${input.commandId}
+  `;
+  const row = rows[0];
+  return row
+    ? {
+        commandDigest: row.command_digest,
+        mutationKind: row.mutation_kind,
+        resultingRevision: String(row.resulting_revision),
+        resultingMode: row.resulting_mode,
+        resultingSettingsDigest: row.resulting_settings_digest,
+        resultStatus: row.result_status,
+      }
+    : null;
+}
+
+export async function readAgentConfigurationSettingsDigest(
+  tx: DbClient,
+  input: { organizationId: string; agentId: string }
+): Promise<Sha256Digest> {
+  const rows = await tx<AgentSettingsRow>`
+    SELECT model, model_selection, provider_model_preferences,
+           network_config, egress_config, nix_config, mcp_servers,
+           soul_md, user_md, identity_md, skills_config, tools_config,
+           plugins_config, installed_providers, verbose_logging,
+           pre_approved_tools, guardrails
+    FROM agents
+    WHERE organization_id = ${input.organizationId} AND id = ${input.agentId}
+  `;
+  const row = rows[0];
+  if (!row) throw new AgentConfigurationError('agent_configuration_not_found');
+  return sha256Canonical(settingsProjection(row));
+}
+
+export async function recordManagedReleaseConfigurationMutation(
+  tx: DbClient,
+  input: {
+    organizationId: string;
+    agentId: string;
+    commandId: string;
+    commandDigest: Sha256Digest;
+    currentRevision: string;
+    managementMode: ConfigurationManagementMode;
+    settingsDigest: Sha256Digest;
+  },
+): Promise<AppliedAgentConfigurationState> {
+  const resultingRevision = (BigInt(input.currentRevision) + 1n).toString();
+  await tx`
+    UPDATE agent_configuration_controls
+    SET configuration_revision = ${resultingRevision}::bigint,
+        last_mutation_kind = 'managed_release',
+        last_command_id = ${input.commandId},
+        last_command_digest = ${input.commandDigest},
+        updated_at = NOW()
+    WHERE organization_id = ${input.organizationId} AND agent_id = ${input.agentId}
+  `;
+  await tx`
+    INSERT INTO agent_configuration_commands (
+      organization_id, agent_id, command_id, command_digest, mutation_kind,
+      resulting_revision, resulting_mode, resulting_settings_digest, result_status
+    ) VALUES (
+      ${input.organizationId}, ${input.agentId}, ${input.commandId},
+      ${input.commandDigest}, 'managed_release', ${resultingRevision}::bigint,
+      ${input.managementMode}, ${input.settingsDigest}, 'applied'
+    )
+  `;
+  return {
+    organizationId: input.organizationId,
+    agentId: input.agentId,
+    managementMode: input.managementMode,
+    configurationRevision: resultingRevision,
+    settingsDigest: input.settingsDigest,
+    lastMutation: {
+      kind: 'managed_release',
+      commandId: input.commandId,
+      commandDigest: input.commandDigest,
     },
   };
 }

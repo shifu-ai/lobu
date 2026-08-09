@@ -54,6 +54,7 @@ const PERSONAL_BASELINE_SETTING_KEYS = [
 	...PERSONAL_BASELINE_LOBU_OWNED_KEYS,
 ] as const;
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const DECIMAL_REVISION_PATTERN = /^(0|[1-9][0-9]*)$/;
 const PERSONAL_BASELINE_VERSION_PATTERN =
 	/^personal-agent-baseline-v1-[0-9a-f]{64}$/;
 const BASE64_PATTERN =
@@ -212,6 +213,7 @@ export interface AgentReleaseApplyCommand {
 	signedFeed: SignedFeed;
 	assignment: ReleaseAssignment;
 	expectedCurrentReleaseSequence: number | null;
+	expectedConfigurationRevision?: string;
 	assignmentRevision?: string;
 	claimToken?: string;
 	stepOrdinal?: number;
@@ -273,6 +275,12 @@ export interface AgentReleasePostApplyEvidence {
 export interface AgentReleaseApplyResult extends AgentReleaseEvidence {
 	idempotent: boolean;
 	repaired: boolean;
+}
+
+export interface PreparedAgentReleaseApply {
+	command: AgentReleaseApplyCommand;
+	publication: FeedPublication;
+	feedDigest: string;
 }
 
 export class AgentReleaseError extends Error {
@@ -425,62 +433,90 @@ export function createAgentReleaseService(options: {
 	const evidenceSigner = parseEvidenceSigner(
 		options.evidenceSigningPrivateKeysJson,
 	);
+	const now = options.now ?? (() => new Date());
+
+	function prepareAgentReleaseApply(input: {
+		organizationId: string;
+		agentId: string;
+		command: unknown;
+	}): PreparedAgentReleaseApply {
+		if (keyring.error) throw keyring.error;
+		if (expectedEnvironment.error) throw expectedEnvironment.error;
+		assertAgentReleaseJsonValue(input.command);
+		const command = parseApplyCommand(input.command);
+		validateApplyEnvelope(input.agentId, command, expectedEnvironment.value);
+		verifySignedManifest(command.signedManifest, keyring.keys);
+		verifySignedFeed(command.signedFeed, keyring.keys);
+		validateCurrentContract(command);
+		const publication = validatePublication(command, now());
+		const feedDigest = digestValue(command.signedFeed);
+		const expectedCommandDigest = digestValue(
+			withoutOwnKey(command, "commandDigest"),
+		);
+		if (!safeDigestEqual(command.commandDigest, expectedCommandDigest)) {
+			throw releaseError(
+				"agent_release_command_digest_mismatch",
+				400,
+				"Agent release command digest does not match its canonical payload",
+			);
+		}
+		validatePersonalBaselineCommand(command, now());
+		if (isCurrentApplyCommand(command) && evidenceSigner.error) {
+			throw evidenceSigner.error;
+		}
+		return { command, publication, feedDigest };
+	}
+
+	function applyPreparedAgentReleaseInTransaction(
+		tx: DbClient,
+		input: {
+			organizationId: string;
+			agentId: string;
+			prepared: PreparedAgentReleaseApply;
+		},
+	): Promise<AgentReleaseApplyResult> {
+		return applyInTransaction(tx, {
+			organizationId: input.organizationId,
+			agentId: input.agentId,
+			command: input.prepared.command,
+			publication: input.prepared.publication,
+			feedDigest: input.prepared.feedDigest,
+			transactionHooks: options.transactionHooks,
+		});
+	}
+
+	function finalizeAgentReleaseApplyEvidence(
+		prepared: PreparedAgentReleaseApply,
+		result: AgentReleaseApplyResult,
+	): AgentReleaseApplyResult | AgentReleasePostApplyEvidence {
+		if (!isCurrentApplyCommand(prepared.command)) return result;
+		return signPostApplyEvidence({
+			command: prepared.command,
+			result,
+			signer: evidenceSigner.value,
+			now: now(),
+		});
+	}
 
 	return {
+		prepareAgentReleaseApply,
+		applyPreparedAgentReleaseInTransaction,
+		finalizeAgentReleaseApplyEvidence,
 		async apply(input: {
 			organizationId: string;
 			agentId: string;
 			command: unknown;
 		}): Promise<AgentReleaseApplyResult | AgentReleasePostApplyEvidence> {
 			const sql = options.sql ?? getDb();
-			if (keyring.error) throw keyring.error;
-			if (expectedEnvironment.error) throw expectedEnvironment.error;
-			assertAgentReleaseJsonValue(input.command);
-			const command = parseApplyCommand(input.command);
-			validateApplyEnvelope(input.agentId, command, expectedEnvironment.value);
-			verifySignedManifest(command.signedManifest, keyring.keys);
-			verifySignedFeed(command.signedFeed, keyring.keys);
-			validateCurrentContract(command);
-			const publication = validatePublication(
-				command,
-				(options.now ?? (() => new Date()))(),
-			);
-			const feedDigest = digestValue(command.signedFeed);
-			const expectedCommandDigest = digestValue(
-				withoutOwnKey(command, "commandDigest"),
-			);
-			if (!safeDigestEqual(command.commandDigest, expectedCommandDigest)) {
-				throw releaseError(
-					"agent_release_command_digest_mismatch",
-					400,
-					"Agent release command digest does not match its canonical payload",
-				);
-			}
-			validatePersonalBaselineCommand(
-				command,
-				(options.now ?? (() => new Date()))(),
-			);
-			if (isCurrentApplyCommand(command) && evidenceSigner.error) {
-				throw evidenceSigner.error;
-			}
-
+			const prepared = prepareAgentReleaseApply(input);
 			const result = await sql.begin(async (tx) =>
-				applyInTransaction(tx, {
+				applyPreparedAgentReleaseInTransaction(tx, {
 					organizationId: input.organizationId,
 					agentId: input.agentId,
-					command,
-					publication,
-					feedDigest,
-					transactionHooks: options.transactionHooks,
+					prepared,
 				}),
 			);
-			if (!isCurrentApplyCommand(command)) return result;
-			return signPostApplyEvidence({
-				command,
-				result,
-				signer: evidenceSigner.value,
-				now: (options.now ?? (() => new Date()))(),
-			});
+			return finalizeAgentReleaseApplyEvidence(prepared, result);
 		},
 
 		async getEvidence(input: {
@@ -1228,6 +1264,7 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 			"stepOrdinal",
 			"stepLeaseToken",
 			"expectedCurrentReleaseSequence",
+			"expectedConfigurationRevision",
 			"commandDigest",
 		],
 		"command",
@@ -1328,6 +1365,16 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 			"Expected current release sequence must be null or a positive safe integer",
 		);
 	}
+	const expectedConfigurationRevision = value.expectedConfigurationRevision;
+	if (
+		expectedConfigurationRevision !== undefined &&
+		(typeof expectedConfigurationRevision !== "string" ||
+			!DECIMAL_REVISION_PATTERN.test(expectedConfigurationRevision))
+	) {
+		throw invalidRequest(
+			"Expected configuration revision must be a nonnegative decimal string",
+		);
+	}
 	if (
 		typeof value.commandDigest !== "string" ||
 		!SHA256_PATTERN.test(value.commandDigest)
@@ -1362,6 +1409,9 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 				}
 			: {}),
 		expectedCurrentReleaseSequence,
+		...(expectedConfigurationRevision === undefined
+			? {}
+			: { expectedConfigurationRevision }),
 		commandDigest: value.commandDigest,
 	};
 }

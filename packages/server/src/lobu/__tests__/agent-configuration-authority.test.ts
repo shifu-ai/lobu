@@ -73,6 +73,7 @@ describe('AgentConfigurationAuthority', () => {
 
   test('persists one native patch, revision control, and command receipt atomically', async () => {
     const authority = createAgentConfigurationAuthority();
+    expect(typeof authority.applyManagedRelease).toBe('function');
     const command = {
       organizationId: ORGANIZATION_ID,
       agentId: AGENT_ID,
