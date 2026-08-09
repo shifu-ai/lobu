@@ -93,9 +93,9 @@ function stateFromCommandRow(
 function assertTracerPatch(command: NativePatchCommand): void {
   const keys = Object.keys(command.patch);
   if (
-    keys.length !== 1 ||
-    keys[0] !== 'verboseLogging' ||
-    typeof command.patch.verboseLogging !== 'boolean'
+    keys.length > 1 ||
+    (keys.length === 1 &&
+      (keys[0] !== 'verboseLogging' || typeof command.patch.verboseLogging !== 'boolean'))
   ) {
     throw new AgentConfigurationError('invalid_native_settings_patch');
   }
@@ -169,20 +169,24 @@ export async function applyNativePatchInTransaction(
     return { status: 'rejected', reason: 'toolbox_managed' };
   }
 
-  const changed = (agent.verbose_logging ?? false) !== command.patch.verboseLogging;
+  const resultingVerboseLogging =
+    command.patch.verboseLogging ?? (agent.verbose_logging ?? false);
+  const changed =
+    command.patch.verboseLogging !== undefined &&
+    (agent.verbose_logging ?? false) !== command.patch.verboseLogging;
   const resultingRevision = changed ? (BigInt(currentRevision) + 1n).toString() : currentRevision;
   const resultStatus = changed ? 'applied' : 'no_change';
   if (changed) {
     await tx`
       UPDATE agents
-      SET verbose_logging = ${command.patch.verboseLogging}, updated_at = NOW()
+      SET verbose_logging = ${resultingVerboseLogging}, updated_at = NOW()
       WHERE organization_id = ${command.organizationId} AND id = ${command.agentId}
     `;
   }
 
   const resultingSettingsDigest = sha256Canonical({
     ...settingsProjection(agent),
-    verboseLogging: command.patch.verboseLogging,
+    verboseLogging: resultingVerboseLogging,
   });
   await tx`
     UPDATE agent_configuration_controls

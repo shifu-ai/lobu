@@ -424,6 +424,7 @@ describe('PATCH /:agentId/config — native configuration authority', () => {
     resetApplyRouteStores();
     await seedOrg(ORG_A);
     resetApplyAuth();
+    coreServicesStash.services = null;
   });
 
   test('applies one revisioned native patch and rejects a stale writer', async () => {
@@ -505,6 +506,137 @@ describe('PATCH /:agentId/config — native configuration authority', () => {
     await expect(response.json()).resolves.toEqual({
       error: 'missing_idempotency_key',
     });
+  });
+
+  test('records an empty revisioned patch as no_change without invoking the legacy writer', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-empty-patch';
+    await seedAgent(ORG_A, agentId);
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      UPDATE agents
+      SET updated_at = TIMESTAMPTZ '2000-01-01 00:00:00+00'
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+
+    const request = () =>
+      app.request(`/${agentId}/config`, {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json',
+          'if-match': '"agent-config:0"',
+          'idempotency-key': 'native-empty-patch-1',
+        },
+        body: JSON.stringify({}),
+      });
+
+    const first = await request();
+    expect(first.status).toBe(200);
+    expect(first.headers.get('etag')).toBe('"agent-config:0"');
+    await expect(first.json()).resolves.toEqual({
+      success: true,
+      configurationRevision: '0',
+      managementMode: 'native',
+    });
+
+    const replay = await request();
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get('etag')).toBe('"agent-config:0"');
+
+    const agentRows = await sql`
+      SELECT updated_at = TIMESTAMPTZ '2000-01-01 00:00:00+00' AS untouched
+      FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(agentRows).toEqual([{ untouched: true }]);
+    const commands = await sql`
+      SELECT command_id, resulting_revision, result_status
+      FROM agent_configuration_commands
+      WHERE organization_id = ${ORG_A} AND agent_id = ${agentId}
+    `;
+    expect(commands).toEqual([
+      {
+        command_id: 'native-empty-patch-1',
+        resulting_revision: 0,
+        result_status: 'no_change',
+      },
+    ]);
+  });
+
+  test('runs credential-only reconciliation after a revisioned no_change without credential ledger data', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-auth-profiles-only';
+    await seedAgent(ORG_A, agentId);
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      UPDATE agents
+      SET updated_at = TIMESTAMPTZ '2000-01-01 00:00:00+00'
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    let upsertCalls = 0;
+    coreServicesStash.services = authProfileServices(async () => {
+      const commands = await sql`
+        SELECT result_status
+        FROM agent_configuration_commands
+        WHERE organization_id = ${ORG_A} AND agent_id = ${agentId}
+      `;
+      expect(commands).toEqual([{ result_status: 'no_change' }]);
+      upsertCalls += 1;
+    });
+    const request = (credential: string) =>
+      app.request(`/${agentId}/config`, {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json',
+          'if-match': '"agent-config:0"',
+          'idempotency-key': 'native-auth-profiles-only-1',
+        },
+        body: JSON.stringify({
+          authProfiles: [
+            {
+              id: 'profile-1',
+              provider: 'openai',
+              credential,
+              authType: 'api-key',
+            },
+          ],
+        }),
+      });
+
+    const first = await request('first-secret-key');
+    expect(first.status).toBe(200);
+    expect(first.headers.get('etag')).toBe('"agent-config:0"');
+    await expect(first.json()).resolves.toEqual({
+      success: true,
+      configurationRevision: '0',
+      managementMode: 'native',
+    });
+
+    const replayWithRotatedCredential = await request('rotated-secret-key');
+    expect(replayWithRotatedCredential.status).toBe(200);
+    expect(replayWithRotatedCredential.headers.get('etag')).toBe('"agent-config:0"');
+    expect(upsertCalls).toBe(2);
+
+    const agentRows = await sql`
+      SELECT updated_at = TIMESTAMPTZ '2000-01-01 00:00:00+00' AS untouched
+      FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(agentRows).toEqual([{ untouched: true }]);
+    const commands = await sql`
+      SELECT command_digest, resulting_revision, result_status
+      FROM agent_configuration_commands
+      WHERE organization_id = ${ORG_A} AND agent_id = ${agentId}
+    `;
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({
+      command_digest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      resulting_revision: 0,
+      result_status: 'no_change',
+    });
+    expect(JSON.stringify(commands)).not.toContain('secret-key');
   });
 });
 

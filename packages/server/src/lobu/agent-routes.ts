@@ -2153,16 +2153,15 @@ routes.patch('/:agentId/config', async (c) => {
     throw error;
   }
 
-  const commandId = c.req.header('idempotency-key')?.trim();
-  if (expectedConfigurationRevision !== null && !commandId) {
-    return c.json({ error: 'missing_idempotency_key' }, 400);
-  }
-
-  if (
-    expectedConfigurationRevision !== null &&
-    commandId &&
-    Object.keys(settingsUpdates).length > 0
-  ) {
+  let revisionedResponse: {
+    configurationRevision: string;
+    managementMode: 'native' | 'toolbox_managed';
+  } | null = null;
+  if (expectedConfigurationRevision !== null) {
+    const commandId = c.req.header('idempotency-key')?.trim();
+    if (!commandId) {
+      return c.json({ error: 'missing_idempotency_key' }, 400);
+    }
     const authSource = c.get('authSource');
     const actor = {
       kind: authSource === 'session' ? ('session' as const) : ('admin_pat' as const),
@@ -2194,12 +2193,10 @@ routes.patch('/:agentId/config', async (c) => {
           409
         );
       }
-      c.header('ETag', `"agent-config:${result.state.configurationRevision}"`);
-      return c.json({
-        success: true,
+      revisionedResponse = {
         configurationRevision: result.state.configurationRevision,
         managementMode: result.state.managementMode,
-      });
+      };
     } catch (error) {
       if (error instanceof AgentConfigurationError) {
         if (
@@ -2218,15 +2215,15 @@ routes.patch('/:agentId/config', async (c) => {
       }
       throw error;
     }
-  }
-
-  try {
-    await patchLegacyAgentSettings(organizationId, agentId, settingsUpdates);
-  } catch (error) {
-    if (error instanceof AgentSettingsManagedByReleaseError) {
-      return c.json({ error: error.code, error_description: error.message }, 409);
+  } else {
+    try {
+      await patchLegacyAgentSettings(organizationId, agentId, settingsUpdates);
+    } catch (error) {
+      if (error instanceof AgentSettingsManagedByReleaseError) {
+        return c.json({ error: error.code, error_description: error.message }, 409);
+      }
+      throw error;
     }
-    throw error;
   }
 
   if (Array.isArray(authProfiles)) {
@@ -2255,6 +2252,10 @@ routes.patch('/:agentId/config', async (c) => {
     }
   }
 
+  if (revisionedResponse) {
+    c.header('ETag', `"agent-config:${revisionedResponse.configurationRevision}"`);
+    return c.json({ success: true, ...revisionedResponse });
+  }
   return c.json({ success: true });
 });
 
