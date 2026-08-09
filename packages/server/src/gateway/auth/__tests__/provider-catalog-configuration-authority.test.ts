@@ -7,8 +7,10 @@ import type {
 } from "../../../lobu/agent-configuration/index.js";
 import {
   AgentConfigurationMutationConflictError,
+  AgentConfigurationMutationInvalidRevisionError,
   AgentConfigurationMutationRejectedError,
   EmbeddedInMemoryAgentConfigurationMutationAdapter,
+  createAgentConfigurationMutationPort,
 } from "../agent-configuration-mutation-port.js";
 import { ProviderCatalogService } from "../provider-catalog.js";
 
@@ -226,15 +228,136 @@ describe("ProviderCatalogService configuration authority mutations", () => {
     expect(fixture.writes).toHaveLength(1);
     expect(fixture.getRawWrites()).toBe(0);
   });
+
+  test("reads authority state before settings so an intervening mutation conflicts", async () => {
+    const events: string[] = [];
+    let currentRevision = "7";
+    const writes: NativePatchCommandInput[] = [];
+    const catalog = new ProviderCatalogService(
+      {
+        async getSettings() {
+          events.push("settings");
+          currentRevision = "8";
+          return { installedProviders: [], updatedAt: 1 };
+        },
+      } as never,
+      {} as never,
+      { has: () => false } as never,
+      {
+        async readAppliedState() {
+          events.push("state");
+          return appliedState(currentRevision);
+        },
+        async updateNativeConfiguration(input) {
+          events.push("update");
+          writes.push(input);
+          return input.expectedConfigurationRevision === currentRevision
+            ? { status: "applied", state: appliedState("9") }
+            : {
+                status: "conflict",
+                conflict: "revision_mismatch",
+                currentRevision,
+              };
+        },
+      },
+      () => "00000000-0000-4000-8000-000000000002",
+      () => installedAt
+    );
+
+    await expect(
+      catalog.installProvider(subject, "authority-test")
+    ).rejects.toBeInstanceOf(AgentConfigurationMutationConflictError);
+    expect(events).toEqual(["state", "settings", "update"]);
+    expect(writes[0]?.expectedConfigurationRevision).toBe("7");
+  });
 });
 
-test("embedded adapter owns process-local revision state for SDK stores", async () => {
+test("embedded adapter serializes concurrent CAS and cleans up its subject lock", async () => {
   let settings = {
     installedProviders: [],
     updatedAt: 1,
   } as AgentSettings;
+  let updateCalls = 0;
+  let reportFirstWriteStarted!: () => void;
+  let releaseFirstWrite!: () => void;
+  const firstWriteStarted = new Promise<void>((resolve) => {
+    reportFirstWriteStarted = resolve;
+  });
+  const firstWriteReleased = new Promise<void>((resolve) => {
+    releaseFirstWrite = resolve;
+  });
   const adapter = new EmbeddedInMemoryAgentConfigurationMutationAdapter({
     async getSettings() {
+      return settings;
+    },
+    async updateSettings(_agentId: string, patch: Partial<AgentSettings>) {
+      updateCalls += 1;
+      if (updateCalls === 1) {
+        reportFirstWriteStarted();
+        await firstWriteReleased;
+      }
+      settings = { ...settings, ...patch, updatedAt: settings.updatedAt + 1 };
+    },
+  } as never);
+
+  expect((await adapter.readAppliedState(subject))?.configurationRevision).toBe("0");
+  const first = adapter.updateNativeConfiguration({
+    ...subject,
+    commandId: "embedded-provider-command-1",
+    expectedConfigurationRevision: "0",
+    actor: { kind: "provider_catalog" },
+    patch: {
+      installedProviders: [{ providerId: "authority-test", installedAt: 1 }],
+    },
+  });
+  await firstWriteStarted;
+  const second = adapter.updateNativeConfiguration({
+    ...subject,
+    commandId: "embedded-provider-command-2",
+    expectedConfigurationRevision: "0",
+    actor: { kind: "provider_catalog" },
+    patch: {
+      installedProviders: [{ providerId: "other", installedAt: 2 }],
+    },
+  });
+  await Promise.resolve();
+  releaseFirstWrite();
+  const results = await Promise.all([first, second]);
+
+  expect(results.map((result) => result.status).sort()).toEqual([
+    "applied",
+    "conflict",
+  ]);
+  expect(results.filter((result) => result.status === "conflict")).toEqual([
+    {
+      status: "conflict",
+      conflict: "revision_mismatch",
+      currentRevision: "1",
+    },
+  ]);
+  expect((await adapter.readAppliedState(subject))?.configurationRevision).toBe("1");
+  expect(settings.installedProviders).toEqual([
+    { providerId: "authority-test", installedAt: 1 },
+  ]);
+  expect((adapter as any).subjectMutationQueues.size).toBe(0);
+});
+
+test("embedded adapter does not let a delayed initial read overwrite committed state", async () => {
+  let settings = {
+    installedProviders: [],
+    updatedAt: 1,
+  } as AgentSettings;
+  let getCalls = 0;
+  let releaseDelayedRead!: () => void;
+  const delayedRead = new Promise<void>((resolve) => {
+    releaseDelayedRead = resolve;
+  });
+  const adapter = new EmbeddedInMemoryAgentConfigurationMutationAdapter({
+    async getSettings() {
+      getCalls += 1;
+      if (getCalls === 1) {
+        await delayedRead;
+      }
       return settings;
     },
     async updateSettings(_agentId: string, patch: Partial<AgentSettings>) {
@@ -242,22 +365,44 @@ test("embedded adapter owns process-local revision state for SDK stores", async 
     },
   } as never);
 
-  expect((await adapter.readAppliedState(subject))?.configurationRevision).toBe("0");
-  const result = await adapter.updateNativeConfiguration({
+  const staleRead = adapter.readAppliedState(subject);
+  await Promise.resolve();
+  const mutation = adapter.updateNativeConfiguration({
     ...subject,
-    commandId: "embedded-provider-command",
+    commandId: "embedded-provider-command-after-delayed-read",
     expectedConfigurationRevision: "0",
     actor: { kind: "provider_catalog" },
     patch: {
       installedProviders: [{ providerId: "authority-test", installedAt: 1 }],
     },
   });
+  expect((await mutation).status).toBe("applied");
+  releaseDelayedRead();
 
-  expect(result).toMatchObject({
-    status: "applied",
-    state: { configurationRevision: "1" },
+  expect((await staleRead)?.configurationRevision).toBe("1");
+  expect((await adapter.readAppliedState(subject))?.configurationRevision).toBe("1");
+});
+
+test("authority port rejects null revisions before delegating", async () => {
+  let applyCalls = 0;
+  const port = createAgentConfigurationMutationPort({
+    async readAppliedState() {
+      return appliedState("0");
+    },
+    async apply() {
+      applyCalls += 1;
+      return { status: "applied", state: appliedState("1") };
+    },
   });
-  expect(settings.installedProviders).toEqual([
-    { providerId: "authority-test", installedAt: 1 },
-  ]);
+
+  await expect(
+    port.updateNativeConfiguration({
+      ...subject,
+      commandId: "invalid-null-revision",
+      expectedConfigurationRevision: null,
+      actor: { kind: "provider_catalog" },
+      patch: { installedProviders: [] },
+    } as never)
+  ).rejects.toBeInstanceOf(AgentConfigurationMutationInvalidRevisionError);
+  expect(applyCalls).toBe(0);
 });

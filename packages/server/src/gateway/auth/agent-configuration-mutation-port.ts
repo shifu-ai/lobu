@@ -4,14 +4,21 @@ import type {
   AgentConfigurationMutationResult as ConfigurationMutationResult,
   AgentConfigurationRejectionReason,
   AppliedAgentConfigurationState,
-  NativePatchCommandInput as UndigestedNativePatchInput,
+  BootstrapAgentConfigurationState,
+  NativePatchCommandInput,
   Sha256Digest,
 } from "../../lobu/agent-configuration/types.js";
 
+export type UndigestedNativePatchInput = Omit<
+  NativePatchCommandInput,
+  "expectedConfigurationRevision"
+> & {
+  expectedConfigurationRevision: string;
+};
+
 export type {
-  AppliedAgentConfigurationState,
+  BootstrapAgentConfigurationState as AgentConfigurationReadState,
   ConfigurationMutationResult,
-  UndigestedNativePatchInput,
 };
 
 export type ProviderMutationSubject = {
@@ -22,7 +29,7 @@ export type ProviderMutationSubject = {
 export interface AgentConfigurationMutationPort {
   readAppliedState(
     subject: ProviderMutationSubject
-  ): Promise<AppliedAgentConfigurationState | null>;
+  ): Promise<BootstrapAgentConfigurationState | null>;
   updateNativeConfiguration(
     input: UndigestedNativePatchInput
   ): Promise<ConfigurationMutationResult>;
@@ -45,10 +52,30 @@ export class AgentConfigurationMutationConflictError extends Error {
   }
 }
 
+export class AgentConfigurationMutationTargetNotFoundError extends Error {
+  constructor() {
+    super("Agent configuration mutation target was not found");
+    this.name = "AgentConfigurationMutationTargetNotFoundError";
+  }
+}
+
+export class AgentConfigurationMutationInvalidRevisionError extends Error {
+  constructor() {
+    super("Agent configuration mutation revision must be a decimal string");
+    this.name = "AgentConfigurationMutationInvalidRevisionError";
+  }
+}
+
+function assertDecimalRevision(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new AgentConfigurationMutationInvalidRevisionError();
+  }
+}
+
 type AuthorityAdapterTarget = {
   readAppliedState(
     subject: ProviderMutationSubject
-  ): Promise<AppliedAgentConfigurationState | null>;
+  ): Promise<BootstrapAgentConfigurationState | null>;
   apply(
     input: UndigestedNativePatchInput
   ): Promise<ConfigurationMutationResult>;
@@ -59,7 +86,10 @@ export function createAgentConfigurationMutationPort(
 ): AgentConfigurationMutationPort {
   return {
     readAppliedState: (subject) => authority.readAppliedState(subject),
-    updateNativeConfiguration: (input) => authority.apply(input),
+    async updateNativeConfiguration(input) {
+      assertDecimalRevision(input.expectedConfigurationRevision);
+      return authority.apply(input);
+    },
   };
 }
 
@@ -71,26 +101,32 @@ export function createAgentConfigurationMutationPort(
 export class EmbeddedInMemoryAgentConfigurationMutationAdapter
   implements AgentConfigurationMutationPort
 {
-  private readonly states = new Map<string, AppliedAgentConfigurationState>();
+  private readonly states = new Map<string, BootstrapAgentConfigurationState>();
   private readonly commands = new Map<
     string,
     { digest: Sha256Digest; state: AppliedAgentConfigurationState }
   >();
+  private readonly subjectMutationQueues = new Map<string, Promise<void>>();
 
   constructor(private readonly store: AgentConfigStore) {}
 
   async readAppliedState(
     subject: ProviderMutationSubject
-  ): Promise<AppliedAgentConfigurationState | null> {
+  ): Promise<BootstrapAgentConfigurationState | null> {
     const key = this.subjectKey(subject);
     const current = this.states.get(key);
     if (current) return current;
     const settings = await this.store.getSettings(subject.agentId);
     if (!settings) return null;
-    const initial = this.createState(subject, "0", settings, {
-      commandId: "embedded-initial-state",
-      commandDigest: this.digest({ subject, settings }),
-    });
+    const stateCreatedWhileReading = this.states.get(key);
+    if (stateCreatedWhileReading) return stateCreatedWhileReading;
+    const initial: BootstrapAgentConfigurationState = {
+      ...subject,
+      managementMode: "native",
+      configurationRevision: "0",
+      settingsDigest: this.digest(settings),
+      lastMutation: null,
+    };
     this.states.set(key, initial);
     return initial;
   }
@@ -98,12 +134,25 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
   async updateNativeConfiguration(
     input: UndigestedNativePatchInput
   ): Promise<ConfigurationMutationResult> {
+    assertDecimalRevision(input.expectedConfigurationRevision);
+    const key = this.subjectKey(input);
+    return this.withSubjectMutationLock(key, () =>
+      this.updateNativeConfigurationLocked(input)
+    );
+  }
+
+  private async updateNativeConfigurationLocked(
+    input: UndigestedNativePatchInput
+  ): Promise<ConfigurationMutationResult> {
     const subject = {
       organizationId: input.organizationId,
       agentId: input.agentId,
     };
     const current = await this.readAppliedState(subject);
-    const currentRevision = current?.configurationRevision ?? "0";
+    if (!current) {
+      throw new AgentConfigurationMutationTargetNotFoundError();
+    }
+    const currentRevision = current.configurationRevision;
     const commandKey = `${this.subjectKey(subject)}\0${input.commandId}`;
     const commandDigest = this.digest(input);
     const prior = this.commands.get(commandKey);
@@ -116,10 +165,7 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
             currentRevision,
           };
     }
-    if (
-      input.expectedConfigurationRevision !== null &&
-      input.expectedConfigurationRevision !== currentRevision
-    ) {
+    if (input.expectedConfigurationRevision !== currentRevision) {
       return {
         status: "conflict",
         conflict: "revision_mismatch",
@@ -146,6 +192,28 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
     this.states.set(this.subjectKey(subject), state);
     this.commands.set(commandKey, { digest: commandDigest, state });
     return { status: "applied", state };
+  }
+
+  private async withSubjectMutationLock<T>(
+    key: string,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const previous = this.subjectMutationQueues.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => current);
+    this.subjectMutationQueues.set(key, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.subjectMutationQueues.get(key) === tail) {
+        this.subjectMutationQueues.delete(key);
+      }
+    }
   }
 
   private subjectKey(subject: ProviderMutationSubject): string {

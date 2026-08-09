@@ -33,6 +33,7 @@ import type {
   ApplyBootstrapConfigurationInput,
   AgentConfigurationEnrollmentResult,
   AppliedAgentConfigurationState,
+  BootstrapAgentConfigurationState,
   ManagedReleaseCommandInput,
   ManagedReleaseConfigurationResult,
   ManagedEnrollmentCommand,
@@ -50,7 +51,7 @@ export interface AgentConfigurationAuthority {
   readAppliedState(input: {
     organizationId: string;
     agentId: string;
-  }): Promise<AppliedAgentConfigurationState | null>;
+  }): Promise<BootstrapAgentConfigurationState | null>;
   enrollToolboxManaged(
     input: EnrollToolboxManagedInput,
   ): Promise<AgentConfigurationEnrollmentResult>;
@@ -191,25 +192,25 @@ export function createAgentConfigurationAuthority(
           WHERE organization_id=${input.organizationId} AND agent_id=${input.agentId}
         `;
         const control = controls[0];
-        if (
-          !control ||
-          !control.last_mutation_kind ||
-          !control.last_command_id ||
-          !control.last_command_digest
-        ) {
-          return null;
-        }
+        const settingsDigest = await readAgentConfigurationSettingsDigest(tx, input);
         return {
           organizationId: input.organizationId,
           agentId: input.agentId,
-          managementMode: control.management_mode,
-          configurationRevision: String(control.configuration_revision),
-          settingsDigest: await readAgentConfigurationSettingsDigest(tx, input),
-          lastMutation: {
-            kind: control.last_mutation_kind,
-            commandId: control.last_command_id,
-            commandDigest: control.last_command_digest,
-          },
+          managementMode: control?.management_mode ?? 'native',
+          configurationRevision: control
+            ? String(control.configuration_revision)
+            : '0',
+          settingsDigest,
+          lastMutation:
+            control?.last_mutation_kind &&
+            control.last_command_id &&
+            control.last_command_digest
+              ? {
+                  kind: control.last_mutation_kind,
+                  commandId: control.last_command_id,
+                  commandDigest: control.last_command_digest,
+                }
+              : null,
         };
       });
     },

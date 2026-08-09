@@ -1,7 +1,9 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { SecretPutOptions, SecretRef } from "@lobu/core";
 import type { GatewayConfig } from "../config/index.js";
+import { EmbeddedInMemoryAgentConfigurationMutationAdapter } from "../auth/agent-configuration-mutation-port.js";
 import { CoreServices } from "../services/core-services.js";
+import { InMemoryAgentStore } from "../stores/in-memory-agent-store.js";
 import {
   type SecretListEntry,
   SecretStoreRegistry,
@@ -139,6 +141,66 @@ describe("CoreServices store selection", () => {
     ).rejects.toThrow(/No agent sub-stores configured/);
   });
 
+  test("fails closed when host-provided stores omit a configuration mutation authority", async () => {
+    ensureEncryptionKey();
+    await resetTestDatabase();
+    const coreServices = new CoreServices(createGatewayConfig(), {
+      stateAdapter: new InMemoryStateAdapter(),
+      configStore: {
+        getSettings: async () => null,
+        saveSettings: async () => {},
+        updateSettings: async () => {},
+        deleteSettings: async () => {},
+        hasSettings: async () => false,
+        getMetadata: async () => null,
+        saveMetadata: async () => {},
+        updateMetadata: async () => {},
+        deleteMetadata: async () => {},
+        hasAgent: async () => false,
+        listAgents: async () => [],
+      } as any,
+      connectionStore: {} as any,
+      accessStore: {} as any,
+    });
+    (coreServices as any).queue = new MockMessageQueue();
+
+    await expect(
+      (coreServices as any).initializeSessionServices()
+    ).rejects.toThrow(/configuration mutation port.*host-provided/i);
+  });
+
+  test("production Lobu composition injects one authority into Gateway and provisioning", async () => {
+    const source = await Bun.file(
+      new URL("../../lobu/gateway.ts", import.meta.url)
+    ).text();
+
+    expect(source).toMatch(
+      /agentConfigurationMutationPort:\s*createAgentConfigurationMutationPort\(\s*agentConfigurationAuthority\s*\)/
+    );
+    expect(source).toMatch(
+      /createProvisioningRoutes\([\s\S]*?agentConfigurationAuthority,/
+    );
+  });
+
+  test("selects the embedded adapter only for the built-in in-memory store", async () => {
+    ensureEncryptionKey();
+    await resetTestDatabase();
+    const store = new InMemoryAgentStore();
+    const coreServices = new CoreServices(createGatewayConfig(), {
+      stateAdapter: new InMemoryStateAdapter(),
+      configStore: store,
+      connectionStore: store,
+      accessStore: store,
+    });
+    (coreServices as any).queue = new MockMessageQueue();
+
+    await (coreServices as any).initializeSessionServices();
+
+    expect(
+      (coreServices as any).agentConfigurationMutationPort
+    ).toBeInstanceOf(EmbeddedInMemoryAgentConfigurationMutationAdapter);
+  });
+
   test("uses the host-provided secret store for persisted auth profiles", async () => {
     ensureEncryptionKey();
     await resetTestDatabase();
@@ -149,6 +211,12 @@ describe("CoreServices store selection", () => {
     const coreServices = new CoreServices(createGatewayConfig(), {
       secretStore: hostRegistry,
       stateAdapter: new InMemoryStateAdapter(),
+      agentConfigurationMutationPort: {
+        readAppliedState: async () => null,
+        updateNativeConfiguration: async () => {
+          throw new Error("not used by this test");
+        },
+      },
       configStore: {
         // Minimal stub — sessionServices only checks for presence.
         getSettings: async () => null,
@@ -210,4 +278,3 @@ describe("CoreServices store selection", () => {
     expect(await hostStore.get(hostEntries[0]!.ref)).toBe("sk-host-store-only");
   });
 });
-

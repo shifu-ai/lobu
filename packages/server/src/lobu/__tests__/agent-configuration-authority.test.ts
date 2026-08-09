@@ -920,24 +920,51 @@ describe('AgentConfigurationAuthority', () => {
     ]);
   });
 
-  test('reads the applied state for the exact organization and agent subject', async () => {
+  test('projects a legacy agent as revision zero and serializes concurrent first provider mutations', async () => {
     const authority = createAgentConfigurationAuthority();
-    const result = await authority.apply({
+    const projected = await authority.readAppliedState({
       organizationId: ORGANIZATION_ID,
       agentId: AGENT_ID,
-      commandId: 'native-read-applied-state',
+    });
+    expect(projected).toMatchObject({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      managementMode: 'native',
+      configurationRevision: '0',
+      settingsDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      lastMutation: null,
+    });
+
+    const first = createAgentConfigurationAuthority().apply({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      commandId: 'first-provider-mutation-a',
       expectedConfigurationRevision: '0',
       actor: { kind: 'provider_catalog' },
-      patch: { installedProviders: [] },
+      patch: { installedProviders: [{ providerId: 'provider-a', installedAt: 1 }] },
     });
-    if (!('state' in result)) throw new Error('Expected applied state');
+    const second = createAgentConfigurationAuthority().apply({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      commandId: 'first-provider-mutation-b',
+      expectedConfigurationRevision: '0',
+      actor: { kind: 'provider_catalog' },
+      patch: { installedProviders: [{ providerId: 'provider-b', installedAt: 2 }] },
+    });
+    const results = await Promise.all([first, second]);
 
-    expect(
-      await authority.readAppliedState({
-        organizationId: ORGANIZATION_ID,
-        agentId: AGENT_ID,
-      })
-    ).toEqual(result.state);
+    expect(results.filter((result) => 'state' in result)).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'conflict')).toEqual([
+      expect.objectContaining({
+        status: 'conflict',
+        conflict: 'revision_mismatch',
+        currentRevision: '1',
+      }),
+    ]);
+    expect((await authority.readAppliedState({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+    }))?.configurationRevision).toBe('1');
     expect(
       await authority.readAppliedState({
         organizationId: 'another-organization',

@@ -416,14 +416,19 @@ export class CoreServices {
 
     this.agentSettingsStore = new AgentSettingsStore(this.configStore);
     this.agentMetadataStore = new AgentMetadataStore(this.configStore);
-    this.agentConfigurationMutationPort =
-      this.options?.agentConfigurationMutationPort ??
-      new EmbeddedInMemoryAgentConfigurationMutationAdapter(this.configStore);
     if (this.options?.agentConfigurationMutationPort) {
+      this.agentConfigurationMutationPort =
+        this.options.agentConfigurationMutationPort;
       logger.debug("Using injected persistent agent configuration authority");
-    } else {
+    } else if (this.configStore instanceof InMemoryAgentStore) {
+      this.agentConfigurationMutationPort =
+        new EmbeddedInMemoryAgentConfigurationMutationAdapter(this.configStore);
       logger.debug(
-        "Using explicit embedded in-memory agent configuration mutation adapter"
+        "Using built-in embedded in-memory agent configuration mutation adapter"
+      );
+    } else {
+      throw new Error(
+        "Agent configuration mutation port is required for host-provided config stores"
       );
     }
     logger.debug(

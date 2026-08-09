@@ -9,6 +9,7 @@ import {
   AgentConfigurationMutationConflictError,
   type AgentConfigurationMutationPort,
   AgentConfigurationMutationRejectedError,
+  AgentConfigurationMutationTargetNotFoundError,
   type ProviderMutationSubject,
   type UndigestedNativePatchInput,
 } from "./agent-configuration-mutation-port.js";
@@ -104,10 +105,8 @@ export class ProviderCatalogService {
       throw new Error(`Unknown provider: ${providerId}`);
     }
 
-    const [settings, appliedState] = await Promise.all([
-      this.agentSettingsStore.getSettings(agentId),
-      this.configurationMutations.readAppliedState(subject),
-    ]);
+    const { settings, configurationRevision } =
+      await this.readMutationInputs(subject);
     const installed = settings?.installedProviders || [];
 
     if (installed.some((ip) => ip.providerId === providerId)) {
@@ -130,7 +129,7 @@ export class ProviderCatalogService {
       installedProviders: nextInstalledProviders,
     });
 
-    await this.applyProviderPatch(subject, appliedState?.configurationRevision ?? null, {
+    await this.applyProviderPatch(subject, configurationRevision, {
       installedProviders: nextInstalledProviders,
       model: reconciled.model ?? null,
       modelSelection: reconciled.modelSelection,
@@ -149,10 +148,8 @@ export class ProviderCatalogService {
   ): Promise<void> {
     const { agentId } = subject;
     this.guardDeclared(agentId);
-    const [settings, appliedState] = await Promise.all([
-      this.agentSettingsStore.getSettings(agentId),
-      this.configurationMutations.readAppliedState(subject),
-    ]);
+    const { settings, configurationRevision } =
+      await this.readMutationInputs(subject);
     const installed = settings?.installedProviders || [];
 
     const filtered = installed.filter((ip) => ip.providerId !== providerId);
@@ -174,7 +171,7 @@ export class ProviderCatalogService {
       installedProviders: filtered,
     });
 
-    await this.applyProviderPatch(subject, appliedState?.configurationRevision ?? null, {
+    await this.applyProviderPatch(subject, configurationRevision, {
       installedProviders: filtered,
       model: reconciled.model ?? null,
       modelSelection: reconciled.modelSelection,
@@ -225,10 +222,8 @@ export class ProviderCatalogService {
   ): Promise<void> {
     const { agentId } = subject;
     this.guardDeclared(agentId);
-    const [settings, appliedState] = await Promise.all([
-      this.agentSettingsStore.getSettings(agentId),
-      this.configurationMutations.readAppliedState(subject),
-    ]);
+    const { settings, configurationRevision } =
+      await this.readMutationInputs(subject);
     const installed = settings?.installedProviders || [];
 
     const installedMap = new Map(installed.map((ip) => [ip.providerId, ip]));
@@ -257,7 +252,7 @@ export class ProviderCatalogService {
       installedProviders: reordered,
     });
 
-    await this.applyProviderPatch(subject, appliedState?.configurationRevision ?? null, {
+    await this.applyProviderPatch(subject, configurationRevision, {
       installedProviders: reordered,
       model: reconciled.model ?? null,
       modelSelection: reconciled.modelSelection,
@@ -271,7 +266,7 @@ export class ProviderCatalogService {
 
   private async applyProviderPatch(
     subject: ProviderMutationSubject,
-    expectedConfigurationRevision: string | null,
+    expectedConfigurationRevision: string,
     patch: UndigestedNativePatchInput["patch"]
   ): Promise<void> {
     const result = await this.configurationMutations.updateNativeConfiguration({
@@ -293,5 +288,21 @@ export class ProviderCatalogService {
         result.currentRevision
       );
     }
+  }
+
+  private async readMutationInputs(subject: ProviderMutationSubject) {
+    const appliedState =
+      await this.configurationMutations.readAppliedState(subject);
+    if (!appliedState) {
+      throw new AgentConfigurationMutationTargetNotFoundError();
+    }
+    const settings = await this.agentSettingsStore.getSettings(subject.agentId);
+    if (!settings) {
+      throw new AgentConfigurationMutationTargetNotFoundError();
+    }
+    return {
+      configurationRevision: appliedState.configurationRevision,
+      settings,
+    };
   }
 }
