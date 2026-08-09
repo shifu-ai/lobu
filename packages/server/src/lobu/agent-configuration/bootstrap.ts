@@ -23,7 +23,6 @@ import type {
   AgentConfigurationBootstrapResult,
   ApplyBootstrapConfigurationInput,
   AppliedAgentConfigurationState,
-  BootstrapAgentConfigurationState,
   ProvisioningFence,
   Sha256Digest,
 } from './types';
@@ -154,7 +153,7 @@ function stateFromControl(
   command: MaterializedBootstrap,
   control: Awaited<ReturnType<typeof lockAgentAndConfigurationControl>>,
   settingsDigest: Sha256Digest
-): BootstrapAgentConfigurationState {
+): AppliedAgentConfigurationState {
   const lastMutation =
     control.lastMutationKind &&
     control.lastCommandId &&

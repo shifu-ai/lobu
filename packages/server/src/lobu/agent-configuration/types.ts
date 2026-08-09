@@ -1,5 +1,5 @@
 import type { AgentSettings } from '@lobu/core';
-import type { RuntimeCapabilitySnapshot } from '../../gateway/services/runtime-capability-snapshot';
+import type { RuntimeCapabilitySnapshot } from '../runtime-capability-snapshot-contract';
 import type {
   AgentReleaseEvidence,
   AgentReleaseApplyResult,
@@ -71,20 +71,13 @@ export interface AppliedAgentConfigurationState {
   managementMode: ConfigurationManagementMode;
   configurationRevision: string;
   settingsDigest: Sha256Digest;
-  lastMutation: {
+  lastMutation: null | {
     kind: ConfigurationMutationKind;
     commandId: string;
     appliedAt: string;
   };
   managedRelease: AgentReleaseEvidence | null;
 }
-
-export type BootstrapAgentConfigurationState = Omit<
-  AppliedAgentConfigurationState,
-  'lastMutation'
-> & {
-  lastMutation: AppliedAgentConfigurationState['lastMutation'] | null;
-};
 
 export type AgentConfigurationRejectionReason =
   | 'field_owned_by_managed_release'
@@ -192,7 +185,7 @@ export type AgentConfigurationBootstrapResult =
       created: boolean;
       replayed: boolean;
       membership?: { ensured: true; role: string };
-      state: BootstrapAgentConfigurationState;
+      state: AppliedAgentConfigurationState;
       metadata: { name: string; description?: string };
     }
   | {

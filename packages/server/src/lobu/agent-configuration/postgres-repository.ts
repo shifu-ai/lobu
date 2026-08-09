@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { inferGrantKind, normalizeDomainPattern, type AgentSettings } from '@lobu/core';
 import { canonicalize } from 'json-canonicalize';
 import type { DbClient } from '../../db/client';
-import { validateRuntimeCapabilitySnapshot } from '../../gateway/services/runtime-capability-snapshot';
+import { validateRuntimeCapabilitySnapshot } from '../runtime-capability-snapshot-contract';
 import logger from '../../utils/logger';
 import {
   classifyAgentReleaseCapabilityState,

@@ -3,6 +3,7 @@ import { join, relative, sep } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 
 const SERVER_SRC = join(import.meta.dir, '..', '..');
+const PACKAGES_ROOT = join(import.meta.dir, '..', '..', '..', '..');
 
 const CONFIGURATION_SQL_ALLOWLIST = new Set([
   'lobu/agent-configuration/postgres-repository.ts',
@@ -74,18 +75,34 @@ function balancedParenthesizedBlock(source: string, openIndex: number): string |
 
 function findConfigurationSql(source: string): string[] {
   const violations: string[] = [];
-  const updatePattern = /\bUPDATE\s+(?:(?:public\s*\.\s*)?["']?agents["']?)\s+SET\b/giu;
+  const updatePattern = /\bUPDATE\s+(?:(?:"public"|public)\s*\.\s*)?(?:"agents"|agents)\s+SET\b/giu;
   for (const match of source.matchAll(updatePattern)) {
     const statement = source.slice(match.index, source.indexOf('`', match.index));
     if (CONFIGURATION_COLUMN_PATTERN.test(statement)) violations.push('UPDATE agents SET');
   }
 
-  const insertPattern = /\bINSERT\s+INTO\s+(?:(?:public\s*\.\s*)?["']?agents["']?)\s*\(/giu;
+  const insertPattern = /\bINSERT\s+INTO\s+(?:(?:"public"|public)\s*\.\s*)?(?:"agents"|agents)\s*\(/giu;
   for (const match of source.matchAll(insertPattern)) {
     const openIndex = source.indexOf('(', match.index);
     const columns = balancedParenthesizedBlock(source, openIndex);
     if (columns && CONFIGURATION_COLUMN_PATTERN.test(columns)) {
       violations.push('INSERT INTO agents(configuration columns)');
+    }
+  }
+  return violations;
+}
+
+function findForbiddenHotPathImports(source: string): string[] {
+  const violations: string[] = [];
+  const importSpecifierPattern =
+    /(?:from\s*|import\s*\(|require\s*\()\s*['"]([^'"]+)['"]/gu;
+  for (const match of source.matchAll(importSpecifierPattern)) {
+    const specifier = match[1] ?? '';
+    if (
+      /(?:^|\/)runtime-capability-snapshot(?:\.[cm]?[jt]s)?$/u.test(specifier) ||
+      /toolbox-[^/]*client/iu.test(specifier)
+    ) {
+      violations.push(specifier);
     }
   }
   return violations;
@@ -100,10 +117,10 @@ function findRawSettingsMutators(source: string): string[] {
 describe('agent configuration production boundary', () => {
   test('scanner detects multiline, schema-qualified, and quoted direct writers', () => {
     const representativeViolation = `
-      await tx\`UPDATE public."agents"
+      await tx\`UPDATE "public"."agents"
         SET identity_md = \${prompt}, tools_config = \${tools}
         WHERE id = \${agentId}\`;
-      await tx\`INSERT INTO 'agents' (
+      await tx\`INSERT INTO "public"."agents" (
         id,
         model_selection,
         name
@@ -115,6 +132,18 @@ describe('agent configuration production boundary', () => {
     ]);
     expect(findRawSettingsMutators('store .\n updateSettings (id, patch)')).toEqual([
       '.updateSettings(',
+    ]);
+  });
+
+  test('hot-path scanner detects static, dynamic, and require imports', () => {
+    expect(findForbiddenHotPathImports(`
+      import { resolve } from '../services/runtime-capability-snapshot.js';
+      const client = await import('../services/toolbox-agent-client.js');
+      require('../services/toolbox-state-client.js');
+    `)).toEqual([
+      '../services/runtime-capability-snapshot.js',
+      '../services/toolbox-agent-client.js',
+      '../services/toolbox-state-client.js',
     ]);
   });
 
@@ -150,18 +179,31 @@ describe('agent configuration production boundary', () => {
     ]);
   });
 
-  test('agent configuration and session startup do not fetch Toolbox desired state', async () => {
-    const hotPathFiles = [
-      'lobu/agent-configuration/authority.ts',
-      'lobu/agent-configuration/postgres-repository.ts',
-      'gateway/services/session-manager.ts',
-      'gateway/session.ts',
+  test('agent configuration and worker/session startup do not fetch Toolbox desired state', async () => {
+    const serverHotPathFiles = [
+      join(SERVER_SRC, 'lobu/agent-configuration/authority.ts'),
+      join(SERVER_SRC, 'lobu/agent-configuration/postgres-repository.ts'),
+      join(SERVER_SRC, 'gateway/services/session-manager.ts'),
+      join(SERVER_SRC, 'gateway/session.ts'),
     ];
+    const orchestrationRoot = join(SERVER_SRC, 'gateway/orchestration');
+    const nonStartupOrchestrationAdapters = new Set([
+      join(orchestrationRoot, 'course-context-gate.ts'),
+      join(orchestrationRoot, 'message-consumer.ts'),
+    ]);
+    const orchestrationStartupFiles = (await productionTypeScriptFiles(orchestrationRoot))
+      .filter((file) => !nonStartupOrchestrationAdapters.has(file));
+    const agentWorkerFiles = await productionTypeScriptFiles(
+      join(PACKAGES_ROOT, 'agent-worker/src')
+    );
     const violations: string[] = [];
-    for (const path of hotPathFiles) {
-      const source = await readFile(join(SERVER_SRC, path), 'utf8');
-      if (/resolveRuntimeCapabilitySnapshot|toolbox-[^'"\n]*client/iu.test(source)) {
-        violations.push(path);
+    for (const file of [
+      ...serverHotPathFiles,
+      ...orchestrationStartupFiles,
+      ...agentWorkerFiles,
+    ]) {
+      for (const specifier of findForbiddenHotPathImports(await readFile(file, 'utf8'))) {
+        violations.push(`${relative(PACKAGES_ROOT, file).split(sep).join('/')}: ${specifier}`);
       }
     }
     expect(violations).toEqual([]);

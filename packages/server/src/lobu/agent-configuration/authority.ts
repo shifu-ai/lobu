@@ -14,8 +14,10 @@ import {
 } from './bootstrap';
 import { AgentConfigurationError } from './errors';
 import {
+  AgentConfigurationFieldError,
   LEGACY_MANAGED_RELEASE_SETTING_KEYS,
   PERSONAL_BASELINE_RELEASE_SETTING_KEYS,
+  PERSISTENT_AGENT_CONFIGURATION_FIELD_NAMES,
 } from './field-ownership';
 import { materializeNativePatchCommand } from './native-patch';
 import {
@@ -33,7 +35,6 @@ import type {
   ApplyBootstrapConfigurationInput,
   AgentConfigurationEnrollmentResult,
   AppliedAgentConfigurationState,
-  BootstrapAgentConfigurationState,
   ManagedReleaseCommandInput,
   ManagedReleaseConfigurationResult,
   ManagedEnrollmentCommand,
@@ -50,7 +51,7 @@ export interface AgentConfigurationAuthority {
   readAppliedState(input: {
     organizationId: string;
     agentId: string;
-  }): Promise<BootstrapAgentConfigurationState | null>;
+  }): Promise<AppliedAgentConfigurationState | null>;
   enrollToolboxManaged(
     input: EnrollToolboxManagedInput,
   ): Promise<AgentConfigurationEnrollmentResult>;
@@ -80,22 +81,9 @@ const RELEASE_BASELINE_SETTING_KEYS = new Set([
   'baselinePrompt',
   'runtimeConfig',
 ]);
-const SAFE_OBSERVABILITY_FIELD_NAMES = new Set([
-  ...RELEASE_LEGACY_SETTING_KEYS,
-  ...RELEASE_BASELINE_SETTING_KEYS,
-  'providerModelPreferences',
-  'networkConfig',
-  'egressConfig',
-  'nixConfig',
-  'mcpServers',
-  'skillsConfig',
-  'pluginsConfig',
-  'installedProviders',
-  'verboseLogging',
-  'preApprovedTools',
-  'guardrails',
-  'managementMode',
-]);
+const SAFE_OBSERVABILITY_FIELD_NAMES = new Set<string>(
+  PERSISTENT_AGENT_CONFIGURATION_FIELD_NAMES
+);
 
 function safeChangedFieldNames(value: object): string[] {
   return Object.keys(value)
@@ -104,7 +92,9 @@ function safeChangedFieldNames(value: object): string[] {
 }
 
 function rejectedMutationStatus(error: unknown): 'rejected' | 'failed' {
-  return error instanceof AgentConfigurationError || error instanceof AgentReleaseError
+  return error instanceof AgentConfigurationError ||
+    error instanceof AgentConfigurationFieldError ||
+    error instanceof AgentReleaseError
     ? 'rejected'
     : 'failed';
 }
@@ -268,7 +258,7 @@ export function createAgentConfigurationAuthority(
         const controls = await tx<{
           management_mode: 'native' | 'toolbox_managed';
           configuration_revision: string;
-          last_mutation_kind: AppliedAgentConfigurationState['lastMutation']['kind'] | null;
+          last_mutation_kind: NonNullable<AppliedAgentConfigurationState['lastMutation']>['kind'] | null;
           last_command_id: string | null;
           last_applied_at: Date | string | null;
         }>`
@@ -615,7 +605,7 @@ function stateForUnchangedManagedRelease(
   control: {
     managementMode: 'native' | 'toolbox_managed';
     configurationRevision: string;
-    lastMutationKind: AppliedAgentConfigurationState['lastMutation']['kind'] | null;
+    lastMutationKind: NonNullable<AppliedAgentConfigurationState['lastMutation']>['kind'] | null;
     lastCommandId: string | null;
     lastCommandDigest: Sha256Digest | null;
     lastAppliedAt: string | null;

@@ -36,6 +36,13 @@ export const AGENT_SETTING_OWNERS = {
   preApprovedTools: 'release',
 } as const satisfies Record<AgentSettingKey, AgentSettingOwner>;
 
+/** Safe names for durable configuration telemetry; excludes runtime and credential fields. */
+export const PERSISTENT_AGENT_CONFIGURATION_FIELD_NAMES = Object.freeze(
+  (Object.entries(AGENT_SETTING_OWNERS) as Array<[AgentSettingKey, AgentSettingOwner]>)
+    .filter(([, owner]) => owner !== 'runtime' && owner !== 'credential')
+    .map(([key]) => key)
+);
+
 /** Legacy signed manifests own this narrower subset of release fields. */
 export const LEGACY_MANAGED_RELEASE_SETTING_KEYS = [
   'identityMd',

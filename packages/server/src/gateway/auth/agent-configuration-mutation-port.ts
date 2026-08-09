@@ -11,7 +11,6 @@ import type {
   AgentConfigurationMutationResult as ConfigurationMutationResult,
   AgentConfigurationRejectionReason,
   AppliedAgentConfigurationState,
-  BootstrapAgentConfigurationState,
   NativePatchCommandInput,
   Sha256Digest,
 } from "../../lobu/agent-configuration/types.js";
@@ -24,7 +23,7 @@ export type UndigestedNativePatchInput = Omit<
 };
 
 export type {
-  BootstrapAgentConfigurationState as AgentConfigurationReadState,
+  AppliedAgentConfigurationState as AgentConfigurationReadState,
   ConfigurationMutationResult,
 };
 
@@ -39,7 +38,7 @@ export const EMBEDDED_COMMAND_RECEIPT_LIMIT = 1_024;
 export interface AgentConfigurationMutationPort {
   readAppliedState(
     subject: ProviderMutationSubject
-  ): Promise<BootstrapAgentConfigurationState | null>;
+  ): Promise<AppliedAgentConfigurationState | null>;
   updateNativeConfiguration(
     input: UndigestedNativePatchInput
   ): Promise<ConfigurationMutationResult>;
@@ -106,7 +105,7 @@ function assertDecimalRevision(value: unknown): asserts value is string {
 type AuthorityAdapterTarget = {
   readAppliedState(
     subject: ProviderMutationSubject
-  ): Promise<BootstrapAgentConfigurationState | null>;
+  ): Promise<AppliedAgentConfigurationState | null>;
   apply(
     input: UndigestedNativePatchInput
   ): Promise<ConfigurationMutationResult>;
@@ -132,7 +131,7 @@ export function createAgentConfigurationMutationPort(
 export class EmbeddedInMemoryAgentConfigurationMutationAdapter
   implements AgentConfigurationMutationPort
 {
-  private readonly states = new Map<string, BootstrapAgentConfigurationState>();
+  private readonly states = new Map<string, AppliedAgentConfigurationState>();
   /**
    * Embedded receipts are process-local and non-durable, but remain available
    * for the entire lifetime of a live agent aggregate. Aggregate deletion
@@ -172,7 +171,7 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
 
   async readAppliedState(
     subject: ProviderMutationSubject
-  ): Promise<BootstrapAgentConfigurationState | null> {
+  ): Promise<AppliedAgentConfigurationState | null> {
     return this.withAgentLifecycleLock(subject.agentId, () =>
       this.readAppliedStateLocked(subject)
     );
@@ -180,7 +179,7 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
 
   private async readAppliedStateLocked(
     subject: ProviderMutationSubject
-  ): Promise<BootstrapAgentConfigurationState | null> {
+  ): Promise<AppliedAgentConfigurationState | null> {
     this.assertMatchingOrganization(subject);
     const key = this.subjectKey(subject);
     const current = this.states.get(key);
@@ -190,7 +189,7 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
     this.bindOrganization(subject);
     const stateCreatedWhileReading = this.states.get(key);
     if (stateCreatedWhileReading) return stateCreatedWhileReading;
-    const initial: BootstrapAgentConfigurationState = {
+    const initial: AppliedAgentConfigurationState = {
       ...subject,
       managementMode: "native",
       configurationRevision: "0",

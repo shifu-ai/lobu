@@ -20,7 +20,6 @@ export type {
   AgentConfigurationResponseVersion,
   AppliedAgentConfigurationState,
   ApplyBootstrapConfigurationInput,
-  BootstrapAgentConfigurationState,
   ConfigurationActor,
   ConfigurationActorKind,
   ConfigurationManagementMode,

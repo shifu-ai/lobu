@@ -9,7 +9,10 @@ import {
   seedAgentRow,
 } from '../../gateway/__tests__/helpers/db-setup';
 import { createAgentConfigurationAuthority } from '../agent-configuration';
-import { parseNativeSettingsPatch } from '../agent-configuration/field-ownership';
+import {
+  parseNativeSettingsPatch,
+  PERSISTENT_AGENT_CONFIGURATION_FIELD_NAMES,
+} from '../agent-configuration/field-ownership';
 
 const AGENT_ID = 'native-authority-tracer';
 const ORGANIZATION_ID = 'native-authority-org';
@@ -1051,11 +1054,55 @@ describe('AgentConfigurationAuthority', () => {
         expectedConfigurationRevision: '1',
         actor: { kind: 'session' },
         patch: { 'oauth-token-value-must-not-become-a-log-key': 'secret' },
-      } as never)).rejects.toMatchObject({ code: 'unknown_configuration_field' });
+      } as never)).rejects.toMatchObject({ reason: 'unknown_configuration_field' });
+      expect(infoSpy.mock.calls.at(-1)).toEqual([
+        expect.objectContaining({
+          status: 'rejected',
+          changedFieldNames: [],
+        }),
+        'agent configuration mutation',
+      ]);
       expect(JSON.stringify(infoSpy.mock.calls)).not.toContain('oauth-token-value');
+
+      await createAgentConfigurationAuthority().apply({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        commandId: 'safe-observability-model',
+        expectedConfigurationRevision: '1',
+        actor: { kind: 'session' },
+        patch: { model: 'model-value-must-not-be-logged' },
+      });
+      expect(infoSpy.mock.calls.at(-1)).toEqual([
+        expect.objectContaining({ status: 'applied', changedFieldNames: ['model'] }),
+        'agent configuration mutation',
+      ]);
+      expect(JSON.stringify(infoSpy.mock.calls)).not.toContain('model-value-must-not-be-logged');
+
+      await expect(createAgentConfigurationAuthority().apply({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        commandId: 'safe-observability-invalid-value',
+        expectedConfigurationRevision: '2',
+        actor: { kind: 'session' },
+        patch: { model: { token: 'invalid-value-must-not-be-logged' } },
+      } as never)).rejects.toMatchObject({ reason: 'invalid_configuration_field_value' });
+      expect(infoSpy.mock.calls.at(-1)).toEqual([
+        expect.objectContaining({ status: 'rejected', changedFieldNames: ['model'] }),
+        'agent configuration mutation',
+      ]);
+      expect(JSON.stringify(infoSpy.mock.calls)).not.toContain('invalid-value-must-not-be-logged');
     } finally {
       infoSpy.mockRestore();
     }
+  });
+
+  test('keeps the safe observability field registry exhaustive over all 17 durable fields', () => {
+    expect([...PERSISTENT_AGENT_CONFIGURATION_FIELD_NAMES].sort()).toEqual([
+      'egressConfig', 'guardrails', 'identityMd', 'installedProviders', 'mcpServers',
+      'model', 'modelSelection', 'networkConfig', 'nixConfig', 'pluginsConfig',
+      'preApprovedTools', 'providerModelPreferences', 'skillsConfig', 'soulMd',
+      'toolsConfig', 'userMd', 'verboseLogging',
+    ]);
   });
 
   test('replays the original result and returns conflict for command id reuse', async () => {

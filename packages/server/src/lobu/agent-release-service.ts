@@ -9,7 +9,7 @@ import {
 import type { AgentSettings, ReleaseCapabilityClaim } from "@lobu/core";
 import { canonicalize } from "json-canonicalize";
 import { type DbClient, getDb } from "../db/client.js";
-import type { RuntimeCapabilitySnapshot } from "../gateway/services/runtime-capability-snapshot.js";
+import type { RuntimeCapabilitySnapshot } from "./runtime-capability-snapshot-contract.js";
 import {
 	applyLegacyManagedSettingsInTransaction,
 	replaceAgentConfigurationSettingsInTransaction,
