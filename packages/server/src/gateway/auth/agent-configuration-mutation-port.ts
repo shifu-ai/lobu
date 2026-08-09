@@ -117,17 +117,16 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
 {
   private readonly states = new Map<string, BootstrapAgentConfigurationState>();
   /**
-   * Embedded compatibility keeps only the 256 newest receipts per agent
-   * subject. Recent command conflicts/replays remain exact; older receipts are
-   * explicitly outside the non-durable embedded replay window. Production
-   * authority persists an unbounded durable ledger in Postgres instead.
+   * Embedded receipts are process-local and non-durable, but remain available
+   * for the entire lifetime of a live agent aggregate. Aggregate deletion
+   * clears every receipt; process restart also loses them. Production authority
+   * persists its command ledger in Postgres instead.
    */
-  private static readonly MAX_RECEIPTS_PER_SUBJECT = 256;
   private readonly commands = new Map<
     string,
     Map<string, { digest: Sha256Digest; state: AppliedAgentConfigurationState }>
   >();
-  private readonly subjectMutationQueues = new Map<string, Promise<void>>();
+  private readonly agentLifecycleQueues = new Map<string, Promise<void>>();
   private readonly organizationsByAgent = new Map<string, string>();
 
   constructor(private readonly store: AgentConfigStore) {}
@@ -136,17 +135,10 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
     agentId: string,
     deleteAggregate: () => Promise<void>
   ): Promise<void> {
-    const organizationId = this.organizationsByAgent.get(agentId);
-    if (organizationId) {
-      const subjectKey = this.subjectKey({ organizationId, agentId });
-      await this.withSubjectMutationLock(subjectKey, async () => {
-        await deleteAggregate();
-        this.clearAgentState(agentId);
-      });
-      return;
-    }
-    await deleteAggregate();
-    this.clearAgentState(agentId);
+    await this.withAgentLifecycleLock(agentId, async () => {
+      await deleteAggregate();
+      this.clearAgentState(agentId);
+    });
   }
 
   private clearAgentState(agentId: string): void {
@@ -160,6 +152,14 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
   }
 
   async readAppliedState(
+    subject: ProviderMutationSubject
+  ): Promise<BootstrapAgentConfigurationState | null> {
+    return this.withAgentLifecycleLock(subject.agentId, () =>
+      this.readAppliedStateLocked(subject)
+    );
+  }
+
+  private async readAppliedStateLocked(
     subject: ProviderMutationSubject
   ): Promise<BootstrapAgentConfigurationState | null> {
     this.assertMatchingOrganization(subject);
@@ -186,8 +186,7 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
     input: UndigestedNativePatchInput
   ): Promise<ConfigurationMutationResult> {
     assertDecimalRevision(input.expectedConfigurationRevision);
-    const key = this.subjectKey(input);
-    return this.withSubjectMutationLock(key, () =>
+    return this.withAgentLifecycleLock(input.agentId, () =>
       this.updateNativeConfigurationLocked(input)
     );
   }
@@ -199,7 +198,7 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
       organizationId: input.organizationId,
       agentId: input.agentId,
     };
-    const current = await this.readAppliedState(subject);
+    const current = await this.readAppliedStateLocked(subject);
     if (!current) {
       throw new AgentConfigurationMutationTargetNotFoundError();
     }
@@ -254,24 +253,24 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
     return { status: changed ? "applied" : "no_change", state };
   }
 
-  private async withSubjectMutationLock<T>(
-    key: string,
+  private async withAgentLifecycleLock<T>(
+    agentId: string,
     operation: () => Promise<T>
   ): Promise<T> {
-    const previous = this.subjectMutationQueues.get(key) ?? Promise.resolve();
+    const previous = this.agentLifecycleQueues.get(agentId) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
     const tail = previous.then(() => current);
-    this.subjectMutationQueues.set(key, tail);
+    this.agentLifecycleQueues.set(agentId, tail);
     await previous;
     try {
       return await operation();
     } finally {
       release();
-      if (this.subjectMutationQueues.get(key) === tail) {
-        this.subjectMutationQueues.delete(key);
+      if (this.agentLifecycleQueues.get(agentId) === tail) {
+        this.agentLifecycleQueues.delete(agentId);
       }
     }
   }
@@ -289,14 +288,6 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
     if (!receipts) {
       receipts = new Map();
       this.commands.set(subjectKey, receipts);
-    }
-    if (
-      receipts.size >=
-        EmbeddedInMemoryAgentConfigurationMutationAdapter.MAX_RECEIPTS_PER_SUBJECT &&
-      !receipts.has(commandId)
-    ) {
-      const oldestCommandId = receipts.keys().next().value;
-      if (oldestCommandId !== undefined) receipts.delete(oldestCommandId);
     }
     receipts.set(commandId, receipt);
   }

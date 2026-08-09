@@ -242,6 +242,7 @@ describe("CoreServices store selection", () => {
       organizationId: "embedded-org",
       agentId: "embedded-lifecycle-agent",
     };
+    const unrelatedAgentId = "embedded-unrelated-agent";
 
     await metadata.createAgent(
       embeddedSubject.agentId,
@@ -249,6 +250,103 @@ describe("CoreServices store selection", () => {
       "external",
       "owner-1"
     );
+    await metadata.createAgent(
+      unrelatedAgentId,
+      "Unrelated Embedded Agent",
+      "external",
+      "other-owner"
+    );
+    await store.saveSettings(unrelatedAgentId, {
+      identityMd: "keep me",
+      updatedAt: 1,
+    });
+    await store.updateSettings(embeddedSubject.agentId, {
+      authProfiles: [
+        {
+          id: "durable-credential",
+          provider: "authority-test",
+          credential: "durable-secret",
+          authType: "api-key",
+          label: "durable",
+          model: "*",
+          createdAt: 1,
+        },
+      ],
+    });
+    await store.saveConnection({
+      id: "embedded-lifecycle-connection",
+      platform: "slack",
+      agentId: embeddedSubject.agentId,
+      organizationId: embeddedSubject.organizationId,
+      config: { token: "aggregate-secret" },
+      settings: {},
+      metadata: {},
+      status: "active",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await store.saveConnection({
+      id: "embedded-unrelated-connection",
+      platform: "slack",
+      agentId: unrelatedAgentId,
+      organizationId: "unrelated-org",
+      config: {},
+      settings: {},
+      metadata: {},
+      status: "active",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await store.saveConnection({
+      id: "embedded-reassigned-connection",
+      platform: "slack",
+      agentId: embeddedSubject.agentId,
+      config: {},
+      settings: {},
+      metadata: {},
+      status: "active",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await store.saveConnection({
+      id: "embedded-reassigned-connection",
+      platform: "slack",
+      agentId: unrelatedAgentId,
+      config: {},
+      settings: {},
+      metadata: {},
+      status: "active",
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    await store.createChannelBinding({
+      agentId: embeddedSubject.agentId,
+      platform: "slack",
+      channelId: "embedded-channel",
+      createdAt: 1,
+    });
+    await store.createChannelBinding({
+      agentId: unrelatedAgentId,
+      platform: "slack",
+      channelId: "unrelated-channel",
+      createdAt: 1,
+    });
+    await store.createChannelBinding({
+      agentId: embeddedSubject.agentId,
+      platform: "discord",
+      channelId: "reassigned-channel",
+      createdAt: 1,
+    });
+    await store.createChannelBinding({
+      agentId: unrelatedAgentId,
+      platform: "discord",
+      channelId: "reassigned-channel",
+      createdAt: 2,
+    });
+    await store.grant(embeddedSubject.agentId, "/mcp/test/tools/*", null);
+    await store.grant(unrelatedAgentId, "/mcp/test/tools/*", null);
+    await store.addUserAgent("external", "owner-1", embeddedSubject.agentId);
+    await store.addUserAgent("external", "other-owner", unrelatedAgentId);
     expect(await settings.getSettings(embeddedSubject.agentId)).toMatchObject({
       updatedAt: expect.any(Number),
     });
@@ -299,6 +397,42 @@ describe("CoreServices store selection", () => {
       settings.getEphemeralAuthProfiles().get(embeddedSubject.agentId)
     ).toBeUndefined();
     expect(await mutations.readAppliedState(embeddedSubject)).toBeNull();
+    expect(
+      await store.getConnection("embedded-lifecycle-connection")
+    ).toBeNull();
+    expect(
+      await store.listConnections({ agentId: embeddedSubject.agentId })
+    ).toEqual([]);
+    expect(await store.listChannelBindings(embeddedSubject.agentId)).toEqual([]);
+    expect(
+      await store.getChannelBinding("slack", "embedded-channel")
+    ).toBeNull();
+    expect(await store.listGrants(embeddedSubject.agentId)).toEqual([]);
+    expect(
+      await store.hasGrant(embeddedSubject.agentId, "/mcp/test/tools/send")
+    ).toBeFalse();
+    expect(await store.listUserAgents("external", "owner-1")).toEqual([]);
+    expect(
+      await store.ownsAgent("external", "owner-1", embeddedSubject.agentId)
+    ).toBeFalse();
+
+    expect((await store.getSettings(unrelatedAgentId))?.identityMd).toBe(
+      "keep me"
+    );
+    expect(
+      await store.getConnection("embedded-unrelated-connection")
+    ).not.toBeNull();
+    expect(
+      await store.getConnection("embedded-reassigned-connection")
+    ).not.toBeNull();
+    expect(await store.listChannelBindings(unrelatedAgentId)).toHaveLength(2);
+    expect(
+      await store.getChannelBinding("discord", "reassigned-channel")
+    ).toMatchObject({ agentId: unrelatedAgentId });
+    expect(await store.listGrants(unrelatedAgentId)).toHaveLength(1);
+    expect(
+      await store.ownsAgent("external", "other-owner", unrelatedAgentId)
+    ).toBeTrue();
 
     await metadata.createAgent(
       embeddedSubject.agentId,
@@ -310,6 +444,18 @@ describe("CoreServices store selection", () => {
       (await mutations.readAppliedState(embeddedSubject))?.configurationRevision
     ).toBe("0");
     expect(
+      (await settings.getSettings(embeddedSubject.agentId))?.identityMd
+    ).toBeUndefined();
+    expect(
+      (await settings.getSettings(embeddedSubject.agentId))?.authProfiles
+    ).toBeUndefined();
+    expect(
+      await store.listConnections({ agentId: embeddedSubject.agentId })
+    ).toEqual([]);
+    expect(await store.listChannelBindings(embeddedSubject.agentId)).toEqual([]);
+    expect(await store.listGrants(embeddedSubject.agentId)).toEqual([]);
+    expect(await store.listUserAgents("external", "owner-1")).toEqual([]);
+    expect(
       (
         await mutations.updateNativeConfiguration({
           ...embeddedSubject,
@@ -320,6 +466,78 @@ describe("CoreServices store selection", () => {
         })
       ).status
     ).toBe("applied");
+  });
+
+  test("embedded first read and deletion serialize for the full agent lifecycle", async () => {
+    ensureEncryptionKey();
+    await resetTestDatabase();
+    const store = new InMemoryAgentStore();
+    const coreServices = new CoreServices(createGatewayConfig(), {
+      stateAdapter: new InMemoryStateAdapter(),
+      configStore: store,
+      connectionStore: store,
+      accessStore: store,
+    });
+    (coreServices as any).queue = new MockMessageQueue();
+    await (coreServices as any).initializeSessionServices();
+    const metadata = coreServices.getAgentMetadataStore();
+    const mutations = coreServices.getAgentConfigurationMutationPort();
+    const oldSubject = {
+      organizationId: "embedded-old-org",
+      agentId: "embedded-first-read-delete-agent",
+    };
+    const recreatedSubject = {
+      organizationId: "embedded-new-org",
+      agentId: oldSubject.agentId,
+    };
+
+    await metadata.createAgent(
+      oldSubject.agentId,
+      "Old",
+      "external",
+      "old-owner"
+    );
+    await store.updateSettings(oldSubject.agentId, { identityMd: "old identity" });
+    const originalGetSettings = store.getSettings.bind(store);
+    let reportReadStarted!: () => void;
+    let releaseRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      reportReadStarted = resolve;
+    });
+    const readReleased = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    let delayFirstRead = true;
+    store.getSettings = async (agentId) => {
+      const snapshot = await originalGetSettings(agentId);
+      if (agentId === oldSubject.agentId && delayFirstRead) {
+        delayFirstRead = false;
+        reportReadStarted();
+        await readReleased;
+      }
+      return snapshot;
+    };
+
+    const staleRead = mutations.readAppliedState(oldSubject);
+    await readStarted;
+    const deletion = metadata.deleteAgent(oldSubject.agentId);
+    await Promise.resolve();
+    expect(await originalGetSettings(oldSubject.agentId)).not.toBeNull();
+    releaseRead();
+    const oldState = await staleRead;
+    await deletion;
+
+    expect(await originalGetSettings(oldSubject.agentId)).toBeNull();
+    await metadata.createAgent(
+      recreatedSubject.agentId,
+      "Recreated",
+      "external",
+      "new-owner"
+    );
+    const recreatedState = await mutations.readAppliedState(recreatedSubject);
+    expect(recreatedState?.configurationRevision).toBe("0");
+    expect(recreatedState?.settingsDigest).not.toBe(oldState?.settingsDigest);
+    expect((mutations as any).agentLifecycleQueues.size).toBe(0);
   });
 
   test("uses the host-provided secret store for persisted auth profiles", async () => {

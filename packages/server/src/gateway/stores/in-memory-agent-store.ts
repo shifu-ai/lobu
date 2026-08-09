@@ -79,6 +79,21 @@ export class InMemoryAgentStore extends BaseAgentStore {
   }
 
   protected async deleteMetadataRaw(agentId: string): Promise<void> {
+    const connectionIds = Array.from(this.connectionsByAgent.get(agentId) ?? []);
+    for (const connectionId of connectionIds) {
+      await this.deleteConnectionRaw(connectionId);
+    }
+    await this.deleteAllChannelBindings(agentId);
+
+    const grantPrefix = `${agentId}:`;
+    for (const key of this.grants.keys()) {
+      if (key.startsWith(grantPrefix)) this.grants.delete(key);
+    }
+    for (const [key, agentIds] of this.userAgents) {
+      agentIds.delete(agentId);
+      if (agentIds.size === 0) this.userAgents.delete(key);
+    }
+
     this.metadata.delete(agentId);
     this.settings.delete(agentId);
   }
@@ -100,6 +115,16 @@ export class InMemoryAgentStore extends BaseAgentStore {
   }
 
   protected async writeConnection(connection: StoredConnection): Promise<void> {
+    const previous = this.connections.get(connection.id);
+    if (previous?.agentId && previous.agentId !== connection.agentId) {
+      const previousAgentConnections = this.connectionsByAgent.get(
+        previous.agentId
+      );
+      previousAgentConnections?.delete(connection.id);
+      if (previousAgentConnections?.size === 0) {
+        this.connectionsByAgent.delete(previous.agentId);
+      }
+    }
     this.connections.set(connection.id, connection);
     this.connectionsAll.add(connection.id);
     if (connection.agentId) {
@@ -307,6 +332,16 @@ export class InMemoryAgentStore extends BaseAgentStore {
       binding.channelId,
       binding.teamId
     );
+    const previous = this.channelBindings.get(key);
+    if (previous && previous.agentId !== binding.agentId) {
+      const previousAgentBindings = this.channelBindingIndex.get(
+        previous.agentId
+      );
+      previousAgentBindings?.delete(key);
+      if (previousAgentBindings?.size === 0) {
+        this.channelBindingIndex.delete(previous.agentId);
+      }
+    }
     this.channelBindings.set(key, binding);
     getOrCreateSet(this.channelBindingIndex, binding.agentId).add(key);
   }

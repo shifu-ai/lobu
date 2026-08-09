@@ -317,7 +317,7 @@ describe("ProviderCatalogService configuration authority mutations", () => {
   });
 });
 
-test("embedded adapter serializes concurrent CAS and cleans up its subject lock", async () => {
+test("embedded adapter serializes concurrent CAS and cleans its lifecycle queue", async () => {
   let settings = {
     installedProviders: [],
     updatedAt: 1,
@@ -384,10 +384,10 @@ test("embedded adapter serializes concurrent CAS and cleans up its subject lock"
   expect(settings.installedProviders).toEqual([
     { providerId: "authority-test", installedAt: 1 },
   ]);
-  expect((adapter as any).subjectMutationQueues.size).toBe(0);
+  expect((adapter as any).agentLifecycleQueues.size).toBe(0);
 });
 
-test("embedded adapter does not let a delayed initial read overwrite committed state", async () => {
+test("embedded adapter serializes a delayed initial read before mutation", async () => {
   let settings = {
     installedProviders: [],
     updatedAt: 1,
@@ -421,11 +421,56 @@ test("embedded adapter does not let a delayed initial read overwrite committed s
       installedProviders: [{ providerId: "authority-test", installedAt: 1 }],
     },
   });
-  expect((await mutation).status).toBe("applied");
+  let mutationFinished = false;
+  void mutation.then(() => {
+    mutationFinished = true;
+  });
+  await Promise.resolve();
+  expect(mutationFinished).toBeFalse();
   releaseDelayedRead();
 
-  expect((await staleRead)?.configurationRevision).toBe("1");
+  expect((await staleRead)?.configurationRevision).toBe("0");
+  expect((await mutation).status).toBe("applied");
   expect((await adapter.readAppliedState(subject))?.configurationRevision).toBe("1");
+});
+
+test("embedded lifecycle serialization remains parallel across different agents", async () => {
+  let reportFirstAgentRead!: () => void;
+  let releaseFirstAgentRead!: () => void;
+  const firstAgentReadStarted = new Promise<void>((resolve) => {
+    reportFirstAgentRead = resolve;
+  });
+  const firstAgentReadReleased = new Promise<void>((resolve) => {
+    releaseFirstAgentRead = resolve;
+  });
+  const adapter = new EmbeddedInMemoryAgentConfigurationMutationAdapter({
+    async getSettings(agentId: string) {
+      if (agentId === subject.agentId) {
+        reportFirstAgentRead();
+        await firstAgentReadReleased;
+      }
+      return { installedProviders: [], updatedAt: 1 };
+    },
+  } as never);
+
+  const firstAgentRead = adapter.readAppliedState(subject);
+  await firstAgentReadStarted;
+  let secondAgentFinished = false;
+  const secondAgentRead = adapter
+    .readAppliedState({
+      organizationId: subject.organizationId,
+      agentId: "agent-2",
+    })
+    .then((state) => {
+      secondAgentFinished = true;
+      return state;
+    });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(secondAgentFinished).toBeTrue();
+  expect(await secondAgentRead).not.toBeNull();
+  releaseFirstAgentRead();
+  expect(await firstAgentRead).not.toBeNull();
+  expect((adapter as any).agentLifecycleQueues.size).toBe(0);
 });
 
 test("embedded adapter rejects the same agent id in another tenant", async () => {
@@ -611,15 +656,16 @@ test("embedded settings digest is the exact durable 17-field projection", async 
   );
 });
 
-test("embedded bounded receipt window retains recent conflicts and evicts the oldest", async () => {
+test("embedded receipts retain the oldest replay and conflict for the live agent lifetime", async () => {
   const store = new InMemoryAgentStore();
   await store.saveMetadata(subject.agentId, {
     agentId: subject.agentId,
-    name: "Bounded Receipts",
+    name: "Lifetime Receipts",
     owner: { platform: "test", userId: "owner" },
     createdAt: 1,
   });
   const adapter = new EmbeddedInMemoryAgentConfigurationMutationAdapter(store);
+  let oldestState: AppliedAgentConfigurationState | null = null;
   for (let index = 0; index < 257; index += 1) {
     const result = await adapter.updateNativeConfiguration({
       ...subject,
@@ -629,6 +675,9 @@ test("embedded bounded receipt window retains recent conflicts and evicts the ol
       patch: {},
     });
     expect(result.status).toBe("no_change");
+    if (index === 0 && result.status === "no_change") {
+      oldestState = result.state;
+    }
   }
 
   const recentReuse = await adapter.updateNativeConfiguration({
@@ -638,12 +687,19 @@ test("embedded bounded receipt window retains recent conflicts and evicts the ol
     actor: { kind: "provider_catalog" },
     patch: { identityMd: "different recent effect" },
   });
-  const evictedReuse = await adapter.updateNativeConfiguration({
+  const oldestConflict = await adapter.updateNativeConfiguration({
     ...subject,
     commandId: "bounded-0",
     expectedConfigurationRevision: "0",
     actor: { kind: "provider_catalog" },
-    patch: { identityMd: "explicitly outside retained embedded window" },
+    patch: { identityMd: "different oldest effect" },
+  });
+  const oldestReplay = await adapter.updateNativeConfiguration({
+    ...subject,
+    commandId: "bounded-0",
+    expectedConfigurationRevision: "0",
+    actor: { kind: "provider_catalog" },
+    patch: {},
   });
 
   expect(recentReuse).toEqual({
@@ -651,7 +707,16 @@ test("embedded bounded receipt window retains recent conflicts and evicts the ol
     conflict: "command_conflict",
     currentRevision: "0",
   });
-  expect(evictedReuse.status).toBe("applied");
+  expect(oldestConflict).toEqual({
+    status: "conflict",
+    conflict: "command_conflict",
+    currentRevision: "0",
+  });
+  expect(oldestReplay).toEqual({
+    status: "already_applied",
+    state: oldestState,
+  });
+  expect((await store.getSettings(subject.agentId))?.identityMd).toBeUndefined();
 });
 
 test("authority port rejects null revisions before delegating", async () => {
