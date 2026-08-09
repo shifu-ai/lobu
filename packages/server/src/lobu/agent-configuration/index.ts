@@ -5,6 +5,7 @@ export {
 export { AgentConfigurationError, type AgentConfigurationErrorCode } from './errors';
 export type {
   AgentConfigurationCommandEnvelope,
+  AgentConfigurationEnrollmentResult,
   AgentConfigurationMutationResult,
   AgentConfigurationResponseVersion,
   AppliedAgentConfigurationState,
@@ -12,6 +13,7 @@ export type {
   ConfigurationActorKind,
   ConfigurationManagementMode,
   ConfigurationMutationKind,
+  EnrollToolboxManagedInput,
   NativePatchCommandInput,
   NativeSettingsPatch,
   ManagedReleaseCommandInput,

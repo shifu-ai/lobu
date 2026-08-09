@@ -2,6 +2,7 @@ import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { Type } from "@sinclair/typebox";
 import { Hono } from "hono";
+import { canonicalize } from "json-canonicalize";
 import {
 	ensureDbForGatewayTests,
 	resetTestDatabase,
@@ -299,6 +300,11 @@ async function buildApp(
 		secretStore?: ReturnType<typeof createMemorySecretStore>;
 		publicGatewayUrl?: string;
 		agentConfigurationAuthority?: unknown;
+		runtimeCapabilitySnapshotResolver?: unknown;
+		agentReleaseEnvironment?: string;
+		agentConfigurationTransactionHooks?: {
+			beforeAgentLock?: () => Promise<void>;
+		};
 	} = {},
 ) {
 	const { createProvisioningRoutes } = await import(
@@ -334,10 +340,574 @@ async function buildApp(
 				overrides.publicGatewayUrl ?? "https://gateway.example.test/lobu",
 			agentConfigurationAuthority:
 				overrides.agentConfigurationAuthority as never,
+			runtimeCapabilitySnapshotResolver:
+				overrides.runtimeCapabilitySnapshotResolver as never,
+			agentReleaseEnvironment: overrides.agentReleaseEnvironment,
+			agentConfigurationTransactionHooks:
+				overrides.agentConfigurationTransactionHooks,
 		}),
 	);
 	return app;
 }
+
+const ENROLLMENT_ROUTE_AGENT_ID = "shifu-u-enrollment-route";
+const ENROLLMENT_ROUTE_USER_ID = "toolbox-user-enrollment";
+const ENROLLMENT_CAPABILITY_ID = "agent_configuration_authority.v1";
+
+function enrollmentRouteSnapshot(
+	overrides: Partial<{
+		environment: "staging" | "production";
+		toolboxUserId: string;
+		agentId: string;
+		capabilities: string[];
+		appliedReleaseId: string;
+		appliedReleaseSequence: number;
+		expiresAt: string;
+	}> = {},
+) {
+	const unsigned = {
+		schemaVersion: 1 as const,
+		environment: overrides.environment ?? ("production" as const),
+		toolboxUserId: overrides.toolboxUserId ?? ENROLLMENT_ROUTE_USER_ID,
+		agentId: overrides.agentId ?? ENROLLMENT_ROUTE_AGENT_ID,
+		capabilities: overrides.capabilities ?? [ENROLLMENT_CAPABILITY_ID],
+		appliedReleaseId:
+			overrides.appliedReleaseId ?? "agent-release-enrollment-route-4",
+		appliedReleaseSequence: overrides.appliedReleaseSequence ?? 4,
+		expiresAt:
+			overrides.expiresAt ?? new Date(Date.now() + 30_000).toISOString(),
+	};
+	return {
+		...unsigned,
+		snapshotDigest: `sha256:${createHash("sha256")
+			.update(canonicalize(unsigned))
+			.digest("hex")}`,
+	};
+}
+
+async function seedEnrollmentRouteTruth(): Promise<string> {
+	await seedPersonalAgent(ENROLLMENT_ROUTE_AGENT_ID, ENROLLMENT_ROUTE_USER_ID);
+	const { getDb } = await import("../../db/client.js");
+	const sql = getDb();
+	const managedSettings = {
+		identityMd: "route managed identity",
+		soulMd: "route managed soul",
+		userMd: "route managed user",
+		modelSelection: { mode: "auto" },
+		toolsConfig: { strictMode: true },
+	};
+	const settingsHash = `sha256:${createHash("sha256")
+		.update(canonicalize(managedSettings))
+		.digest("hex")}`;
+	await sql`
+		UPDATE agents SET identity_md = ${managedSettings.identityMd},
+			soul_md = ${managedSettings.soulMd}, user_md = ${managedSettings.userMd},
+			model_selection = ${sql.json(managedSettings.modelSelection)},
+			tools_config = ${sql.json(managedSettings.toolsConfig)}
+		WHERE organization_id = ${ORG_ID} AND id = ${ENROLLMENT_ROUTE_AGENT_ID}
+	`;
+	await sql`
+		INSERT INTO agent_release_applies (
+			organization_id, agent_id, environment,
+			desired_release_id, desired_release_sequence, desired_feed_sequence,
+			applied_release_id, applied_release_sequence, applied_feed_sequence,
+			applied_channel, applied_feed_digest, manifest_digest, status,
+			revision_ref, settings_hash
+		) VALUES (
+			${ORG_ID}, ${ENROLLMENT_ROUTE_AGENT_ID}, 'production',
+			'agent-release-enrollment-route-4', 4, 9,
+			'agent-release-enrollment-route-4', 4, 9,
+			'candidate', ${`sha256:${"c".repeat(64)}`}, ${`sha256:${"d".repeat(64)}`},
+			'applied', 'lobu:enrollment-route:4', ${settingsHash}
+		)
+	`;
+	return settingsHash;
+}
+
+function requestManagedEnrollment(
+	app: Hono,
+	input: {
+		commandId?: string;
+		revision?: string;
+		toolboxUserId?: string;
+	} = {},
+): Promise<Response> {
+	return app.request(
+		`/api/provisioning/agents/${ENROLLMENT_ROUTE_AGENT_ID}/configuration-management/enroll`,
+		{
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"if-match": `"agent-config:${input.revision ?? "0"}"`,
+				"idempotency-key": input.commandId ?? "managed-enrollment-route-command-1",
+			},
+			body: JSON.stringify({
+				toolboxUserId: input.toolboxUserId ?? ENROLLMENT_ROUTE_USER_ID,
+				environment: "production",
+			}),
+		},
+	);
+}
+
+describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll", () => {
+	beforeEach(async () => {
+		await resetTestDatabase();
+		await seedOrg(ORG_ID);
+	});
+
+	test("resolves a fresh target snapshot before delegating managed enrollment", async () => {
+		const callOrder: string[] = [];
+		const snapshot = {
+			schemaVersion: 1,
+			environment: "production",
+			toolboxUserId: "toolbox-user-enrollment",
+			agentId: "shifu-u-enrollment-route",
+			capabilities: ["agent_configuration_authority.v1"],
+			appliedReleaseId: "agent-release-4",
+			appliedReleaseSequence: 4,
+			expiresAt: new Date(Date.now() + 30_000).toISOString(),
+			snapshotDigest: `sha256:${"a".repeat(64)}`,
+		};
+		const runtimeCapabilitySnapshotResolver = mock(async () => {
+			callOrder.push("snapshot");
+			return snapshot;
+		});
+		const enrollToolboxManaged = mock(async () => {
+			callOrder.push("authority");
+			return {
+				status: "applied",
+				state: {
+					managementMode: "toolbox_managed",
+					configurationRevision: "1",
+					settingsDigest: `sha256:${"b".repeat(64)}`,
+				},
+			};
+		});
+		const app = await buildApp(["mcp:admin"], {
+			agentReleaseEnvironment: "production",
+			runtimeCapabilitySnapshotResolver,
+			agentConfigurationAuthority: {
+				apply: async () => ({ status: "rejected", reason: "invalid_release" }),
+				applyManagedRelease: async () => {
+					throw new Error("not used");
+				},
+				enrollToolboxManaged,
+			},
+		});
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-enrollment-route/configuration-management/enroll",
+			{
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"if-match": '"agent-config:0"',
+					"idempotency-key": "managed-enrollment-command-1",
+				},
+				body: JSON.stringify({
+					toolboxUserId: "toolbox-user-enrollment",
+					environment: "production",
+				}),
+			},
+		);
+
+		expect(response.status).toBe(200);
+		expect(callOrder).toEqual(["snapshot", "authority"]);
+		expect(runtimeCapabilitySnapshotResolver).toHaveBeenCalledWith(
+			{
+				environment: "production",
+				toolboxUserId: "toolbox-user-enrollment",
+				agentId: "shifu-u-enrollment-route",
+			},
+			{ bypassCache: true },
+		);
+		await expect(response.json()).resolves.toMatchObject({
+			ok: true,
+			status: "applied",
+			managementMode: "toolbox_managed",
+			configurationRevision: "1",
+		});
+	});
+
+	test.each([
+		["missing If-Match", {}, "agent_configuration_revision_required"],
+		["invalid If-Match", { "if-match": "agent-config:0" }, "invalid_revision_precondition"],
+		["missing Idempotency-Key", { "if-match": '"agent-config:0"' }, "missing_idempotency_key"],
+		["invalid Idempotency-Key", {
+			"if-match": '"agent-config:0"',
+			"idempotency-key": "contains spaces",
+		}, "invalid_idempotency_key"],
+	])("rejects %s before resolving a snapshot", async (_name, headers, error) => {
+		const resolver = mock(async () => {
+			throw new Error("must not be called");
+		});
+		const enrollToolboxManaged = mock(async () => {
+			throw new Error("must not be called");
+		});
+		const app = await buildApp(["mcp:admin"], {
+			agentReleaseEnvironment: "production",
+			runtimeCapabilitySnapshotResolver: resolver,
+			agentConfigurationAuthority: {
+				enrollToolboxManaged,
+				apply: async () => ({ status: "rejected" }),
+				applyManagedRelease: async () => ({ evidence: {}, state: {} }),
+			},
+		});
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-enrollment-route/configuration-management/enroll",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json", ...headers },
+				body: JSON.stringify({
+					toolboxUserId: "toolbox-user-enrollment",
+					environment: "production",
+				}),
+			},
+		);
+
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toMatchObject({ error });
+		expect(resolver).not.toHaveBeenCalled();
+		expect(enrollToolboxManaged).not.toHaveBeenCalled();
+	});
+
+	test("rejects malformed enrollment bodies before resolving a snapshot", async () => {
+		const resolver = mock(async () => {
+			throw new Error("must not be called");
+		});
+		const app = await buildApp(["mcp:admin"], {
+			agentReleaseEnvironment: "production",
+			runtimeCapabilitySnapshotResolver: resolver,
+		});
+		for (const body of [
+			{},
+			{ toolboxUserId: "", environment: "production" },
+			{ toolboxUserId: "toolbox-user-enrollment", environment: "local" },
+			{ toolboxUserId: "toolbox-user-enrollment", environment: "production", extra: true },
+		]) {
+			const response = await app.request(
+				"/api/provisioning/agents/shifu-u-enrollment-route/configuration-management/enroll",
+				{
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						"if-match": '"agent-config:0"',
+						"idempotency-key": "managed-enrollment-command-invalid-body",
+					},
+					body: JSON.stringify(body),
+				},
+			);
+			expect(response.status).toBe(400);
+		}
+		expect(resolver).not.toHaveBeenCalled();
+	});
+
+	test.each([
+		["capability_inactive", "agent_configuration_capability_inactive"],
+		["stale_release", "agent_configuration_stale_release"],
+		["invalid_release", "agent_configuration_invalid_release"],
+		["environment_mismatch", "agent_configuration_environment_mismatch"],
+		["enrollment_drifted", "agent_configuration_enrollment_drifted"],
+	])("maps the %s domain rejection to a safe 409 response", async (reason, error) => {
+		const snapshot = {
+			schemaVersion: 1,
+			environment: "production",
+			toolboxUserId: "toolbox-user-enrollment",
+			agentId: "shifu-u-enrollment-route",
+			capabilities: ["agent_configuration_authority.v1"],
+			appliedReleaseId: "agent-release-4",
+			appliedReleaseSequence: 4,
+			expiresAt: new Date(Date.now() + 30_000).toISOString(),
+			snapshotDigest: `sha256:${"a".repeat(64)}`,
+		};
+		const app = await buildApp(["mcp:admin"], {
+			agentReleaseEnvironment: "production",
+			runtimeCapabilitySnapshotResolver: async () => snapshot,
+			agentConfigurationAuthority: {
+				enrollToolboxManaged: async () => ({ status: "rejected", reason }),
+				apply: async () => ({ status: "rejected" }),
+				applyManagedRelease: async () => ({ evidence: {}, state: {} }),
+			},
+		});
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-enrollment-route/configuration-management/enroll",
+			{
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"if-match": '"agent-config:0"',
+					"idempotency-key": `managed-enrollment-${reason}`,
+				},
+				body: JSON.stringify({
+					toolboxUserId: "toolbox-user-enrollment",
+					environment: "production",
+				}),
+			},
+		);
+		expect(response.status).toBe(409);
+		await expect(response.json()).resolves.toEqual({ error });
+	});
+
+	test("returns stable replay and already-managed no-op responses", async () => {
+		const results = [
+			{
+				status: "already_applied",
+				state: {
+					managementMode: "toolbox_managed",
+					configurationRevision: "1",
+					settingsDigest: `sha256:${"b".repeat(64)}`,
+				},
+			},
+			{
+				status: "already_managed",
+				managementMode: "toolbox_managed",
+				configurationRevision: "1",
+			},
+		];
+		const app = await buildApp(["mcp:admin"], {
+			agentReleaseEnvironment: "production",
+			runtimeCapabilitySnapshotResolver: async () => ({
+				schemaVersion: 1,
+				environment: "production",
+				toolboxUserId: "toolbox-user-enrollment",
+				agentId: "shifu-u-enrollment-route",
+				capabilities: ["agent_configuration_authority.v1"],
+				appliedReleaseId: "agent-release-4",
+				appliedReleaseSequence: 4,
+				expiresAt: new Date(Date.now() + 30_000).toISOString(),
+				snapshotDigest: `sha256:${"a".repeat(64)}`,
+			}),
+			agentConfigurationAuthority: {
+				enrollToolboxManaged: async () => results.shift(),
+				apply: async () => ({ status: "rejected" }),
+				applyManagedRelease: async () => ({ evidence: {}, state: {} }),
+			},
+		});
+		const request = (key: string) => app.request(
+			"/api/provisioning/agents/shifu-u-enrollment-route/configuration-management/enroll",
+			{
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"if-match": '"agent-config:0"',
+					"idempotency-key": key,
+				},
+				body: JSON.stringify({
+					toolboxUserId: "toolbox-user-enrollment",
+					environment: "production",
+				}),
+			},
+		);
+		const replay = await request("managed-enrollment-replay");
+		expect(replay.status).toBe(200);
+		await expect(replay.json()).resolves.toMatchObject({
+			status: "already_applied",
+			managementMode: "toolbox_managed",
+			configurationRevision: "1",
+		});
+		const alreadyManaged = await request("managed-enrollment-other-command");
+		expect(alreadyManaged.status).toBe(200);
+		await expect(alreadyManaged.json()).resolves.toEqual({
+			ok: true,
+			status: "no_change",
+			reason: "already_toolbox_managed",
+			managementMode: "toolbox_managed",
+			configurationRevision: "1",
+		});
+	});
+
+	test("fails closed when the fresh snapshot transport fails", async () => {
+		const enrollToolboxManaged = mock(async () => ({ status: "applied" }));
+		const app = await buildApp(["mcp:admin"], {
+			agentReleaseEnvironment: "production",
+			runtimeCapabilitySnapshotResolver: async () => {
+				throw new Error("private transport detail");
+			},
+			agentConfigurationAuthority: {
+				enrollToolboxManaged,
+				apply: async () => ({ status: "rejected" }),
+				applyManagedRelease: async () => ({ evidence: {}, state: {} }),
+			},
+		});
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-enrollment-route/configuration-management/enroll",
+			{
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"if-match": '"agent-config:0"',
+					"idempotency-key": "managed-enrollment-transport-failure",
+				},
+				body: JSON.stringify({
+					toolboxUserId: "toolbox-user-enrollment",
+					environment: "production",
+				}),
+			},
+		);
+		expect(response.status).toBe(503);
+		await expect(response.json()).resolves.toEqual({
+			error: "agent_configuration_capability_snapshot_unavailable",
+		});
+		expect(enrollToolboxManaged).not.toHaveBeenCalled();
+	});
+
+	test("rejects a PAT without mcp:admin before snapshot resolution", async () => {
+		const resolver = mock(async () => ({}));
+		const app = await buildApp([], {
+			agentReleaseEnvironment: "production",
+			runtimeCapabilitySnapshotResolver: resolver,
+		});
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-enrollment-route/configuration-management/enroll",
+			{
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"if-match": '"agent-config:0"',
+					"idempotency-key": "managed-enrollment-no-scope",
+				},
+				body: JSON.stringify({
+					toolboxUserId: "toolbox-user-enrollment",
+					environment: "production",
+				}),
+			},
+		);
+		expect(response.status).toBe(403);
+		expect(resolver).not.toHaveBeenCalled();
+	});
+
+	test("enrolls and replays against real durable release truth", async () => {
+		const settingsHash = await seedEnrollmentRouteTruth();
+		let snapshotGeneration = 0;
+		const resolvedSnapshotDigests: string[] = [];
+		const resolver = mock(async () => {
+			snapshotGeneration += 1;
+			const snapshot = enrollmentRouteSnapshot({
+				expiresAt: new Date(Date.now() + 20_000 + snapshotGeneration * 5_000).toISOString(),
+			});
+			resolvedSnapshotDigests.push(snapshot.snapshotDigest);
+			return snapshot;
+		});
+		const app = await buildApp(["mcp:admin"], {
+			agentReleaseEnvironment: "production",
+			runtimeCapabilitySnapshotResolver: resolver,
+		});
+
+		const applied = await requestManagedEnrollment(app);
+		expect(applied.status).toBe(200);
+		await expect(applied.json()).resolves.toEqual({
+			ok: true,
+			status: "applied",
+			managementMode: "toolbox_managed",
+			configurationRevision: "1",
+			settingsDigest: settingsHash,
+		});
+		const replay = await requestManagedEnrollment(app);
+		expect(replay.status).toBe(200);
+		await expect(replay.json()).resolves.toMatchObject({
+			status: "already_applied",
+			configurationRevision: "1",
+		});
+		expect(new Set(resolvedSnapshotDigests).size).toBe(2);
+		const alreadyManaged = await requestManagedEnrollment(app, {
+			commandId: "managed-enrollment-route-command-2",
+			revision: "1",
+		});
+		expect(alreadyManaged.status).toBe(200);
+		await expect(alreadyManaged.json()).resolves.toEqual({
+			ok: true,
+			status: "no_change",
+			reason: "already_toolbox_managed",
+			managementMode: "toolbox_managed",
+			configurationRevision: "1",
+		});
+		const rows = await (await import("../../db/client.js")).getDb()`
+			SELECT c.management_mode, c.configuration_revision,
+			       (SELECT count(*)::int FROM agent_configuration_commands command_row
+			        WHERE command_row.organization_id = c.organization_id
+			          AND command_row.agent_id = c.agent_id) AS command_count
+			FROM agent_configuration_controls c
+			WHERE c.organization_id = ${ORG_ID} AND c.agent_id = ${ENROLLMENT_ROUTE_AGENT_ID}
+		`;
+		expect(rows).toEqual([{
+			management_mode: "toolbox_managed",
+			configuration_revision: 1,
+			command_count: 1,
+		}]);
+	});
+
+	test.each([
+		["capability absent", enrollmentRouteSnapshot({ capabilities: ["other.v1"] }), undefined, "agent_configuration_capability_inactive"],
+		["release id mismatch", enrollmentRouteSnapshot({ appliedReleaseId: "agent-release-enrollment-route-5" }), undefined, "agent_configuration_stale_release"],
+		["release sequence mismatch", enrollmentRouteSnapshot({ appliedReleaseSequence: 5 }), undefined, "agent_configuration_stale_release"],
+		["Toolbox user mismatch", enrollmentRouteSnapshot({ toolboxUserId: "another-user" }), undefined, "agent_configuration_invalid_release"],
+		["agent mismatch", enrollmentRouteSnapshot({ agentId: "shifu-u-another-route-agent" }), undefined, "agent_configuration_invalid_release"],
+		["environment mismatch", enrollmentRouteSnapshot({ environment: "staging" }), undefined, "agent_configuration_environment_mismatch"],
+		["durable owner mismatch", enrollmentRouteSnapshot({ toolboxUserId: "another-user" }), "another-user", "agent_configuration_invalid_release"],
+		["stale snapshot", enrollmentRouteSnapshot({ expiresAt: "2000-01-01T00:00:00.000Z" }), undefined, "agent_configuration_stale_release"],
+	])("fails closed for %s through the real authority", async (_name, snapshot, toolboxUserId, error) => {
+		await seedEnrollmentRouteTruth();
+		const app = await buildApp(["mcp:admin"], {
+			agentReleaseEnvironment: "production",
+			runtimeCapabilitySnapshotResolver: async () => snapshot,
+		});
+		const response = await requestManagedEnrollment(app, { toolboxUserId });
+		expect(response.status).toBe(409);
+		await expect(response.json()).resolves.toEqual({ error });
+		const control = (await (await import("../../db/client.js")).getDb()`
+			SELECT management_mode, configuration_revision
+			FROM agent_configuration_controls
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${ENROLLMENT_ROUTE_AGENT_ID}
+		`)[0];
+		expect(control).toEqual({ management_mode: "native", configuration_revision: 0 });
+	});
+
+	test("detects live settings drift through the release truth classifier", async () => {
+		await seedEnrollmentRouteTruth();
+		const sql = (await import("../../db/client.js")).getDb();
+		await sql`
+			UPDATE agents SET user_md = 'route drift'
+			WHERE organization_id = ${ORG_ID} AND id = ${ENROLLMENT_ROUTE_AGENT_ID}
+		`;
+		const app = await buildApp(["mcp:admin"], {
+			agentReleaseEnvironment: "production",
+			runtimeCapabilitySnapshotResolver: async () => enrollmentRouteSnapshot(),
+		});
+		const response = await requestManagedEnrollment(app);
+		expect(response.status).toBe(409);
+		await expect(response.json()).resolves.toEqual({
+			error: "agent_configuration_enrollment_drifted",
+		});
+	});
+
+	test("completes snapshot resolution before the authority transaction reaches its pre-lock hook", async () => {
+		await seedEnrollmentRouteTruth();
+		const order: string[] = [];
+		const app = await buildApp(["mcp:admin"], {
+			agentReleaseEnvironment: "production",
+			runtimeCapabilitySnapshotResolver: async () => {
+			order.push("snapshot-start");
+			await Promise.resolve();
+			order.push("snapshot-complete");
+			return enrollmentRouteSnapshot();
+		},
+			agentConfigurationTransactionHooks: {
+			beforeAgentLock: async () => {
+				order.push("transaction-before-agent-lock");
+			},
+		},
+		});
+		const response = await requestManagedEnrollment(app);
+		expect(response.status).toBe(200);
+		expect(order).toEqual([
+			"snapshot-start",
+			"snapshot-complete",
+			"transaction-before-agent-lock",
+		]);
+	});
+});
 
 describe("PUT /api/provisioning/agents/:agentId/managed-settings", () => {
 	test("delegates signed managed release mutation to the injected configuration authority", async () => {

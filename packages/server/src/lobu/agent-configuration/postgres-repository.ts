@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
 import { canonicalize } from 'json-canonicalize';
 import type { DbClient } from '../../db/client';
+import { validateRuntimeCapabilitySnapshot } from '../../gateway/services/runtime-capability-snapshot';
 import logger from '../../utils/logger';
+import {
+  classifyAgentReleaseCapabilityState,
+  type ReleaseCapabilityReceiptRow,
+} from '../agent-release-service';
 import { AgentConfigurationError } from './errors';
 import {
   decideNativeSettingsPatch,
@@ -9,23 +14,26 @@ import {
 } from './field-ownership';
 import type {
   AgentConfigurationMutationResult,
+  AgentConfigurationEnrollmentResult,
   AppliedAgentConfigurationState,
   ConfigurationManagementMode,
+  ManagedEnrollmentCommand,
   NativePatchCommand,
   Sha256Digest,
 } from './types';
 
 type AgentSettingsRow = {
-  model: unknown;
+  owner_user_id: string | null;
+  model: string | null;
   model_selection: unknown;
   provider_model_preferences: unknown;
   network_config: unknown;
   egress_config: unknown;
   nix_config: unknown;
   mcp_servers: unknown;
-  soul_md: unknown;
-  user_md: unknown;
-  identity_md: unknown;
+  soul_md: string | null;
+  user_md: string | null;
+  identity_md: string | null;
   skills_config: unknown;
   tools_config: unknown;
   plugins_config: unknown;
@@ -55,6 +63,10 @@ type CommandRow = {
   resulting_mode: ConfigurationManagementMode;
   resulting_settings_digest: Sha256Digest;
   result_status: 'applied' | 'no_change';
+};
+
+type EnrollmentReceiptRow = ReleaseCapabilityReceiptRow & {
+  personal_baseline_effective_settings_digest: string | null;
 };
 
 export interface LockedConfigurationControl {
@@ -127,7 +139,7 @@ function settingsProjection(row: AgentSettingsRow): Record<string, unknown> {
 }
 
 function stateFromCommandRow(
-  command: NativePatchCommand,
+  command: Pick<NativePatchCommand | ManagedEnrollmentCommand, 'organizationId' | 'agentId' | 'commandId'>,
   row: CommandRow,
 ): AppliedAgentConfigurationState {
   return {
@@ -140,6 +152,226 @@ function stateFromCommandRow(
       kind: row.mutation_kind,
       commandId: command.commandId,
       commandDigest: row.command_digest,
+    },
+  };
+}
+
+const MANAGED_ENROLLMENT_CAPABILITY_ID = 'agent_configuration_authority.v1';
+
+function rejectedEnrollment(
+  reason:
+    | 'invalid_release'
+    | 'stale_release'
+    | 'environment_mismatch'
+    | 'capability_inactive'
+    | 'enrollment_drifted'
+): AgentConfigurationEnrollmentResult {
+  return { status: 'rejected', reason };
+}
+
+export async function enrollToolboxManagedInTransaction(
+  tx: DbClient,
+  command: ManagedEnrollmentCommand,
+): Promise<AgentConfigurationEnrollmentResult> {
+  const agents = await tx<AgentSettingsRow>`
+    SELECT owner_user_id, model, model_selection, provider_model_preferences,
+           network_config, egress_config, nix_config, mcp_servers,
+           soul_md, user_md, identity_md, skills_config, tools_config,
+           plugins_config, installed_providers, verbose_logging,
+           pre_approved_tools, guardrails
+    FROM agents
+    WHERE organization_id = ${command.organizationId} AND id = ${command.agentId}
+    FOR UPDATE
+  `;
+  const agent = agents[0];
+  if (!agent) throw new AgentConfigurationError('agent_configuration_not_found');
+
+  await tx`
+    INSERT INTO agent_configuration_controls (organization_id, agent_id)
+    VALUES (${command.organizationId}, ${command.agentId})
+    ON CONFLICT (organization_id, agent_id) DO NOTHING
+  `;
+  const controls = await tx<ControlRow>`
+    SELECT management_mode, configuration_revision::text AS configuration_revision,
+           last_mutation_kind, last_command_id, last_command_digest
+    FROM agent_configuration_controls
+    WHERE organization_id = ${command.organizationId} AND agent_id = ${command.agentId}
+    FOR UPDATE
+  `;
+  const control = controls[0];
+  if (!control) throw new AgentConfigurationError('agent_configuration_not_found');
+  const currentRevision = String(control.configuration_revision);
+
+  const priorCommands = await tx<CommandRow>`
+    SELECT command_digest, mutation_kind,
+           resulting_revision::text AS resulting_revision, resulting_mode,
+           resulting_settings_digest, result_status
+    FROM agent_configuration_commands
+    WHERE organization_id = ${command.organizationId}
+      AND agent_id = ${command.agentId}
+      AND command_id = ${command.commandId}
+  `;
+  const priorCommand = priorCommands[0];
+  if (priorCommand) {
+    if (priorCommand.command_digest !== command.commandDigest) {
+      return {
+        status: 'conflict',
+        conflict: 'command_conflict',
+        currentRevision,
+      };
+    }
+    return {
+      status: 'already_applied',
+      state: stateFromCommandRow(command, priorCommand),
+    };
+  }
+
+  if (control.management_mode === 'toolbox_managed') {
+    return {
+      status: 'already_managed',
+      managementMode: 'toolbox_managed',
+      configurationRevision: currentRevision,
+    };
+  }
+  if (command.expectedConfigurationRevision !== currentRevision) {
+    return {
+      status: 'conflict',
+      conflict: 'revision_mismatch',
+      currentRevision,
+    };
+  }
+  if (command.environment !== command.runtimeEnvironment) {
+    return rejectedEnrollment('environment_mismatch');
+  }
+  if (agent.owner_user_id !== command.toolboxUserId) {
+    return rejectedEnrollment('invalid_release');
+  }
+  if (command.snapshot.environment !== command.environment) {
+    return rejectedEnrollment('environment_mismatch');
+  }
+  if (
+    command.snapshot.toolboxUserId !== command.toolboxUserId ||
+    command.snapshot.agentId !== command.agentId
+  ) {
+    return rejectedEnrollment('invalid_release');
+  }
+  const expiresAt = Date.parse(command.snapshot.expiresAt);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    return rejectedEnrollment('stale_release');
+  }
+  try {
+    validateRuntimeCapabilitySnapshot(
+      command.snapshot,
+      {
+        environment: command.snapshot.environment,
+        toolboxUserId: command.snapshot.toolboxUserId,
+        agentId: command.snapshot.agentId,
+      },
+      new Date(),
+    );
+  } catch {
+    return rejectedEnrollment('invalid_release');
+  }
+
+  const receipts = await tx<EnrollmentReceiptRow>`
+    SELECT environment, desired_release_id, desired_release_sequence,
+           desired_feed_sequence, applied_release_id, applied_release_sequence,
+           applied_feed_sequence, status, settings_hash, personal_baseline_settings,
+           personal_baseline_effective_settings_digest
+    FROM agent_release_applies
+    WHERE organization_id = ${command.organizationId} AND agent_id = ${command.agentId}
+    LIMIT 1
+    FOR SHARE
+  `;
+  const receipt = receipts[0];
+  if (!receipt) return rejectedEnrollment('invalid_release');
+  if (receipt.environment !== command.environment) {
+    return rejectedEnrollment('environment_mismatch');
+  }
+  if (
+    receipt.status !== 'applied' ||
+    receipt.desired_release_id !== receipt.applied_release_id ||
+    receipt.desired_release_sequence !== receipt.applied_release_sequence ||
+    receipt.desired_feed_sequence !== receipt.applied_feed_sequence
+  ) {
+    return rejectedEnrollment('stale_release');
+  }
+  if (
+    command.snapshot.appliedReleaseId !== receipt.applied_release_id ||
+    command.snapshot.appliedReleaseSequence !== Number(receipt.applied_release_sequence)
+  ) {
+    return rejectedEnrollment('stale_release');
+  }
+  if (!command.snapshot.capabilities.includes(MANAGED_ENROLLMENT_CAPABILITY_ID)) {
+    return rejectedEnrollment('capability_inactive');
+  }
+  if (
+    receipt.personal_baseline_effective_settings_digest !== null &&
+    receipt.personal_baseline_effective_settings_digest !== receipt.settings_hash
+  ) {
+    return rejectedEnrollment('enrollment_drifted');
+  }
+  const capabilityState = classifyAgentReleaseCapabilityState({
+    agent: {
+      ...agent,
+      owner_user_id: command.toolboxUserId,
+      verbose_logging: agent.verbose_logging ?? false,
+    },
+    receipt,
+    agentId: command.agentId,
+    environment: command.environment,
+    snapshot: command.snapshot,
+  });
+  if (capabilityState.status !== 'active') {
+    return rejectedEnrollment('enrollment_drifted');
+  }
+
+  const updated = await tx<{ configuration_revision: string }>`
+    UPDATE agent_configuration_controls
+    SET management_mode = 'toolbox_managed',
+        configuration_revision = configuration_revision + 1,
+        last_mutation_kind = 'managed_enrollment',
+        last_command_id = ${command.commandId},
+        last_command_digest = ${command.commandDigest},
+        updated_at = NOW()
+    WHERE organization_id = ${command.organizationId}
+      AND agent_id = ${command.agentId}
+      AND management_mode = 'native'
+      AND configuration_revision = ${command.expectedConfigurationRevision}::bigint
+    RETURNING configuration_revision::text AS configuration_revision
+  `;
+  const resultingRevision = updated[0]?.configuration_revision;
+  if (!resultingRevision) {
+    return {
+      status: 'conflict',
+      conflict: 'revision_mismatch',
+      currentRevision,
+    };
+  }
+  const settingsDigest = receipt.settings_hash as Sha256Digest;
+  await tx`
+    INSERT INTO agent_configuration_commands (
+      organization_id, agent_id, command_id, command_digest, mutation_kind,
+      resulting_revision, resulting_mode, resulting_settings_digest, result_status
+    ) VALUES (
+      ${command.organizationId}, ${command.agentId}, ${command.commandId},
+      ${command.commandDigest}, 'managed_enrollment', ${resultingRevision}::bigint,
+      'toolbox_managed', ${settingsDigest}, 'applied'
+    )
+  `;
+  return {
+    status: 'applied',
+    state: {
+      organizationId: command.organizationId,
+      agentId: command.agentId,
+      managementMode: 'toolbox_managed',
+      configurationRevision: String(resultingRevision),
+      settingsDigest,
+      lastMutation: {
+        kind: 'managed_enrollment',
+        commandId: command.commandId,
+        commandDigest: command.commandDigest,
+      },
     },
   };
 }

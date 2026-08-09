@@ -20,6 +20,10 @@ import {
   refreshCredential,
 } from "../gateway/routes/internal/device-auth.js";
 import type { WritableSecretStore } from "../gateway/secrets/index.js";
+import {
+  resolveRuntimeCapabilitySnapshot,
+  type RuntimeEnvironment,
+} from "../gateway/services/runtime-capability-snapshot.js";
 import type { Env } from "../index";
 import {
   AGENT_CONFIGURATION_RESPONSE_VERSION,
@@ -101,6 +105,7 @@ interface ProvisioningRoutesOptions {
   agentConfigurationTransactionHooks?: {
     beforeAgentLock?: () => Promise<void>;
   };
+  runtimeCapabilitySnapshotResolver?: typeof resolveRuntimeCapabilitySnapshot;
   legacyProvisioningHooks?: {
     afterAgentLock?: () => Promise<void>;
   };
@@ -155,6 +160,8 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const BASELINE_VERSION_PATTERN = /^personal-agent-baseline-v1-[0-9a-f]{64}$/;
 const SHA256_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const CONFIGURATION_ETAG_PATTERN = /^"agent-config:(0|[1-9][0-9]*)"$/;
+const IDEMPOTENCY_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
 
 function requestDigest(value: unknown): string {
   return `sha256:${createHash("sha256").update(canonicalize(value)).digest("hex")}`;
@@ -283,6 +290,8 @@ export function createProvisioningRoutes(
       readHooks: options.agentConfigurationReadHooks,
       transactionHooks: options.agentConfigurationTransactionHooks,
     });
+  const runtimeCapabilitySnapshotResolver =
+    options.runtimeCapabilitySnapshotResolver ?? resolveRuntimeCapabilitySnapshot;
   const releaseAssuranceReadback =
     options.releaseAssuranceReadback ??
     createReleaseAssuranceReadback({
@@ -736,6 +745,159 @@ export function createProvisioningRoutes(
   });
 
   provisioningRoutes.route("/", createRuntimeReadModelRoutes());
+
+  provisioningRoutes.post(
+    "/agents/:agentId/configuration-management/enroll",
+    async (c) => {
+      const denied = requireAdminPat(c);
+      if (denied) return denied;
+      const organizationId = c.get("organizationId") as string | null;
+      if (!organizationId)
+        return c.json({ error: "Authentication required" }, 401);
+      const agentId = c.req.param("agentId")?.trim() ?? "";
+      const agentIdError = validateShifuAgentId(agentId);
+      if (agentIdError) return c.json({ error: agentIdError }, 400);
+
+      const ifMatch = c.req.header("If-Match");
+      if (ifMatch === undefined) {
+        return c.json({ error: "agent_configuration_revision_required" }, 400);
+      }
+      const revisionMatch = CONFIGURATION_ETAG_PATTERN.exec(ifMatch);
+      if (!revisionMatch) {
+        return c.json({ error: "invalid_revision_precondition" }, 400);
+      }
+      const commandId = c.req.header("Idempotency-Key");
+      if (commandId === undefined) {
+        return c.json({ error: "missing_idempotency_key" }, 400);
+      }
+      if (!IDEMPOTENCY_KEY_PATTERN.test(commandId)) {
+        return c.json({ error: "invalid_idempotency_key" }, 400);
+      }
+
+      let body: Record<string, unknown>;
+      try {
+        const parsed = parseStrictJsonBytes(
+          new Uint8Array(await c.req.arrayBuffer())
+        );
+        if (!isObject(parsed)) throw new Error("invalid enrollment body");
+        body = parsed;
+      } catch {
+        return c.json({ error: "invalid_json" }, 400);
+      }
+      if (
+        Object.keys(body).length !== 2 ||
+        !Object.hasOwn(body, "toolboxUserId") ||
+        !Object.hasOwn(body, "environment")
+      ) {
+        return c.json({ error: "invalid_agent_configuration_enrollment" }, 400);
+      }
+      const toolboxUserId =
+        typeof body.toolboxUserId === "string" ? body.toolboxUserId.trim() : "";
+      const environment = body.environment;
+      if (!toolboxUserId || toolboxUserId.length > 200) {
+        return c.json({ error: "invalid_agent_configuration_enrollment" }, 400);
+      }
+      if (environment !== "staging" && environment !== "production") {
+        return c.json({ error: "invalid_agent_configuration_enrollment" }, 400);
+      }
+      const configuredEnvironment =
+        options.agentReleaseEnvironment ?? process.env.AGENT_RELEASE_ENVIRONMENT;
+      if (
+        configuredEnvironment !== "staging" &&
+        configuredEnvironment !== "production"
+      ) {
+        return c.json(
+          { error: "agent_configuration_runtime_environment_unavailable" },
+          503
+        );
+      }
+      if (environment !== configuredEnvironment) {
+        return c.json(
+          { error: "agent_configuration_environment_mismatch" },
+          409
+        );
+      }
+
+      let snapshot: Awaited<ReturnType<typeof resolveRuntimeCapabilitySnapshot>>;
+      try {
+        snapshot = await runtimeCapabilitySnapshotResolver(
+          { environment, toolboxUserId, agentId },
+          { bypassCache: true }
+        );
+      } catch {
+        return c.json(
+          { error: "agent_configuration_capability_snapshot_unavailable" },
+          503
+        );
+      }
+
+      try {
+        const result = await agentConfigurationAuthority.enrollToolboxManaged({
+          organizationId,
+          agentId,
+          commandId,
+          expectedConfigurationRevision: revisionMatch[1],
+          actor: { kind: "admin_pat" },
+          toolboxUserId,
+          environment,
+          runtimeEnvironment: configuredEnvironment as RuntimeEnvironment,
+          snapshot,
+        });
+        if (result.status === "conflict") {
+          return c.json(
+            {
+              error:
+                result.conflict === "revision_mismatch"
+                  ? "agent_configuration_revision_mismatch"
+                  : "agent_configuration_command_conflict",
+              currentRevision: result.currentRevision,
+            },
+            409
+          );
+        }
+        if (result.status === "rejected") {
+          return c.json({ error: `agent_configuration_${result.reason}` }, 409);
+        }
+        if (result.status === "already_managed") {
+          return c.json(
+            {
+              ok: true,
+              status: "no_change",
+              reason: "already_toolbox_managed",
+              managementMode: result.managementMode,
+              configurationRevision: result.configurationRevision,
+            },
+            200
+          );
+        }
+        return c.json(
+          {
+            ok: true,
+            status: result.status,
+            managementMode: result.state.managementMode,
+            configurationRevision: result.state.configurationRevision,
+            settingsDigest: result.state.settingsDigest,
+          },
+          200
+        );
+      } catch (error) {
+        if (error instanceof AgentConfigurationError) {
+          const status =
+            error.code === "agent_configuration_not_found" ? 404 : 400;
+          return c.json(
+            {
+              error: error.code,
+              ...(error.currentRevision === undefined
+                ? {}
+                : { currentRevision: error.currentRevision }),
+            },
+            status
+          );
+        }
+        throw error;
+      }
+    }
+  );
 
   provisioningRoutes.put(
     "/agents/:agentId/managed-settings",

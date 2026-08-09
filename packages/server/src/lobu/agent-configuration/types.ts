@@ -1,4 +1,5 @@
 import type { AgentSettings } from '@lobu/core';
+import type { RuntimeCapabilitySnapshot } from '../../gateway/services/runtime-capability-snapshot';
 import type {
   AgentReleaseApplyResult,
   AgentReleasePostApplyEvidence,
@@ -54,6 +55,15 @@ export interface NativePatchCommand extends AgentConfigurationCommandEnvelope {
   patch: NativeSettingsPatch;
 }
 
+export interface ManagedEnrollmentCommand extends AgentConfigurationCommandEnvelope {
+  kind: 'managed_enrollment';
+  expectedConfigurationRevision: string;
+  toolboxUserId: string;
+  environment: 'staging' | 'production';
+  runtimeEnvironment: 'staging' | 'production';
+  snapshot: RuntimeCapabilitySnapshot;
+}
+
 export interface AppliedAgentConfigurationState {
   organizationId: string;
   agentId: string;
@@ -95,6 +105,23 @@ export type AgentConfigurationMutationResult =
     };
 
 export type NativePatchCommandInput = Omit<NativePatchCommand, 'kind' | 'commandDigest'>;
+
+export type EnrollToolboxManagedInput = Omit<
+  ManagedEnrollmentCommand,
+  'kind' | 'commandDigest'
+>;
+
+export type AgentConfigurationEnrollmentResult =
+  | Extract<AgentConfigurationMutationResult, { status: 'conflict' | 'rejected' }>
+  | {
+      status: 'applied' | 'already_applied';
+      state: AppliedAgentConfigurationState;
+    }
+  | {
+      status: 'already_managed';
+      managementMode: 'toolbox_managed';
+      configurationRevision: string;
+    };
 
 export interface ManagedReleaseCommandInput {
   organizationId: string;

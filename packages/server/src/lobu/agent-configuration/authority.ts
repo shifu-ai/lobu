@@ -14,6 +14,7 @@ import {
 } from './field-ownership';
 import {
   applyNativePatchInTransaction,
+  enrollToolboxManagedInTransaction,
   findConfigurationCommand,
   lockAgentAndConfigurationControl,
   readAgentConfigurationSettingsDigest,
@@ -22,11 +23,14 @@ import {
 import { AGENT_CONFIGURATION_RESPONSE_VERSION } from './types';
 import type {
   AgentConfigurationMutationResult,
+  AgentConfigurationEnrollmentResult,
   AppliedAgentConfigurationState,
   ManagedReleaseCommandInput,
   ManagedReleaseConfigurationResult,
+  ManagedEnrollmentCommand,
   NativePatchCommand,
   NativePatchCommandInput,
+  EnrollToolboxManagedInput,
   Sha256Digest,
 } from './types';
 
@@ -34,6 +38,9 @@ const DECIMAL_REVISION_PATTERN = /^(0|[1-9][0-9]*)$/;
 
 export interface AgentConfigurationAuthority {
   apply(input: NativePatchCommandInput): Promise<AgentConfigurationMutationResult>;
+  enrollToolboxManaged(
+    input: EnrollToolboxManagedInput,
+  ): Promise<AgentConfigurationEnrollmentResult>;
   applyManagedRelease(
     input: ManagedReleaseCommandInput,
   ): Promise<ManagedReleaseConfigurationResult>;
@@ -107,6 +114,45 @@ function materializeNativePatchCommand(input: NativePatchCommandInput): NativePa
   };
 }
 
+function materializeManagedEnrollmentCommand(
+  input: EnrollToolboxManagedInput,
+): ManagedEnrollmentCommand {
+  if (!DECIMAL_REVISION_PATTERN.test(input.expectedConfigurationRevision)) {
+    throw new AgentConfigurationError('invalid_revision_precondition');
+  }
+  const snapshot = JSON.parse(canonicalize(input.snapshot)) as typeof input.snapshot;
+  const canonicalCommand = {
+    kind: 'managed_enrollment',
+    agentId: input.agentId,
+    toolboxUserId: input.toolboxUserId,
+    environment: input.environment,
+    runtimeEnvironment: input.runtimeEnvironment,
+    expectedRevision: input.expectedConfigurationRevision,
+    claim: {
+      schemaVersion: snapshot.schemaVersion,
+      environment: snapshot.environment,
+      toolboxUserId: snapshot.toolboxUserId,
+      agentId: snapshot.agentId,
+      capabilities: [...snapshot.capabilities].sort(),
+      appliedReleaseId: snapshot.appliedReleaseId,
+      appliedReleaseSequence: snapshot.appliedReleaseSequence,
+    },
+  };
+  return {
+    organizationId: input.organizationId,
+    agentId: input.agentId,
+    commandId: input.commandId,
+    commandDigest: sha256Canonical(canonicalCommand),
+    expectedConfigurationRevision: input.expectedConfigurationRevision,
+    actor: input.actor,
+    toolboxUserId: input.toolboxUserId,
+    environment: input.environment,
+    runtimeEnvironment: input.runtimeEnvironment,
+    snapshot,
+    kind: 'managed_enrollment',
+  };
+}
+
 export function createAgentConfigurationAuthority(
   sql?: DbClient,
   options: {
@@ -119,6 +165,13 @@ export function createAgentConfigurationAuthority(
     apply(input) {
       const command = materializeNativePatchCommand(input);
       return (sql ?? getDb()).begin((tx) => applyNativePatchInTransaction(tx, command));
+    },
+    enrollToolboxManaged(input) {
+      const command = materializeManagedEnrollmentCommand(input);
+      return (sql ?? getDb()).begin(async (tx) => {
+        await options.transactionHooks?.beforeAgentLock?.();
+        return enrollToolboxManagedInTransaction(tx, command);
+      });
     },
     async applyManagedRelease(input) {
       const releaseService = options.agentReleaseService;

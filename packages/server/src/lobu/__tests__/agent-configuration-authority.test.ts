@@ -13,9 +13,90 @@ import { parseNativeSettingsPatch } from '../agent-configuration/field-ownership
 
 const AGENT_ID = 'native-authority-tracer';
 const ORGANIZATION_ID = 'native-authority-org';
+const TOOLBOX_USER_ID = 'toolbox-user-managed-enrollment';
+const ENROLLMENT_CAPABILITY_ID = 'agent_configuration_authority.v1';
 
 function canonicalDigest(value: unknown): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(canonicalize(value)).digest('hex')}`;
+}
+
+function enrollmentSnapshot(
+  overrides: Partial<{
+    environment: 'staging' | 'production';
+    toolboxUserId: string;
+    agentId: string;
+    capabilities: string[];
+    appliedReleaseId: string;
+    appliedReleaseSequence: number;
+    expiresAt: string;
+  }> = {}
+) {
+  const unsigned = {
+    schemaVersion: 1 as const,
+    environment: overrides.environment ?? ('production' as const),
+    toolboxUserId: overrides.toolboxUserId ?? TOOLBOX_USER_ID,
+    agentId: overrides.agentId ?? AGENT_ID,
+    capabilities: overrides.capabilities ?? [ENROLLMENT_CAPABILITY_ID],
+    appliedReleaseId: overrides.appliedReleaseId ?? 'agent-release-enrollment-7',
+    appliedReleaseSequence: overrides.appliedReleaseSequence ?? 7,
+    expiresAt: overrides.expiresAt ?? new Date(Date.now() + 30_000).toISOString(),
+  };
+  return { ...unsigned, snapshotDigest: canonicalDigest(unsigned) };
+}
+
+async function seedAppliedEnrollmentRelease(
+  input: { status?: 'applying' | 'applied' | 'failed' } = {}
+): Promise<`sha256:${string}`> {
+  const sql = getDb();
+  const managedSettings = {
+    identityMd: 'managed identity',
+    soulMd: 'managed soul',
+    userMd: 'managed user',
+    modelSelection: { mode: 'auto' },
+    toolsConfig: { strictMode: true },
+  };
+  const settingsHash = canonicalDigest(managedSettings);
+  await sql`
+    UPDATE agents SET
+      owner_user_id = ${TOOLBOX_USER_ID},
+      identity_md = ${managedSettings.identityMd},
+      soul_md = ${managedSettings.soulMd},
+      user_md = ${managedSettings.userMd},
+      model_selection = ${sql.json(managedSettings.modelSelection)},
+      tools_config = ${sql.json(managedSettings.toolsConfig)}
+    WHERE organization_id = ${ORGANIZATION_ID} AND id = ${AGENT_ID}
+  `;
+  await sql`
+    INSERT INTO agent_release_applies (
+      organization_id, agent_id, environment,
+      desired_release_id, desired_release_sequence, desired_feed_sequence,
+      applied_release_id, applied_release_sequence, applied_feed_sequence,
+      applied_channel, applied_feed_digest, manifest_digest, status,
+      revision_ref, settings_hash
+    ) VALUES (
+      ${ORGANIZATION_ID}, ${AGENT_ID}, 'production',
+      'agent-release-enrollment-7', 7, 11,
+      'agent-release-enrollment-7', 7, 11,
+      'candidate', ${canonicalDigest({ feed: 11 })}, ${canonicalDigest({ release: 7 })},
+      ${input.status ?? 'applied'}, 'lobu:managed-enrollment:7', ${settingsHash}
+    )
+  `;
+  return settingsHash;
+}
+
+function enrollmentCommand(overrides: Record<string, unknown> = {}) {
+  return {
+    organizationId: ORGANIZATION_ID,
+    agentId: AGENT_ID,
+    commandId: 'managed-enrollment-command-1',
+    expectedConfigurationRevision: '0',
+    actor: { kind: 'admin_pat' as const },
+    toolboxUserId: TOOLBOX_USER_ID,
+    environment: 'production' as const,
+    runtimeEnvironment: 'production' as const,
+    snapshot: enrollmentSnapshot(),
+    ...overrides,
+  };
 }
 
 function createTransactionStartBarrier(participantCount: number) {
@@ -69,6 +150,238 @@ describe('AgentConfigurationAuthority', () => {
   beforeEach(async () => {
     await resetTestDatabase();
     await seedAgentRow(AGENT_ID, { organizationId: ORGANIZATION_ID });
+  });
+
+  test('enrolls a fresh exact applied release claim and persists a monotonic command receipt', async () => {
+    const settingsHash = await seedAppliedEnrollmentRelease();
+    const result = await createAgentConfigurationAuthority().enrollToolboxManaged(
+      enrollmentCommand()
+    );
+
+    expect(result).toMatchObject({
+      status: 'applied',
+      state: {
+        managementMode: 'toolbox_managed',
+        configurationRevision: '1',
+        settingsDigest: settingsHash,
+        lastMutation: {
+          kind: 'managed_enrollment',
+          commandId: 'managed-enrollment-command-1',
+        },
+      },
+    });
+    const rows = await getDb()`
+      SELECT c.management_mode, c.configuration_revision, c.last_mutation_kind,
+             command_row.mutation_kind, command_row.resulting_mode,
+             command_row.resulting_revision, command_row.resulting_settings_digest
+      FROM agent_configuration_controls c
+      JOIN agent_configuration_commands command_row
+        ON command_row.organization_id = c.organization_id
+       AND command_row.agent_id = c.agent_id
+      WHERE c.organization_id = ${ORGANIZATION_ID} AND c.agent_id = ${AGENT_ID}
+    `;
+    expect(rows).toEqual([{
+      management_mode: 'toolbox_managed',
+      configuration_revision: 1,
+      last_mutation_kind: 'managed_enrollment',
+      mutation_kind: 'managed_enrollment',
+      resulting_mode: 'toolbox_managed',
+      resulting_revision: 1,
+      resulting_settings_digest: settingsHash,
+    }]);
+  });
+
+  test('replays enrollment across claim renewal before freshness checks and rejects semantic command reuse', async () => {
+    await seedAppliedEnrollmentRelease();
+    const authority = createAgentConfigurationAuthority();
+    const command = enrollmentCommand();
+    expect((await authority.enrollToolboxManaged(command)).status).toBe('applied');
+    await expect(authority.enrollToolboxManaged({
+      ...command,
+      expectedConfigurationRevision: '0',
+      snapshot: { ...command.snapshot, expiresAt: '2000-01-01T00:00:00.000Z' },
+    })).resolves.toMatchObject({
+      status: 'already_applied',
+      state: { managementMode: 'toolbox_managed', configurationRevision: '1' },
+    });
+    await expect(authority.enrollToolboxManaged({
+      ...command,
+      snapshot: enrollmentSnapshot({ appliedReleaseId: 'agent-release-enrollment-8' }),
+    })).resolves.toMatchObject({
+      status: 'conflict',
+      conflict: 'command_conflict',
+      currentRevision: '1',
+    });
+    await expect(authority.enrollToolboxManaged(command)).resolves.toMatchObject({
+      status: 'already_applied',
+      state: { managementMode: 'toolbox_managed', configurationRevision: '1' },
+    });
+
+    const commands = await getDb()`
+      SELECT command_id FROM agent_configuration_commands
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `;
+    expect(commands).toEqual([{ command_id: 'managed-enrollment-command-1' }]);
+  });
+
+  test('returns a semantic no-op for another command after enrollment without a new receipt', async () => {
+    await seedAppliedEnrollmentRelease();
+    const authority = createAgentConfigurationAuthority();
+    await authority.enrollToolboxManaged(enrollmentCommand());
+
+    await expect(authority.enrollToolboxManaged(enrollmentCommand({
+      commandId: 'managed-enrollment-command-2',
+      expectedConfigurationRevision: '1',
+    }))).resolves.toEqual({
+      status: 'already_managed',
+      managementMode: 'toolbox_managed',
+      configurationRevision: '1',
+    });
+    const controls = await getDb()`
+      SELECT management_mode, configuration_revision, last_command_id
+      FROM agent_configuration_controls
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `;
+    expect(controls).toEqual([{
+      management_mode: 'toolbox_managed',
+      configuration_revision: 1,
+      last_command_id: 'managed-enrollment-command-1',
+    }]);
+    expect((await getDb()`
+      SELECT count(*)::int AS count FROM agent_configuration_commands
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `)[0]?.count).toBe(1);
+  });
+
+  test.each([
+    ['capability absent', { snapshot: enrollmentSnapshot({ capabilities: ['other.v1'] }) }, 'capability_inactive'],
+    ['release id mismatch', { snapshot: enrollmentSnapshot({ appliedReleaseId: 'agent-release-enrollment-8' }) }, 'stale_release'],
+    ['release sequence mismatch', { snapshot: enrollmentSnapshot({ appliedReleaseSequence: 8 }) }, 'stale_release'],
+    ['Toolbox user mismatch', { snapshot: enrollmentSnapshot({ toolboxUserId: 'another-toolbox-user' }) }, 'invalid_release'],
+    ['agent mismatch', { snapshot: enrollmentSnapshot({ agentId: 'shifu-u-another-agent' }) }, 'invalid_release'],
+    ['claim environment mismatch', { snapshot: enrollmentSnapshot({ environment: 'staging' }) }, 'environment_mismatch'],
+    ['requested Toolbox owner mismatch', { toolboxUserId: 'another-toolbox-user' }, 'invalid_release'],
+    ['runtime environment mismatch', { runtimeEnvironment: 'staging' }, 'environment_mismatch'],
+  ])('rejects %s without mutating durable mode', async (_name, overrides, reason) => {
+    await seedAppliedEnrollmentRelease();
+    const result = await createAgentConfigurationAuthority().enrollToolboxManaged(
+      enrollmentCommand(overrides as Record<string, unknown>)
+    );
+    expect(result).toEqual({ status: 'rejected', reason });
+    expect((await getDb()`
+      SELECT management_mode, configuration_revision
+      FROM agent_configuration_controls
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `)[0]).toEqual({ management_mode: 'native', configuration_revision: 0 });
+  });
+
+  test('fails closed for a stale claim, a non-applied receipt, and live managed-settings drift', async () => {
+    await seedAppliedEnrollmentRelease();
+    const authority = createAgentConfigurationAuthority();
+    await expect(authority.enrollToolboxManaged(enrollmentCommand({
+      snapshot: enrollmentSnapshot({ expiresAt: '2000-01-01T00:00:00.000Z' }),
+    }))).resolves.toEqual({ status: 'rejected', reason: 'stale_release' });
+
+    await getDb()`
+      UPDATE agent_release_applies SET status = 'applying'
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `;
+    await expect(authority.enrollToolboxManaged(enrollmentCommand({
+      commandId: 'managed-enrollment-non-applied',
+    }))).resolves.toEqual({ status: 'rejected', reason: 'stale_release' });
+
+    await getDb()`
+      UPDATE agent_release_applies SET status = 'applied'
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `;
+    await getDb()`
+      UPDATE agents SET user_md = 'drifted after release apply'
+      WHERE organization_id = ${ORGANIZATION_ID} AND id = ${AGENT_ID}
+    `;
+    await expect(authority.enrollToolboxManaged(enrollmentCommand({
+      commandId: 'managed-enrollment-drifted',
+    }))).resolves.toEqual({ status: 'rejected', reason: 'enrollment_drifted' });
+    expect((await getDb()`
+      SELECT management_mode, configuration_revision
+      FROM agent_configuration_controls
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `)[0]).toEqual({ management_mode: 'native', configuration_revision: 0 });
+  });
+
+  test('rejects a receipt whose effective managed baseline digest disagrees with settings truth', async () => {
+    await seedAppliedEnrollmentRelease();
+    await getDb()`
+      UPDATE agent_release_applies
+      SET personal_baseline_effective_settings_digest = ${`sha256:${'e'.repeat(64)}`}
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `;
+
+    await expect(
+      createAgentConfigurationAuthority().enrollToolboxManaged(enrollmentCommand())
+    ).resolves.toEqual({ status: 'rejected', reason: 'enrollment_drifted' });
+    expect((await getDb()`
+      SELECT management_mode, configuration_revision
+      FROM agent_configuration_controls
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `)[0]).toEqual({ management_mode: 'native', configuration_revision: 0 });
+  });
+
+  test('serializes enrollment against a native release-owned patch across independent authorities', async () => {
+    await seedAppliedEnrollmentRelease();
+    const barrier = createTransactionStartBarrier(2);
+    const sql = getDb();
+    const enrollmentAuthority = createAgentConfigurationAuthority(
+      withTransactionStartCheckpoint(sql, barrier.checkpoint)
+    );
+    const nativeAuthority = createAgentConfigurationAuthority(
+      withTransactionStartCheckpoint(sql, barrier.checkpoint)
+    );
+    const participants = Promise.all([
+      enrollmentAuthority.enrollToolboxManaged(enrollmentCommand()),
+      nativeAuthority.apply({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        commandId: 'native-user-md-racing-enrollment',
+        expectedConfigurationRevision: '0',
+        actor: { kind: 'session' },
+        patch: { userMd: 'native write must not land after enrollment' },
+      }),
+    ]);
+    const allTransactionsStarted = await Promise.race([
+      barrier.allArrived.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5_000)),
+    ]);
+    barrier.release();
+    const [enrollment, nativePatch] = await participants;
+
+    expect(allTransactionsStarted).toBe(true);
+    expect(barrier.arrivals).toBe(2);
+    const row = (await sql`
+      SELECT a.user_md, c.management_mode, c.configuration_revision
+      FROM agents a
+      JOIN agent_configuration_controls c
+        ON c.organization_id = a.organization_id AND c.agent_id = a.id
+      WHERE a.organization_id = ${ORGANIZATION_ID} AND a.id = ${AGENT_ID}
+    `)[0];
+    if (nativePatch.status === 'applied') {
+      expect(enrollment).toMatchObject({
+        status: 'conflict',
+        conflict: 'revision_mismatch',
+      });
+      expect(row).toEqual({
+        user_md: 'native write must not land after enrollment',
+        management_mode: 'native',
+        configuration_revision: 1,
+      });
+    } else {
+      expect(enrollment).toMatchObject({ status: 'applied' });
+      expect(nativePatch.status === 'rejected' || nativePatch.status === 'conflict').toBe(true);
+      expect(row).toEqual({
+        user_md: 'managed user',
+        management_mode: 'toolbox_managed',
+        configuration_revision: 1,
+      });
+    }
   });
 
   test('persists one native patch, revision control, and command receipt atomically', async () => {
