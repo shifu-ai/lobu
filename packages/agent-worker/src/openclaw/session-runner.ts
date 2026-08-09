@@ -43,10 +43,14 @@ import {
   type WorkerShifuTraceContext,
 } from "../shared/journey-trace";
 import { getApiKeyEnvVarForProvider } from "../shared/provider-auth-hints";
-import type { GatewayParams } from "../shared/tool-implementations";
+import {
+  callToolboxPersonalAgentTool,
+  type GatewayParams,
+} from "../shared/tool-implementations";
 import { isRecord } from "../shared/type-guards";
 import { buildTrustedAutomationModificationTurnContext } from "./automation-modification-context";
 import { buildCalendarResolverInstructions } from "./calendar-resolver-guidance";
+import { maybeProposeCompanyWikiCapture } from "./company-wiki-capture";
 import {
   checkCompletionClaim,
   getRequiredBattleReportMutationTools,
@@ -3300,6 +3304,55 @@ Use it when the user references past discussions or you need context.`);
     if (bufferCurrentTurnOutputForFinalGuards) {
       pendingDelta = guardedFinalText;
       await flushDelta();
+    }
+
+    const releaseCapabilityIds =
+      context.releaseState?.status === "active"
+        ? context.releaseState.claim.capabilityIds
+        : [];
+    const toolboxWikiToolGroup = context.toolboxPersonalAgentTools.find(
+      (group) =>
+        group.connectorKey === "shifu_toolbox" &&
+        group.tools.some(
+          (tool) =>
+            tool.name === "wiki_propose_from_conversation" ||
+            tool.connectorToolName === "wiki_propose_from_conversation"
+        )
+    );
+    const toolboxWikiTool = toolboxWikiToolGroup?.tools.find(
+      (tool) =>
+        tool.name === "wiki_propose_from_conversation" ||
+        tool.connectorToolName === "wiki_propose_from_conversation"
+    );
+    if (toolboxWikiToolGroup && toolboxWikiTool) {
+      void maybeProposeCompanyWikiCapture({
+        capabilityIds: releaseCapabilityIds,
+        messages: [
+          { role: "user", content: userPrompt },
+          { role: "assistant", content: guardedFinalText },
+        ],
+        conversationId,
+        runId: messageId,
+        agentId: agentId || context.agentId,
+        callTool: async (_toolName, args) => {
+          const result = await callToolboxPersonalAgentTool(gwParams, {
+            connectorKey: toolboxWikiToolGroup.connectorKey,
+            connectionRef: toolboxWikiToolGroup.connectionRef,
+            connectorToolName: toolboxWikiTool.connectorToolName,
+            toolArgs: args,
+          });
+          const textBlock = result.content.find(
+            (block) => block.type === "text"
+          );
+          return typeof textBlock?.text === "string"
+            ? JSON.parse(textBlock.text)
+            : {};
+        },
+      }).then((result) => {
+        if (result.status === "failed") {
+          logger.warn(`Company Wiki capture proposal failed: ${result.reason}`);
+        }
+      });
     }
 
     progressProcessor.setFinalResult({
