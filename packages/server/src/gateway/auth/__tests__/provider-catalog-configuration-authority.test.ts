@@ -8,6 +8,7 @@ import type {
 import {
   AgentConfigurationMutationConflictError,
   AgentConfigurationMutationInvalidRevisionError,
+  AgentConfigurationMutationReceiptLimitExceededError,
   AgentConfigurationMutationRejectedError,
   EmbeddedInMemoryAgentConfigurationMutationAdapter,
   createAgentConfigurationMutationPort,
@@ -717,6 +718,98 @@ test("embedded receipts retain the oldest replay and conflict for the live agent
     state: oldestState,
   });
   expect((await store.getSettings(subject.agentId))?.identityMd).toBeUndefined();
+});
+
+test("embedded receipt quota rejects a new command before mutation", async () => {
+  const store = new InMemoryAgentStore();
+  await store.saveMetadata(subject.agentId, {
+    agentId: subject.agentId,
+    name: "Receipt Quota",
+    owner: { platform: "test", userId: "owner" },
+    createdAt: 1,
+  });
+  const adapter = new EmbeddedInMemoryAgentConfigurationMutationAdapter(store);
+  let oldestState: AppliedAgentConfigurationState | null = null;
+  for (let index = 0; index < 1_024; index += 1) {
+    const result = await adapter.updateNativeConfiguration({
+      ...subject,
+      commandId: `quota-${index}`,
+      expectedConfigurationRevision: "0",
+      actor: { kind: "provider_catalog" },
+      patch: {},
+    });
+    expect(result.status).toBe("no_change");
+    if (index === 0 && result.status === "no_change") {
+      oldestState = result.state;
+    }
+  }
+
+  let overflowError: unknown;
+  try {
+    await adapter.updateNativeConfiguration({
+      ...subject,
+      commandId: "quota-overflow",
+      expectedConfigurationRevision: "0",
+      actor: { kind: "provider_catalog" },
+      patch: { identityMd: "must not be written" },
+    });
+  } catch (error) {
+    overflowError = error;
+  }
+  expect(overflowError).toBeInstanceOf(
+    AgentConfigurationMutationReceiptLimitExceededError
+  );
+  expect(overflowError).toMatchObject({
+    code: "embedded_command_receipt_limit_exceeded",
+  });
+  expect((await adapter.readAppliedState(subject))?.configurationRevision).toBe(
+    "0"
+  );
+  expect((await store.getSettings(subject.agentId))?.identityMd).toBeUndefined();
+
+  expect(
+    await adapter.updateNativeConfiguration({
+      ...subject,
+      commandId: "quota-0",
+      expectedConfigurationRevision: "0",
+      actor: { kind: "provider_catalog" },
+      patch: {},
+    })
+  ).toEqual({ status: "already_applied", state: oldestState });
+  expect(
+    await adapter.updateNativeConfiguration({
+      ...subject,
+      commandId: "quota-0",
+      expectedConfigurationRevision: "0",
+      actor: { kind: "provider_catalog" },
+      patch: { identityMd: "different oldest effect" },
+    })
+  ).toEqual({
+    status: "conflict",
+    conflict: "command_conflict",
+    currentRevision: "0",
+  });
+
+  await adapter.deleteAgent(subject.agentId, () =>
+    store.deleteMetadata(subject.agentId)
+  );
+  await store.saveMetadata(subject.agentId, {
+    agentId: subject.agentId,
+    name: "Receipt Quota Recreated",
+    owner: { platform: "test", userId: "new-owner" },
+    createdAt: 2,
+  });
+  expect(
+    (
+      await adapter.updateNativeConfiguration({
+        ...subject,
+        commandId: "quota-after-recreate",
+        expectedConfigurationRevision: "0",
+        actor: { kind: "provider_catalog" },
+        patch: {},
+      })
+    ).status
+  ).toBe("no_change");
 });
 
 test("authority port rejects null revisions before delegating", async () => {

@@ -21,6 +21,15 @@ import {
   getOrCreateSet,
 } from "./base-agent-store.js";
 
+export class InMemoryAgentAggregateNotFoundError extends Error {
+  readonly code = "embedded_agent_aggregate_not_found";
+
+  constructor(readonly agentId: string) {
+    super(`Embedded agent aggregate was not found: ${agentId}`);
+    this.name = "InMemoryAgentAggregateNotFoundError";
+  }
+}
+
 export class InMemoryAgentStore extends BaseAgentStore {
   private settings = new Map<string, AgentSettings>();
   private metadata = new Map<string, AgentMetadata>();
@@ -45,6 +54,7 @@ export class InMemoryAgentStore extends BaseAgentStore {
     agentId: string,
     settings: AgentSettings
   ): Promise<void> {
+    this.assertLiveAgent(agentId);
     this.settings.set(agentId, settings);
   }
 
@@ -79,11 +89,24 @@ export class InMemoryAgentStore extends BaseAgentStore {
   }
 
   protected async deleteMetadataRaw(agentId: string): Promise<void> {
+    // Intentionally no await: once aggregate deletion starts, every map/index
+    // is cleared in one JS turn. Child writers validate metadata synchronously,
+    // so they either commit before this turn or reject after it.
     const connectionIds = Array.from(this.connectionsByAgent.get(agentId) ?? []);
     for (const connectionId of connectionIds) {
-      await this.deleteConnectionRaw(connectionId);
+      if (this.connections.get(connectionId)?.agentId === agentId) {
+        this.deleteConnectionNow(connectionId);
+      }
     }
-    await this.deleteAllChannelBindings(agentId);
+    this.connectionsByAgent.delete(agentId);
+
+    const bindingKeys = Array.from(this.channelBindingIndex.get(agentId) ?? []);
+    for (const key of bindingKeys) {
+      if (this.channelBindings.get(key)?.agentId === agentId) {
+        this.channelBindings.delete(key);
+      }
+    }
+    this.channelBindingIndex.delete(agentId);
 
     const grantPrefix = `${agentId}:`;
     for (const key of this.grants.keys()) {
@@ -115,6 +138,7 @@ export class InMemoryAgentStore extends BaseAgentStore {
   }
 
   protected async writeConnection(connection: StoredConnection): Promise<void> {
+    if (connection.agentId) this.assertLiveAgent(connection.agentId);
     const previous = this.connections.get(connection.id);
     if (previous?.agentId && previous.agentId !== connection.agentId) {
       const previousAgentConnections = this.connectionsByAgent.get(
@@ -135,6 +159,10 @@ export class InMemoryAgentStore extends BaseAgentStore {
   }
 
   protected async deleteConnectionRaw(connectionId: string): Promise<void> {
+    this.deleteConnectionNow(connectionId);
+  }
+
+  private deleteConnectionNow(connectionId: string): void {
     const conn = this.connections.get(connectionId);
     this.connections.delete(connectionId);
     this.connectionsAll.delete(connectionId);
@@ -193,6 +221,7 @@ export class InMemoryAgentStore extends BaseAgentStore {
     expiresAt: number | null,
     denied?: boolean
   ): Promise<void> {
+    this.assertLiveAgent(agentId);
     this.grants.set(this.grantKey(agentId, pattern), {
       expiresAt,
       grantedAt: Date.now(),
@@ -270,6 +299,7 @@ export class InMemoryAgentStore extends BaseAgentStore {
     userId: string,
     agentId: string
   ): Promise<void> {
+    this.assertLiveAgent(agentId);
     getOrCreateSet(this.userAgents, this.userKey(platform, userId)).add(
       agentId
     );
@@ -327,6 +357,7 @@ export class InMemoryAgentStore extends BaseAgentStore {
   }
 
   async createChannelBinding(binding: ChannelBinding): Promise<void> {
+    this.assertLiveAgent(binding.agentId);
     const key = this.channelBindingKey(
       binding.platform,
       binding.channelId,
@@ -383,5 +414,11 @@ export class InMemoryAgentStore extends BaseAgentStore {
     }
     this.channelBindingIndex.delete(agentId);
     return count;
+  }
+
+  private assertLiveAgent(agentId: string): void {
+    if (!this.metadata.has(agentId)) {
+      throw new InMemoryAgentAggregateNotFoundError(agentId);
+    }
   }
 }

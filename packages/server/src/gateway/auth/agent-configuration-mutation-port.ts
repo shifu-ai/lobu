@@ -33,6 +33,9 @@ export type ProviderMutationSubject = {
   agentId: string;
 };
 
+/** Hard per-live-agent cap for the non-durable embedded receipt ledger. */
+export const EMBEDDED_COMMAND_RECEIPT_LIMIT = 1_024;
+
 export interface AgentConfigurationMutationPort {
   readAppliedState(
     subject: ProviderMutationSubject
@@ -80,6 +83,20 @@ export class AgentConfigurationMutationTenantMismatchError extends Error {
   }
 }
 
+export class AgentConfigurationMutationReceiptLimitExceededError extends Error {
+  readonly code = "embedded_command_receipt_limit_exceeded";
+
+  constructor(
+    readonly agentId: string,
+    readonly limit: number = EMBEDDED_COMMAND_RECEIPT_LIMIT
+  ) {
+    super(
+      `Embedded command receipt limit exceeded for agent ${agentId}: ${limit}`
+    );
+    this.name = "AgentConfigurationMutationReceiptLimitExceededError";
+  }
+}
+
 function assertDecimalRevision(value: unknown): asserts value is string {
   if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) {
     throw new AgentConfigurationMutationInvalidRevisionError();
@@ -120,7 +137,9 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
    * Embedded receipts are process-local and non-durable, but remain available
    * for the entire lifetime of a live agent aggregate. Aggregate deletion
    * clears every receipt; process restart also loses them. Production authority
-   * persists its command ledger in Postgres instead.
+   * persists its command ledger in Postgres instead. A live agent retains at
+   * most EMBEDDED_COMMAND_RECEIPT_LIMIT receipts: existing command ids remain
+   * replayable at the limit, while new ids fail before mutation.
    */
   private readonly commands = new Map<
     string,
@@ -206,7 +225,8 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
     const subjectKey = this.subjectKey(subject);
     const command = materializeNativePatchCommand(input);
     const commandDigest = command.commandDigest;
-    const prior = this.commands.get(subjectKey)?.get(input.commandId);
+    const receipts = this.commands.get(subjectKey);
+    const prior = receipts?.get(input.commandId);
     if (prior) {
       return prior.digest === commandDigest
         ? { status: "already_applied", state: prior.state }
@@ -215,6 +235,11 @@ export class EmbeddedInMemoryAgentConfigurationMutationAdapter
             conflict: "command_conflict",
             currentRevision,
           };
+    }
+    if ((receipts?.size ?? 0) >= EMBEDDED_COMMAND_RECEIPT_LIMIT) {
+      throw new AgentConfigurationMutationReceiptLimitExceededError(
+        input.agentId
+      );
     }
     if (input.expectedConfigurationRevision !== currentRevision) {
       return {
