@@ -2,7 +2,6 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:te
 import { createPostgresAgentConfigStore } from "../../lobu/stores/postgres-stores.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
-import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import { UserAgentsStore } from "../auth/user-agents-store.js";
 import { createAgentRoutes } from "../routes/public/agents.js";
 import { setAuthProvider } from "../routes/public/settings-auth.js";
@@ -16,7 +15,6 @@ const ORG_ID = "test-org-agent-routes";
 
 describe("agent routes", () => {
   let agentMetadataStore: AgentMetadataStore;
-  let agentSettingsStore: AgentSettingsStore;
   let userAgentsStore: UserAgentsStore;
 
   beforeAll(async () => {
@@ -27,7 +25,6 @@ describe("agent routes", () => {
     await resetTestDatabase();
     const configStore = createPostgresAgentConfigStore();
     agentMetadataStore = new AgentMetadataStore(configStore);
-    agentSettingsStore = new AgentSettingsStore(configStore);
     userAgentsStore = new UserAgentsStore();
 
     await orgContext.run({ organizationId: ORG_ID }, async () => {
@@ -56,7 +53,6 @@ describe("agent routes", () => {
     const app = createAgentRoutes({
       userAgentsStore,
       agentMetadataStore,
-      agentSettingsStore,
       channelBindingService: {
         async getBinding() {
           return null;

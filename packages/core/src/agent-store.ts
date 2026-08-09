@@ -187,6 +187,23 @@ export interface AgentConfigStore {
 }
 
 /**
+ * Gateway-facing read/metadata surface. Persistent gateway services may read
+ * agent settings and manage metadata, but configuration mutations are routed
+ * through the server's revisioned configuration authority.
+ */
+export type AgentConfigReadMetadataStore = Pick<
+  AgentConfigStore,
+  | "getSettings"
+  | "hasSettings"
+  | "getMetadata"
+  | "saveMetadata"
+  | "updateMetadata"
+  | "deleteMetadata"
+  | "hasAgent"
+  | "listAgents"
+>;
+
+/**
  * Platform wiring storage.
  * Connections (Telegram, Slack, etc.) + channel bindings.
  */

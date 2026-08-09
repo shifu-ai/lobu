@@ -19,6 +19,7 @@ describe("ProviderCatalogService.findProviderForModel — prefix routing", () =>
   const catalog = new ProviderCatalogService(
     {} as never,
     {} as never,
+    {} as never,
     {} as never
   );
 

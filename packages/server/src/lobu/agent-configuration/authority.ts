@@ -47,6 +47,10 @@ const DECIMAL_REVISION_PATTERN = /^(0|[1-9][0-9]*)$/;
 export interface AgentConfigurationAuthority {
   bootstrap(input: ApplyBootstrapConfigurationInput): Promise<AgentConfigurationBootstrapResult>;
   apply(input: NativePatchCommandInput): Promise<AgentConfigurationMutationResult>;
+  readAppliedState(input: {
+    organizationId: string;
+    agentId: string;
+  }): Promise<AppliedAgentConfigurationState | null>;
   enrollToolboxManaged(
     input: EnrollToolboxManagedInput,
   ): Promise<AgentConfigurationEnrollmentResult>;
@@ -165,6 +169,49 @@ export function createAgentConfigurationAuthority(
     apply(input) {
       const command = materializeNativePatchCommand(input);
       return (sql ?? getDb()).begin((tx) => applyNativePatchInTransaction(tx, command));
+    },
+    readAppliedState(input) {
+      return (sql ?? getDb()).begin(async (tx) => {
+        const agents = await tx`
+          SELECT id FROM agents
+          WHERE organization_id=${input.organizationId} AND id=${input.agentId}
+          FOR SHARE
+        `;
+        if (!agents[0]) return null;
+        const controls = await tx<{
+          management_mode: 'native' | 'toolbox_managed';
+          configuration_revision: string;
+          last_mutation_kind: AppliedAgentConfigurationState['lastMutation']['kind'] | null;
+          last_command_id: string | null;
+          last_command_digest: Sha256Digest | null;
+        }>`
+          SELECT management_mode, configuration_revision::text AS configuration_revision,
+                 last_mutation_kind, last_command_id, last_command_digest
+          FROM agent_configuration_controls
+          WHERE organization_id=${input.organizationId} AND agent_id=${input.agentId}
+        `;
+        const control = controls[0];
+        if (
+          !control ||
+          !control.last_mutation_kind ||
+          !control.last_command_id ||
+          !control.last_command_digest
+        ) {
+          return null;
+        }
+        return {
+          organizationId: input.organizationId,
+          agentId: input.agentId,
+          managementMode: control.management_mode,
+          configurationRevision: String(control.configuration_revision),
+          settingsDigest: await readAgentConfigurationSettingsDigest(tx, input),
+          lastMutation: {
+            kind: control.last_mutation_kind,
+            commandId: control.last_command_id,
+            commandDigest: control.last_command_digest,
+          },
+        };
+      });
     },
     enrollToolboxManaged(input) {
       const command = materializeManagedEnrollmentCommand(input);

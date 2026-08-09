@@ -920,6 +920,32 @@ describe('AgentConfigurationAuthority', () => {
     ]);
   });
 
+  test('reads the applied state for the exact organization and agent subject', async () => {
+    const authority = createAgentConfigurationAuthority();
+    const result = await authority.apply({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      commandId: 'native-read-applied-state',
+      expectedConfigurationRevision: '0',
+      actor: { kind: 'provider_catalog' },
+      patch: { installedProviders: [] },
+    });
+    if (!('state' in result)) throw new Error('Expected applied state');
+
+    expect(
+      await authority.readAppliedState({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+      })
+    ).toEqual(result.state);
+    expect(
+      await authority.readAppliedState({
+        organizationId: 'another-organization',
+        agentId: AGENT_ID,
+      })
+    ).toBeNull();
+  });
+
   test('replays the original result and returns conflict for command id reuse', async () => {
     const authority = createAgentConfigurationAuthority();
     const command = {

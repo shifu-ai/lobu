@@ -1,16 +1,13 @@
 import {
-  type AgentConfigStore,
+  type AgentConfigReadMetadataStore,
   type AgentMetadata,
   type AgentSettings,
   type AuthProfile,
-  createLogger,
 } from "@lobu/core";
 import type { DeclaredAgentRegistry } from "../../services/declared-agent-registry.js";
 
 // Re-export so existing imports from this module keep working.
 export type { AgentSettings };
-
-const logger = createLogger("agent-settings-store");
 
 /**
  * Shared in-memory ephemeral auth profile registry. Lives on
@@ -38,7 +35,7 @@ export class EphemeralAuthProfileRegistry {
 }
 
 /**
- * Per-agent settings reader/writer.
+ * Per-agent settings reader.
  *
  * Thin overlay over the host's `AgentConfigStore` — the latter owns all
  * Postgres I/O. This class adds two pieces of behaviour the storage layer
@@ -54,7 +51,7 @@ export class AgentSettingsStore {
   private readonly ephemeralAuthProfiles = new EphemeralAuthProfileRegistry();
   private declaredAgents?: DeclaredAgentRegistry;
 
-  constructor(private readonly configStore: AgentConfigStore) {}
+  constructor(private readonly configStore: AgentConfigReadMetadataStore) {}
 
   getEphemeralAuthProfiles(): EphemeralAuthProfileRegistry {
     return this.ephemeralAuthProfiles;
@@ -75,30 +72,6 @@ export class AgentSettingsStore {
       return declared.settings as AgentSettings;
     }
     return this.configStore.getSettings(agentId);
-  }
-
-  async saveSettings(
-    agentId: string,
-    settings: Omit<AgentSettings, "updatedAt">
-  ): Promise<void> {
-    await this.configStore.saveSettings(agentId, {
-      ...settings,
-      updatedAt: Date.now(),
-    });
-    logger.info(`Saved settings for agent ${agentId}`);
-  }
-
-  async updateSettings(
-    agentId: string,
-    updates: Partial<Omit<AgentSettings, "updatedAt">>
-  ): Promise<void> {
-    await this.configStore.updateSettings(agentId, updates);
-  }
-
-  async deleteSettings(agentId: string): Promise<void> {
-    this.ephemeralAuthProfiles.delete(agentId);
-    await this.configStore.deleteSettings(agentId);
-    logger.info(`Deleted settings for agent ${agentId}`);
   }
 
   async hasSettings(agentId: string): Promise<boolean> {

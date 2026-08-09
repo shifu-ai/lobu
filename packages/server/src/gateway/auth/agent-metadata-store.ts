@@ -1,5 +1,5 @@
 import {
-  type AgentConfigStore,
+  type AgentConfigReadMetadataStore,
   type AgentMetadata,
   createLogger,
 } from "@lobu/core";
@@ -18,7 +18,7 @@ const logger = createLogger("agent-metadata-store");
  * `AgentMetadata` object instead.
  */
 export class AgentMetadataStore {
-  constructor(private readonly configStore: AgentConfigStore) {}
+  constructor(private readonly configStore: AgentConfigReadMetadataStore) {}
 
   /**
    * Create a new agent with metadata. Throws if an agent with the same id

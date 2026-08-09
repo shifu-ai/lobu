@@ -11,10 +11,6 @@
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
 import type { AgentMetadataStore } from "../../auth/agent-metadata-store.js";
-import type {
-  AgentSettings,
-  AgentSettingsStore,
-} from "../../auth/settings/agent-settings-store.js";
 import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
 import type { UserAgentsStore } from "../../auth/user-agents-store.js";
 import type { ChannelBindingService } from "../../channels/binding-service.js";
@@ -35,7 +31,6 @@ const MAX_AGENTS_PER_USER = parseInt(
 interface AgentRoutesConfig {
   userAgentsStore: UserAgentsStore;
   agentMetadataStore: AgentMetadataStore;
-  agentSettingsStore: AgentSettingsStore;
   channelBindingService: ChannelBindingService;
 }
 
@@ -127,10 +122,6 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
         lookupUserId,
         { description: body.description }
       );
-
-      // Create empty settings row.
-      const defaultSettings: Omit<AgentSettings, "updatedAt"> = {};
-      await config.agentSettingsStore.saveSettings(agentId, defaultSettings);
 
       // Associate with user
       await config.userAgentsStore.addAgent(
@@ -286,10 +277,7 @@ export function createAgentRoutes(config: AgentRoutesConfig): Hono {
       const unboundCount =
         await config.channelBindingService.deleteAllBindings(agentId);
 
-      // Delete settings
-      await config.agentSettingsStore.deleteSettings(agentId);
-
-      // Delete metadata
+      // Delete metadata; dependent settings/configuration rows cascade.
       await config.agentMetadataStore.deleteAgent(agentId);
 
       // Remove from user's list

@@ -1,107 +1,90 @@
-import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { createPostgresAgentConfigStore } from "../../lobu/stores/postgres-stores.js";
-import { orgContext } from "../../lobu/stores/org-context.js";
+import { describe, expect, test } from "bun:test";
+import type { AgentSettings } from "@lobu/core";
 import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
-import {
-  ensureDbForGatewayTests,
-  resetTestDatabase,
-  seedAgentRow,
-} from "./helpers/db-setup.js";
 
-const ORG_ID = "test-org-agent-settings";
+function persistentReader(settings: AgentSettings | null) {
+  const calls: string[] = [];
+  return {
+    calls,
+    store: {
+      async getSettings(agentId: string) {
+        calls.push(`getSettings:${agentId}`);
+        return settings;
+      },
+      async hasSettings(agentId: string) {
+        calls.push(`hasSettings:${agentId}`);
+        return settings !== null;
+      },
+      async getMetadata(agentId: string) {
+        calls.push(`getMetadata:${agentId}`);
+        return null;
+      },
+      async saveMetadata() {},
+      async updateMetadata() {},
+      async deleteMetadata() {},
+      async hasAgent() {
+        return false;
+      },
+      async listAgents() {
+        return [];
+      },
+      async saveSettings() {
+        calls.push("raw-save");
+      },
+      async updateSettings() {
+        calls.push("raw-update");
+      },
+    },
+  };
+}
 
-describe("AgentSettingsStore", () => {
-  let store: AgentSettingsStore;
+describe("AgentSettingsStore persistent reader boundary", () => {
+  test("declared agent reads bypass the persistent reader", async () => {
+    const reader = persistentReader(null);
+    const store = new AgentSettingsStore(reader.store);
+    const declared = { model: "declared/model", updatedAt: 11 } as AgentSettings;
+    store.setDeclaredAgents({
+      get(agentId: string) {
+        return agentId === "declared-agent" ? { settings: declared } : undefined;
+      },
+    } as never);
 
-  beforeAll(async () => {
-    await ensureDbForGatewayTests();
+    expect(await store.getSettings("declared-agent")).toEqual(declared);
+    expect(await store.hasSettings("declared-agent")).toBe(true);
+    expect(await store.getMetadata("declared-agent")).toBeNull();
+    expect(reader.calls).toEqual([]);
   });
 
-  beforeEach(async () => {
-    await resetTestDatabase();
-    store = new AgentSettingsStore(createPostgresAgentConfigStore());
+  test("persistent reads are delegated without exposing raw settings writers", async () => {
+    const settings = { model: "persistent/model", updatedAt: 12 } as AgentSettings;
+    const reader = persistentReader(settings);
+    const store = new AgentSettingsStore(reader.store);
+
+    expect(await store.getSettings("agent-1")).toEqual(settings);
+    expect(await store.hasSettings("agent-1")).toBe(true);
+    expect(await store.getMetadata("agent-1")).toBeNull();
+    expect(reader.calls).toEqual([
+      "getSettings:agent-1",
+      "getSettings:agent-1",
+      "getMetadata:agent-1",
+    ]);
+    expect("saveSettings" in store).toBe(false);
+    expect("updateSettings" in store).toBe(false);
+    expect("deleteSettings" in store).toBe(false);
+    expect(reader.calls).not.toContain("raw-save");
+    expect(reader.calls).not.toContain("raw-update");
   });
 
-  function withOrg<T>(fn: () => Promise<T>): Promise<T> {
-    return orgContext.run({ organizationId: ORG_ID }, fn);
-  }
+  test("ephemeral auth profiles remain shared and deletable", () => {
+    const store = new AgentSettingsStore(persistentReader(null).store);
+    const registry = store.getEphemeralAuthProfiles();
+    const profiles = [
+      { providerId: "claude", type: "api-key", key: "placeholder" },
+    ] as never;
 
-  describe("CRUD basics", () => {
-    test("saveSettings stores and getSettings retrieves", async () => {
-      await withOrg(async () => {
-        await seedAgentRow("agent-1", { organizationId: ORG_ID });
-        await store.saveSettings("agent-1", { model: "claude-sonnet-4" });
-        const result = await store.getSettings("agent-1");
-        expect(result).not.toBeNull();
-        expect(result!.model).toBe("claude-sonnet-4");
-        expect(result!.updatedAt).toBeGreaterThan(0);
-      });
-    });
-
-    test("getSettings returns null for non-existent agent", async () => {
-      await withOrg(async () => {
-        const result = await store.getSettings("missing");
-        expect(result).toBeNull();
-      });
-    });
-
-    test("updateSettings merges with existing", async () => {
-      await withOrg(async () => {
-        await seedAgentRow("agent-1", { organizationId: ORG_ID });
-        await store.saveSettings("agent-1", { model: "claude-sonnet-4" });
-        await store.updateSettings("agent-1", { soulMd: "Be helpful" });
-        const result = await store.getSettings("agent-1");
-        expect(result!.model).toBe("claude-sonnet-4");
-        expect(result!.soulMd).toBe("Be helpful");
-      });
-    });
-
-    test("deleteSettings removes settings", async () => {
-      await withOrg(async () => {
-        await seedAgentRow("agent-1", { organizationId: ORG_ID });
-        await store.saveSettings("agent-1", { model: "claude-sonnet-4" });
-        await store.deleteSettings("agent-1");
-        const result = await store.getSettings("agent-1");
-        // After deleteSettings the row still exists but settings columns are
-        // reset; getSettings returns a default-shaped object with no model.
-        expect(result).not.toBeNull();
-        expect(result!.model).toBeUndefined();
-      });
-    });
-
-    test("hasSettings tracks row existence", async () => {
-      await withOrg(async () => {
-        await seedAgentRow("agent-1", { organizationId: ORG_ID });
-        expect(await store.hasSettings("agent-1")).toBe(true);
-      });
-    });
+    registry.set("agent-1", profiles);
+    expect(registry.get("agent-1")).toBe(profiles);
+    registry.delete("agent-1");
+    expect(registry.get("agent-1")).toBeUndefined();
   });
-
-  describe("partial update merging", () => {
-    test("merges new fields with existing", async () => {
-      await withOrg(async () => {
-        await seedAgentRow("agent-1", { organizationId: ORG_ID });
-        await store.saveSettings("agent-1", {
-          model: "claude-sonnet-4",
-          soulMd: "Original",
-        });
-        await store.updateSettings("agent-1", { userMd: "New field" });
-        const result = await store.getSettings("agent-1");
-        expect(result!.model).toBe("claude-sonnet-4");
-        expect(result!.soulMd).toBe("Original");
-        expect(result!.userMd).toBe("New field");
-      });
-    });
-
-    test("overwrites overlapping fields", async () => {
-      await withOrg(async () => {
-        await seedAgentRow("agent-1", { organizationId: ORG_ID });
-        await store.saveSettings("agent-1", { model: "claude-sonnet-4" });
-        await store.updateSettings("agent-1", { model: "claude-opus-4" });
-        const result = await store.getSettings("agent-1");
-        expect(result!.model).toBe("claude-opus-4");
-      });
-    });
-  });
-
 });

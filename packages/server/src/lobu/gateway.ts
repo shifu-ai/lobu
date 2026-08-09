@@ -14,6 +14,7 @@ import { Hono as HonoApp } from 'hono';
 import { createAuth } from '../auth';
 import { authenticatePat, extractPatBearer } from '../auth/pat-auth';
 import { ApiPlatform } from '../gateway/api/platform';
+import { createAgentConfigurationMutationPort } from '../gateway/auth/agent-configuration-mutation-port';
 import { createGatewayApp } from '../gateway/cli/gateway';
 import { ChatInstanceManager } from '../gateway/connections/chat-instance-manager';
 import { ChatResponseBridge } from '../gateway/connections/chat-response-bridge';
@@ -37,6 +38,8 @@ import { createLocalEgoWebSocketRoute } from '../gateway/browser/local-ego-webso
 import { createCourseAwareWakeRoutes } from './course-aware-wake-routes';
 import { resolveWakeThreadId } from '../scheduled/wake-target';
 import { PostgresSecretStore } from './stores/postgres-secret-store';
+import { createAgentConfigurationAuthority } from './agent-configuration';
+import { createAgentReleaseService } from './agent-release-service';
 import {
   createPostgresAgentAccessStore,
   createPostgresAgentConfigStore,
@@ -346,12 +349,18 @@ export async function initLobuGateway(): Promise<Hono | null> {
     const secretStore = new SecretStoreRegistry(postgresSecretStore, {
       secret: postgresSecretStore,
     });
+    const agentConfigurationAuthority = createAgentConfigurationAuthority(undefined, {
+      agentReleaseService: createAgentReleaseService({}),
+    });
 
     gateway = new Gateway(gatewayConfig, {
       configStore,
       connectionStore,
       accessStore,
       secretStore,
+      agentConfigurationMutationPort: createAgentConfigurationMutationPort(
+        agentConfigurationAuthority
+      ),
     });
 
     // Register API platform
@@ -470,6 +479,7 @@ export async function initLobuGateway(): Promise<Hono | null> {
         mcpConfigService: coreServices.getMcpConfigService(),
         secretStore: coreServices.getSecretStore(),
         publicGatewayUrl: coreServices.getPublicGatewayUrl(),
+        agentConfigurationAuthority,
       })
     );
     lobuApp.route('/api/browser/local-ego', createLocalEgoWebSocketRoute());

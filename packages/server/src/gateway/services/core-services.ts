@@ -12,6 +12,10 @@ import {
 } from "@lobu/core";
 import { registerBuiltinGuardrails } from "../guardrails/builtins.js";
 import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
+import {
+  type AgentConfigurationMutationPort,
+  EmbeddedInMemoryAgentConfigurationMutationAdapter,
+} from "../auth/agent-configuration-mutation-port.js";
 import { ApiKeyProviderModule } from "../auth/api-key-provider-module.js";
 import { BedrockProviderModule } from "../auth/bedrock/provider-module.js";
 import { ChatGPTOAuthModule } from "../auth/chatgpt/chatgpt-oauth-module.js";
@@ -150,6 +154,7 @@ export class CoreServices {
   private artifactStore?: ArtifactStore;
   private userAgentsStore?: UserAgentsStore;
   private agentMetadataStore?: AgentMetadataStore;
+  private agentConfigurationMutationPort?: AgentConfigurationMutationPort;
 
   // ============================================================================
   // External OAuth
@@ -193,6 +198,7 @@ export class CoreServices {
     providerRegistry?: ProviderRegistryEntry[];
     secretStore?: SecretStoreRegistry;
     providerCredentialResolver?: RuntimeProviderCredentialResolver;
+    agentConfigurationMutationPort?: AgentConfigurationMutationPort;
     stateAdapter?: import("chat").StateAdapter;
   };
 
@@ -205,6 +211,7 @@ export class CoreServices {
       providerRegistry?: ProviderRegistryEntry[];
       secretStore?: SecretStoreRegistry;
       providerCredentialResolver?: RuntimeProviderCredentialResolver;
+      agentConfigurationMutationPort?: AgentConfigurationMutationPort;
       stateAdapter?: import("chat").StateAdapter;
     }
   ) {
@@ -409,6 +416,16 @@ export class CoreServices {
 
     this.agentSettingsStore = new AgentSettingsStore(this.configStore);
     this.agentMetadataStore = new AgentMetadataStore(this.configStore);
+    this.agentConfigurationMutationPort =
+      this.options?.agentConfigurationMutationPort ??
+      new EmbeddedInMemoryAgentConfigurationMutationAdapter(this.configStore);
+    if (this.options?.agentConfigurationMutationPort) {
+      logger.debug("Using injected persistent agent configuration authority");
+    } else {
+      logger.debug(
+        "Using explicit embedded in-memory agent configuration mutation adapter"
+      );
+    }
     logger.debug(
       "Agent settings, channel binding, user agents & metadata stores initialized"
     );
@@ -664,7 +681,8 @@ export class CoreServices {
     this.providerCatalogService = new ProviderCatalogService(
       this.agentSettingsStore,
       this.authProfilesManager,
-      this.declaredAgentRegistry
+      this.declaredAgentRegistry,
+      this.agentConfigurationMutationPort!
     );
     logger.debug("Provider catalog service initialized");
 
