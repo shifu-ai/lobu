@@ -12,7 +12,7 @@ import { type DbClient, getDb } from "../db/client.js";
 import type { RuntimeCapabilitySnapshot } from "./runtime-capability-snapshot-contract.js";
 import {
 	applyLegacyManagedSettingsInTransaction,
-	replaceAgentConfigurationSettingsInTransaction,
+	replaceReleaseOwnedAgentConfigurationSettingsInTransaction,
 	syncProvisioningGrantsInTransaction,
 } from "./agent-configuration/postgres-repository.js";
 import {
@@ -458,6 +458,7 @@ export function createAgentReleaseService(options: {
 			organizationId: string;
 			agentId: string;
 			prepared: PreparedAgentReleaseApply;
+			configurationRevision: string;
 		},
 	): Promise<AgentReleaseApplyResult> {
 		return applyInTransaction(tx, {
@@ -466,6 +467,7 @@ export function createAgentReleaseService(options: {
 			command: input.prepared.command,
 			publication: input.prepared.publication,
 			feedDigest: input.prepared.feedDigest,
+			configurationRevision: input.configurationRevision,
 			transactionHooks: options.transactionHooks,
 		});
 	}
@@ -583,6 +585,7 @@ async function applyInTransaction(
 		command: AgentReleaseApplyCommand;
 		publication: FeedPublication;
 		feedDigest: string;
+		configurationRevision: string;
 		transactionHooks?: {
 			afterAgentLock?: () => Promise<void>;
 		};
@@ -928,12 +931,14 @@ async function applyManagedSettings(
 	organizationId: string,
 	agentId: string,
 	settings: ManagedSettings,
+	expectedConfigurationRevision: string,
 ): Promise<AgentSettingsRow> {
 	const updated = await applyLegacyManagedSettingsInTransaction(
 		tx,
 		organizationId,
 		agentId,
 		settings,
+		expectedConfigurationRevision,
 	);
 	if (!updated) {
 		throw releaseError(
@@ -951,6 +956,7 @@ async function applyCommandSettings(
 		organizationId: string;
 		agentId: string;
 		command: AgentReleaseApplyCommand;
+		configurationRevision: string;
 	},
 ): Promise<AgentSettingsRow> {
 	if (!input.command.settings) {
@@ -959,13 +965,15 @@ async function applyCommandSettings(
 			input.organizationId,
 			input.agentId,
 			input.command.signedManifest.managedSettings,
+			input.configurationRevision,
 		);
 	}
-	await replaceAgentConfigurationSettingsInTransaction(
+	await replaceReleaseOwnedAgentConfigurationSettingsInTransaction(
 		tx,
 		input.organizationId,
 		input.agentId,
 		input.command.settings as Omit<AgentSettings, "updatedAt">,
+		input.configurationRevision,
 	);
 	await syncProvisioningGrantsInTransaction(
 		tx,

@@ -153,8 +153,9 @@ export async function replaceAgentConfigurationSettingsInTransaction(
   organizationId: string,
   agentId: string,
   settings: Omit<AgentSettings, 'updatedAt'>,
+  expectedConfigurationRevision: string,
 ): Promise<void> {
-  await tx`
+  const updated = await tx`
     UPDATE agents SET
       model = ${settings.model ?? null},
       model_selection = ${tx.json(settings.modelSelection ?? {})},
@@ -175,7 +176,63 @@ export async function replaceAgentConfigurationSettingsInTransaction(
       guardrails = ${tx.json(settings.guardrails ?? [])},
       updated_at = NOW()
     WHERE organization_id = ${organizationId} AND id = ${agentId}
+      AND EXISTS (
+        SELECT 1 FROM agent_configuration_controls control
+        WHERE control.organization_id = ${organizationId}
+          AND control.agent_id = ${agentId}
+          AND control.configuration_revision = ${expectedConfigurationRevision}::bigint
+      )
+    RETURNING 1
   `;
+  if (updated.length === 0) {
+    throw new AgentConfigurationError(
+      'agent_configuration_revision_mismatch',
+      expectedConfigurationRevision,
+    );
+  }
+}
+
+/** Replace only release-owned fields, preserving Lobu-owned model and verboseLogging. */
+export async function replaceReleaseOwnedAgentConfigurationSettingsInTransaction(
+  tx: DbClient,
+  organizationId: string,
+  agentId: string,
+  settings: Omit<AgentSettings, 'updatedAt'>,
+  expectedConfigurationRevision: string,
+): Promise<void> {
+  const updated = await tx`
+    UPDATE agents SET
+      model_selection = ${tx.json(settings.modelSelection ?? {})},
+      provider_model_preferences = ${tx.json(settings.providerModelPreferences ?? {})},
+      network_config = ${tx.json(settings.networkConfig ?? {})},
+      egress_config = ${tx.json(settings.egressConfig ?? {})},
+      nix_config = ${tx.json(settings.nixConfig ?? {})},
+      mcp_servers = ${tx.json(settings.mcpServers ?? {})},
+      soul_md = ${settings.soulMd ?? ''},
+      user_md = ${settings.userMd ?? ''},
+      identity_md = ${settings.identityMd ?? ''},
+      skills_config = ${tx.json(settings.skillsConfig ?? { skills: [] })},
+      tools_config = ${tx.json(settings.toolsConfig ?? {})},
+      plugins_config = ${tx.json(settings.pluginsConfig ?? {})},
+      installed_providers = ${tx.json(settings.installedProviders ?? [])},
+      pre_approved_tools = ${tx.json(settings.preApprovedTools ?? [])},
+      guardrails = ${tx.json(settings.guardrails ?? [])},
+      updated_at = NOW()
+    WHERE organization_id = ${organizationId} AND id = ${agentId}
+      AND EXISTS (
+        SELECT 1 FROM agent_configuration_controls control
+        WHERE control.organization_id = ${organizationId}
+          AND control.agent_id = ${agentId}
+          AND control.configuration_revision = ${expectedConfigurationRevision}::bigint
+      )
+    RETURNING 1
+  `;
+  if (updated.length === 0) {
+    throw new AgentConfigurationError(
+      'agent_configuration_revision_mismatch',
+      expectedConfigurationRevision,
+    );
+  }
 }
 
 export async function applyLegacyManagedSettingsInTransaction(
@@ -183,6 +240,7 @@ export async function applyLegacyManagedSettingsInTransaction(
   organizationId: string,
   agentId: string,
   settings: Partial<LegacyManagedSettingsProjection>,
+  expectedConfigurationRevision: string,
 ): Promise<LegacyManagedSettingsRow | null> {
   const updatedRows = await tx<LegacyManagedSettingsRow>`
     UPDATE agents SET
@@ -210,10 +268,22 @@ export async function applyLegacyManagedSettingsInTransaction(
       END,
       updated_at = NOW()
     WHERE organization_id = ${organizationId} AND id = ${agentId}
+      AND EXISTS (
+        SELECT 1 FROM agent_configuration_controls control
+        WHERE control.organization_id = ${organizationId}
+          AND control.agent_id = ${agentId}
+          AND control.configuration_revision = ${expectedConfigurationRevision}::bigint
+      )
     RETURNING owner_user_id, identity_md, soul_md, user_md,
               model_selection, tools_config
   `;
-  return updatedRows[0] ?? null;
+  if (!updatedRows[0]) {
+    throw new AgentConfigurationError(
+      'agent_configuration_revision_mismatch',
+      expectedConfigurationRevision,
+    );
+  }
+  return updatedRows[0];
 }
 
 export async function syncProvisioningGrantsInTransaction(
@@ -522,7 +592,7 @@ export async function enrollToolboxManagedInTransaction(
       currentRevision,
     };
   }
-  const settingsDigest = receipt.settings_hash as Sha256Digest;
+  const settingsDigest = await readAgentConfigurationSettingsDigest(tx, command);
   const commandRows = await tx<{ applied_at: Date | string }>`
     INSERT INTO agent_configuration_commands (
       organization_id, agent_id, command_id, command_digest, mutation_kind,
@@ -653,6 +723,16 @@ export async function applyNativePatchInTransaction(
     };
   }
 
+  if (
+    control.management_mode === 'toolbox_managed' &&
+    command.expectedConfigurationRevision === null
+  ) {
+    throw new AgentConfigurationError(
+      'agent_configuration_revision_required',
+      currentRevision,
+    );
+  }
+
   const expectedConfigurationRevision = command.expectedConfigurationRevision ?? currentRevision;
   if (expectedConfigurationRevision !== currentRevision) {
     return {
@@ -693,7 +773,7 @@ export async function applyNativePatchInTransaction(
   const resultingRevision = changed ? (BigInt(currentRevision) + 1n).toString() : currentRevision;
   const resultStatus = changed ? 'applied' : 'no_change';
   if (changed) {
-    await tx`
+    const updatedAgents = await tx`
       UPDATE agents
       SET model = CASE WHEN ${hasOwn(command.patch, 'model')}
             THEN ${command.patch.model ?? null} ELSE model END,
@@ -731,11 +811,25 @@ export async function applyNativePatchInTransaction(
             THEN ${tx.json(command.patch.guardrails ?? [])} ELSE guardrails END,
           updated_at = NOW()
       WHERE organization_id = ${command.organizationId} AND id = ${command.agentId}
+        AND EXISTS (
+          SELECT 1 FROM agent_configuration_controls control
+          WHERE control.organization_id = ${command.organizationId}
+            AND control.agent_id = ${command.agentId}
+            AND control.configuration_revision = ${expectedConfigurationRevision}::bigint
+        )
+      RETURNING 1
     `;
+    if (updatedAgents.length === 0) {
+      return {
+        status: 'conflict',
+        conflict: 'revision_mismatch',
+        currentRevision,
+      };
+    }
   }
 
   const resultingSettingsDigest = sha256Canonical(resultingSettings);
-  await tx`
+  const updatedControls = await tx`
     UPDATE agent_configuration_controls
     SET configuration_revision = ${resultingRevision}::bigint,
         last_mutation_kind = 'native_patch',
@@ -743,7 +837,15 @@ export async function applyNativePatchInTransaction(
         last_command_digest = ${command.commandDigest},
         updated_at = NOW()
     WHERE organization_id = ${command.organizationId} AND agent_id = ${command.agentId}
+      AND configuration_revision = ${expectedConfigurationRevision}::bigint
+    RETURNING 1
   `;
+  if (updatedControls.length === 0) {
+    throw new AgentConfigurationError(
+      'agent_configuration_revision_mismatch',
+      currentRevision,
+    );
+  }
   const commandRows = await tx<{ applied_at: Date | string }>`
     INSERT INTO agent_configuration_commands (
       organization_id, agent_id, command_id, command_digest, mutation_kind,
@@ -875,7 +977,7 @@ export async function recordManagedReleaseConfigurationMutation(
   },
 ): Promise<AppliedAgentConfigurationState> {
   const resultingRevision = (BigInt(input.currentRevision) + 1n).toString();
-  await tx`
+  const updated = await tx`
     UPDATE agent_configuration_controls
     SET configuration_revision = ${resultingRevision}::bigint,
         last_mutation_kind = 'managed_release',
@@ -883,7 +985,15 @@ export async function recordManagedReleaseConfigurationMutation(
         last_command_digest = ${input.commandDigest},
         updated_at = NOW()
     WHERE organization_id = ${input.organizationId} AND agent_id = ${input.agentId}
+      AND configuration_revision = ${input.currentRevision}::bigint
+    RETURNING 1
   `;
+  if (updated.length === 0) {
+    throw new AgentConfigurationError(
+      'agent_configuration_revision_mismatch',
+      input.currentRevision,
+    );
+  }
   const commandRows = await tx<{ applied_at: Date | string }>`
     INSERT INTO agent_configuration_commands (
       organization_id, agent_id, command_id, command_digest, mutation_kind,
@@ -921,7 +1031,7 @@ export async function recordBootstrapConfigurationMutation(
   },
 ): Promise<AppliedAgentConfigurationState> {
   const resultingRevision = (BigInt(input.currentRevision) + 1n).toString();
-  await tx`
+  const updated = await tx`
     UPDATE agent_configuration_controls
     SET configuration_revision = ${resultingRevision}::bigint,
         last_mutation_kind = 'bootstrap',
@@ -929,7 +1039,15 @@ export async function recordBootstrapConfigurationMutation(
         last_command_digest = ${input.commandDigest},
         updated_at = NOW()
     WHERE organization_id = ${input.organizationId} AND agent_id = ${input.agentId}
+      AND configuration_revision = ${input.currentRevision}::bigint
+    RETURNING 1
   `;
+  if (updated.length === 0) {
+    throw new AgentConfigurationError(
+      'agent_configuration_revision_mismatch',
+      input.currentRevision,
+    );
+  }
   const commandRows = await tx<{ applied_at: Date | string }>`
     INSERT INTO agent_configuration_commands (
       organization_id, agent_id, command_id, command_digest, mutation_kind,

@@ -129,7 +129,11 @@ function logConfigurationMutation(input: {
   commandId: string;
   changedFieldNames: string[];
 }): void {
-  logger.info(input, 'agent configuration mutation');
+  const { commandId, ...safeInput } = input;
+  logger.info(
+    { ...safeInput, commandIdDigest: sha256Canonical(commandId) },
+    'agent configuration mutation'
+  );
 }
 
 function materializeManagedEnrollmentCommand(
@@ -245,6 +249,16 @@ export function createAgentConfigurationAuthority(
           commandId: input.commandId,
           changedFieldNames,
         });
+        if (
+          error instanceof AgentConfigurationError &&
+          error.code === 'agent_configuration_revision_mismatch'
+        ) {
+          return {
+            status: 'conflict',
+            conflict: 'revision_mismatch',
+            currentRevision: error.currentRevision ?? input.expectedConfigurationRevision ?? '0',
+          };
+        }
         throw error;
       }
     },
@@ -416,6 +430,7 @@ export function createAgentConfigurationAuthority(
           organizationId: input.organizationId,
           agentId: input.agentId,
           prepared,
+          configurationRevision: control.configurationRevision,
         });
         const settingsDigest = await readAgentConfigurationSettingsDigest(tx, input);
         const mutatesConfiguration = !releaseResult.idempotent || releaseResult.repaired;
@@ -561,6 +576,8 @@ function materializeManagedReleaseCommand(
     agentId: input.agentId,
     releaseId: prepared.command.signedManifest.releaseId,
     releaseSequence: prepared.command.signedManifest.releaseSequence,
+    expectedConfigurationRevision:
+      prepared.command.expectedConfigurationRevision ?? null,
     publication: {
       kind: publicationKind,
       fromReleaseSequence: prepared.publication.fromReleaseSequence ?? null,

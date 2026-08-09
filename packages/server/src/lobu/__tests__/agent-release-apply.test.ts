@@ -792,6 +792,9 @@ describe("signed managed agent release apply", () => {
 	test("applies exact personal baseline settings and exposes the effective digest", async () => {
 		const app = await buildApp();
 		const request = personalBaselineApplyRequest();
+		const sql = await db();
+		await sql`UPDATE agents SET model='operator-owned-model', verbose_logging=true
+			WHERE organization_id=${ORG_ID} AND id=${AGENT_ID}`;
 
 		const response = await putApply(app, request);
 		expect(response.status).toBe(200);
@@ -803,6 +806,9 @@ describe("signed managed agent release apply", () => {
 			drifted: false,
 		});
 		expect(evidence).not.toHaveProperty("baselineOverride");
+		expect(await sql`SELECT model, verbose_logging FROM agents
+			WHERE organization_id=${ORG_ID} AND id=${AGENT_ID}`
+		).toEqual([{ model: "operator-owned-model", verbose_logging: true }]);
 
 		const settings = await app.request(
 			`/api/provisioning/agents/${AGENT_ID}/settings`,
@@ -1410,7 +1416,10 @@ describe("signed managed agent release apply", () => {
 
 	test("rejects a stale managed replay before it can repair live drift", async () => {
 		const app = await buildApp();
-		expect((await putApply(app, latestSignedApplyRequest())).status).toBe(200);
+		const initial = latestSignedApplyRequest();
+		initial.expectedConfigurationRevision = "0";
+		initial.commandDigest = commandDigest(initial);
+		expect((await putApply(app, initial)).status).toBe(200);
 		const sql = await db();
 		await sql`
 			UPDATE agent_configuration_controls
@@ -1444,7 +1453,10 @@ describe("signed managed agent release apply", () => {
 
 	test("allows a stale revision only for a proven no-drift exact replay", async () => {
 		const app = await buildApp();
-		expect((await putApply(app, latestSignedApplyRequest())).status).toBe(200);
+		const initial = latestSignedApplyRequest();
+		initial.expectedConfigurationRevision = "0";
+		initial.commandDigest = commandDigest(initial);
+		expect((await putApply(app, initial)).status).toBe(200);
 		const sql = await db();
 		await sql`
 			UPDATE agent_configuration_controls
@@ -1565,13 +1577,31 @@ describe("signed managed agent release apply", () => {
 			feedSequence: 2,
 			managedSettings: { identityMd: "two" },
 			expectedCurrentReleaseSequence: 1,
-			expectedConfigurationRevision: "1",
 		});
 		const response = await putApply(app, conflict);
 		expect(response.status).toBe(409);
 		await expect(response.json()).resolves.toMatchObject({
 			error: "agent_configuration_command_conflict",
 		});
+	});
+
+	test("recomputes managed command identity when the configuration precondition changes", async () => {
+		const app = await buildApp();
+		const first = latestSignedApplyRequest();
+		first.expectedConfigurationRevision = "0";
+		first.commandDigest = commandDigest(first);
+		expect((await putApply(app, first)).status).toBe(200);
+		await (await db())`UPDATE agents SET identity_md='repair under recomputed identity'
+			WHERE organization_id=${ORG_ID} AND id=${AGENT_ID}`;
+		const next = latestSignedApplyRequest();
+		next.expectedCurrentReleaseSequence = 1;
+		next.expectedConfigurationRevision = "1";
+		next.commandDigest = commandDigest(next);
+		expect((await putApply(app, next)).status).toBe(200);
+		const rows = await (await db())`SELECT command_id FROM agent_configuration_commands
+			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID} ORDER BY resulting_revision`;
+		expect(rows).toHaveLength(2);
+		expect(rows[0]?.command_id).not.toBe(rows[1]?.command_id);
 	});
 
 	test("reads release evidence and configuration control from one coherent snapshot", async () => {
@@ -1700,37 +1730,40 @@ describe("signed managed agent release apply", () => {
 		]);
 	});
 
-	test("rolls back release state when authority control persistence fails after settings mutation", async () => {
+	test("returns revision mismatch and rolls back when managed release control CAS affects zero rows", async () => {
 		const sql = await db();
 		await sql`
 			INSERT INTO agent_configuration_controls (organization_id, agent_id)
 			VALUES (${ORG_ID}, ${AGENT_ID})
 		`;
 		await sql.unsafe(`
-			CREATE OR REPLACE FUNCTION fail_managed_release_control_update_for_test()
+			CREATE OR REPLACE FUNCTION skip_managed_release_control_update_for_test()
 			RETURNS trigger LANGUAGE plpgsql AS $$
 			BEGIN
-				RAISE EXCEPTION 'injected managed release authority failure';
+				RETURN NULL;
 			END;
 			$$
 		`);
 		await sql.unsafe(`
-			CREATE TRIGGER fail_managed_release_control_update_for_test
+			CREATE TRIGGER skip_managed_release_control_update_for_test
 			BEFORE UPDATE ON agent_configuration_controls
-			FOR EACH ROW EXECUTE FUNCTION fail_managed_release_control_update_for_test()
+			FOR EACH ROW EXECUTE FUNCTION skip_managed_release_control_update_for_test()
 		`);
 		try {
 			const request = latestSignedApplyRequest();
 			request.expectedConfigurationRevision = "0";
 			request.commandDigest = commandDigest(request);
 			const response = await putApply(await buildApp(), request);
-			expect(response.status).toBe(500);
+			expect(response.status).toBe(409);
+			await expect(response.json()).resolves.toMatchObject({
+				error: "agent_configuration_revision_mismatch", currentRevision: "0",
+			});
 		} finally {
 			await sql.unsafe(
-				`DROP TRIGGER IF EXISTS fail_managed_release_control_update_for_test ON agent_configuration_controls`,
+				`DROP TRIGGER IF EXISTS skip_managed_release_control_update_for_test ON agent_configuration_controls`,
 			);
 			await sql.unsafe(
-				`DROP FUNCTION IF EXISTS fail_managed_release_control_update_for_test()`,
+				`DROP FUNCTION IF EXISTS skip_managed_release_control_update_for_test()`,
 			);
 		}
 

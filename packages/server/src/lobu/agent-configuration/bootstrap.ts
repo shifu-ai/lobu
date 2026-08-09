@@ -461,7 +461,8 @@ export function createAgentConfigurationBootstrap(
             tx,
             command.organizationId,
             command.agentId,
-            command.settings
+            command.settings,
+            control.configurationRevision,
           );
           if (command.fence) {
             await syncProvisioningGrantsInTransaction(
@@ -535,7 +536,8 @@ export function createAgentConfigurationBootstrap(
           tx,
           command.organizationId,
           command.agentId,
-          command.settings
+          command.settings,
+          control.configurationRevision,
         );
         if (command.ownerUserId) {
           await tx`

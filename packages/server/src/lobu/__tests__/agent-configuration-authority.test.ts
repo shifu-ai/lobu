@@ -620,16 +620,21 @@ describe('AgentConfigurationAuthority', () => {
 
   test('enrolls a fresh exact applied release claim and persists a monotonic command receipt', async () => {
     const settingsHash = await seedAppliedEnrollmentRelease();
-    const result = await createAgentConfigurationAuthority().enrollToolboxManaged(
-      enrollmentCommand()
-    );
+    const authority = createAgentConfigurationAuthority();
+    const result = await authority.enrollToolboxManaged(enrollmentCommand());
+    const appliedState = await authority.readAppliedState({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+    });
+    if (!appliedState) throw new Error('Expected applied configuration state');
+    expect(appliedState.settingsDigest).not.toBe(settingsHash);
 
     expect(result).toMatchObject({
       status: 'applied',
       state: {
         managementMode: 'toolbox_managed',
         configurationRevision: '1',
-        settingsDigest: settingsHash,
+        settingsDigest: appliedState.settingsDigest,
         lastMutation: {
           kind: 'managed_enrollment',
           commandId: 'managed-enrollment-command-1',
@@ -653,8 +658,12 @@ describe('AgentConfigurationAuthority', () => {
       mutation_kind: 'managed_enrollment',
       resulting_mode: 'toolbox_managed',
       resulting_revision: 1,
-      resulting_settings_digest: settingsHash,
+      resulting_settings_digest: appliedState.settingsDigest,
     }]);
+    await expect(authority.enrollToolboxManaged(enrollmentCommand())).resolves.toMatchObject({
+      status: 'already_applied',
+      state: { settingsDigest: appliedState.settingsDigest },
+    });
   });
 
   test('replays enrollment across claim renewal before freshness checks and rejects semantic command reuse', async () => {
@@ -1042,12 +1051,13 @@ describe('AgentConfigurationAuthority', () => {
           status: 'applied',
           previousRevision: '0',
           resultingRevision: '1',
-          commandId: 'safe-observability-command',
+          commandIdDigest: canonicalDigest('safe-observability-command'),
           changedFieldNames: ['identityMd'],
         },
         'agent configuration mutation'
       );
       expect(JSON.stringify(infoSpy.mock.calls)).not.toContain('never-log-this-prompt');
+      expect(JSON.stringify(infoSpy.mock.calls)).not.toContain('safe-observability-command');
       await expect(createAgentConfigurationAuthority().apply({
         organizationId: ORGANIZATION_ID,
         agentId: AGENT_ID,
@@ -1132,7 +1142,7 @@ describe('AgentConfigurationAuthority', () => {
             status: expectedStatus,
             previousRevision: null,
             resultingRevision: null,
-            commandId: 'managed-release:unmaterialized',
+            commandIdDigest: canonicalDigest('managed-release:unmaterialized'),
             changedFieldNames: [],
           },
           'agent configuration mutation',
@@ -1406,6 +1416,35 @@ describe('AgentConfigurationAuthority', () => {
     });
   });
 
+  test('requires a revision for managed operator patches after honoring exact legacy replay', async () => {
+    const authority = createAgentConfigurationAuthority();
+    const legacyCommand = {
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      commandId: 'legacy-unversioned-operator-command',
+      expectedConfigurationRevision: null,
+      actor: { kind: 'session' as const },
+      patch: { verboseLogging: true },
+    };
+    await expect(authority.apply(legacyCommand)).resolves.toMatchObject({ status: 'applied' });
+    await getDb()`
+      UPDATE agent_configuration_controls SET management_mode = 'toolbox_managed'
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `;
+    await expect(authority.apply(legacyCommand)).resolves.toMatchObject({
+      status: 'already_applied',
+      state: { configurationRevision: '1' },
+    });
+    await expect(authority.apply({
+      ...legacyCommand,
+      commandId: 'new-unversioned-managed-operator-command',
+      patch: { verboseLogging: false },
+    })).rejects.toMatchObject({
+      code: 'agent_configuration_revision_required',
+      currentRevision: '1',
+    });
+  });
+
   test('advances decimal revisions without JavaScript number precision loss', async () => {
     const sql = getDb();
     await sql`
@@ -1635,6 +1674,68 @@ describe('AgentConfigurationAuthority', () => {
       WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
     `;
     expect(commands).toEqual([]);
+  });
+
+  test('returns revision_mismatch and rolls back when native control CAS affects zero rows', async () => {
+    const sql = getDb();
+    await sql`INSERT INTO agent_configuration_controls (organization_id, agent_id)
+      VALUES (${ORGANIZATION_ID}, ${AGENT_ID})`;
+    await sql.unsafe(`CREATE OR REPLACE FUNCTION skip_native_control_update_for_test()
+      RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END; $$`);
+    await sql.unsafe(`CREATE TRIGGER skip_native_control_update_for_test
+      BEFORE UPDATE ON agent_configuration_controls
+      FOR EACH ROW EXECUTE FUNCTION skip_native_control_update_for_test()`);
+    try {
+      await expect(createAgentConfigurationAuthority().apply({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        commandId: 'native-zero-row-control-cas',
+        expectedConfigurationRevision: '0',
+        actor: { kind: 'session' },
+        patch: { verboseLogging: true },
+      })).resolves.toEqual({
+        status: 'conflict', conflict: 'revision_mismatch', currentRevision: '0',
+      });
+    } finally {
+      await sql.unsafe(`DROP TRIGGER IF EXISTS skip_native_control_update_for_test
+        ON agent_configuration_controls`);
+      await sql.unsafe(`DROP FUNCTION IF EXISTS skip_native_control_update_for_test()`);
+    }
+    expect(await sql`SELECT verbose_logging FROM agents
+      WHERE organization_id=${ORGANIZATION_ID} AND id=${AGENT_ID}`
+    ).toEqual([{ verbose_logging: false }]);
+    expect(await sql`SELECT command_id FROM agent_configuration_commands
+      WHERE organization_id=${ORGANIZATION_ID} AND agent_id=${AGENT_ID}`
+    ).toEqual([]);
+  });
+
+  test('rejects and rolls back bootstrap when its control CAS affects zero rows', async () => {
+    const sql = getDb();
+    await sql.unsafe(`CREATE OR REPLACE FUNCTION skip_bootstrap_control_update_for_test()
+      RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END; $$`);
+    await sql.unsafe(`CREATE TRIGGER skip_bootstrap_control_update_for_test
+      BEFORE UPDATE ON agent_configuration_controls
+      FOR EACH ROW EXECUTE FUNCTION skip_bootstrap_control_update_for_test()`);
+    const agentId = 'bootstrap-zero-row-control-cas';
+    try {
+      await expect(createAgentConfigurationAuthority().bootstrap({
+        kind: 'bootstrap', profile: 'native', organizationId: ORGANIZATION_ID, agentId,
+        commandId: 'bootstrap-zero-row-control-cas-command',
+        expectedConfigurationRevision: '0', actor: { kind: 'admin_pat' },
+        name: 'Bootstrap CAS target', settings: { identityMd: 'must roll back' },
+        requestDigest: canonicalDigest({ request: 'bootstrap zero row cas' }),
+        ownerPlatform: 'lobu', ownerUserId: null,
+      })).rejects.toMatchObject({
+        code: 'agent_configuration_revision_mismatch', currentRevision: '0',
+      });
+    } finally {
+      await sql.unsafe(`DROP TRIGGER IF EXISTS skip_bootstrap_control_update_for_test
+        ON agent_configuration_controls`);
+      await sql.unsafe(`DROP FUNCTION IF EXISTS skip_bootstrap_control_update_for_test()`);
+    }
+    expect(await sql`SELECT id FROM agents
+      WHERE organization_id=${ORGANIZATION_ID} AND id=${agentId}`
+    ).toEqual([]);
   });
 
   test('hashes the exact 17-field persistent projection and excludes credentials and runtime fields', async () => {

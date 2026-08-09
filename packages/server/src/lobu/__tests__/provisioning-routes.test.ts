@@ -799,18 +799,28 @@ describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll
 
 		const applied = await requestManagedEnrollment(app);
 		expect(applied.status).toBe(200);
+		const { createAgentConfigurationAuthority } = await import(
+			"../agent-configuration/index.js"
+		);
+		const appliedState = await createAgentConfigurationAuthority().readAppliedState({
+			organizationId: ORG_ID,
+			agentId: "shifu-u-enrollment-route",
+		});
+		if (!appliedState) throw new Error("Expected canonical applied state");
+		expect(appliedState.settingsDigest).not.toBe(settingsHash);
 		await expect(applied.json()).resolves.toEqual({
 			ok: true,
 			status: "applied",
 			managementMode: "toolbox_managed",
 			configurationRevision: "1",
-			settingsDigest: settingsHash,
+			settingsDigest: appliedState.settingsDigest,
 		});
 		const replay = await requestManagedEnrollment(app);
 		expect(replay.status).toBe(200);
 		await expect(replay.json()).resolves.toMatchObject({
 			status: "already_applied",
 			configurationRevision: "1",
+			settingsDigest: appliedState.settingsDigest,
 		});
 		expect(new Set(resolvedSnapshotDigests).size).toBe(2);
 		const alreadyManaged = await requestManagedEnrollment(app, {
