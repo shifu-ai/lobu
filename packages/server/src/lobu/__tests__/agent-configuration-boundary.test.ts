@@ -1,6 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { describe, expect, test } from 'bun:test';
+import { createAgentReleaseService } from '../agent-release-service';
 
 const SERVER_SRC = join(import.meta.dir, '..', '..');
 const PACKAGES_ROOT = join(import.meta.dir, '..', '..', '..', '..');
@@ -33,6 +34,51 @@ const CONFIGURATION_COLUMNS = [
   'pre_approved_tools',
   'guardrails',
 ] as const;
+
+const LOW_LEVEL_WRITER_ALLOWLIST = new Map<string, Set<string>>([
+  ['applyLegacyManagedSettingsInTransaction', new Set([
+    'lobu/agent-configuration/postgres-repository.ts',
+    'lobu/agent-release-service.ts',
+  ])],
+  ['replaceAgentConfigurationSettingsInTransaction', new Set([
+    'lobu/agent-configuration/postgres-repository.ts',
+    'lobu/agent-configuration/bootstrap.ts',
+    'lobu/agent-release-service.ts',
+  ])],
+  ['syncProvisioningGrantsInTransaction', new Set([
+    'lobu/agent-configuration/postgres-repository.ts',
+    'lobu/agent-configuration/bootstrap.ts',
+    'lobu/agent-release-service.ts',
+  ])],
+  ['addProvisioningGrantsInTransaction', new Set([
+    'lobu/agent-configuration/postgres-repository.ts',
+    'lobu/agent-configuration/bootstrap.ts',
+  ])],
+  ['enrollToolboxManagedInTransaction', new Set([
+    'lobu/agent-configuration/postgres-repository.ts',
+    'lobu/agent-configuration/authority.ts',
+  ])],
+  ['applyNativePatchInTransaction', new Set([
+    'lobu/agent-configuration/postgres-repository.ts',
+    'lobu/agent-configuration/authority.ts',
+  ])],
+  ['recordManagedReleaseConfigurationMutation', new Set([
+    'lobu/agent-configuration/postgres-repository.ts',
+    'lobu/agent-configuration/authority.ts',
+  ])],
+  ['recordBootstrapConfigurationMutation', new Set([
+    'lobu/agent-configuration/postgres-repository.ts',
+    'lobu/agent-configuration/bootstrap.ts',
+  ])],
+  ['createAgentConfigurationBootstrap', new Set([
+    'lobu/agent-configuration/bootstrap.ts',
+    'lobu/agent-configuration/authority.ts',
+  ])],
+  ['applyPreparedAgentReleaseInTransaction', new Set([
+    'lobu/agent-release-service.ts',
+    'lobu/agent-configuration/authority.ts',
+  ])],
+]);
 
 const CONFIGURATION_COLUMN_PATTERN = new RegExp(
   `\\b(?:${CONFIGURATION_COLUMNS.join('|')})\\b`,
@@ -115,6 +161,9 @@ function findRawSettingsMutators(source: string): string[] {
 }
 
 describe('agent configuration production boundary', () => {
+  test('release service does not expose a standalone unversioned apply writer', () => {
+    expect('apply' in createAgentReleaseService({})).toBe(false);
+  });
   test('scanner detects multiline, schema-qualified, and quoted direct writers', () => {
     const representativeViolation = `
       await tx\`UPDATE "public"."agents"
@@ -177,6 +226,20 @@ describe('agent configuration production boundary', () => {
       'gateway/auth/agent-configuration-mutation-port.ts: .updateSettings(',
       'gateway/services/core-services.ts: .saveSettings(',
     ]);
+  });
+
+  test('low-level configuration writers remain inside the authority orchestration', async () => {
+    const violations: string[] = [];
+    for (const file of await productionTypeScriptFiles(SERVER_SRC)) {
+      const path = relative(SERVER_SRC, file).split(sep).join('/');
+      const source = await readFile(file, 'utf8');
+      for (const [writer, allowedPaths] of LOW_LEVEL_WRITER_ALLOWLIST) {
+        if (new RegExp(`\\b${writer}\\b`, 'u').test(source) && !allowedPaths.has(path)) {
+          violations.push(`${path}: ${writer}`);
+        }
+      }
+    }
+    expect(violations).toEqual([]);
   });
 
   test('agent configuration and worker/session startup do not fetch Toolbox desired state', async () => {

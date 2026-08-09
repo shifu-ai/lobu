@@ -565,23 +565,6 @@ export function createAgentReleaseService(options: {
 		finalizeAgentReleaseApplyEvidence,
 		getEvidenceInTransaction,
 		preparedReleaseRequiresConfigurationMutationInTransaction,
-		async apply(input: {
-			organizationId: string;
-			agentId: string;
-			command: unknown;
-		}): Promise<AgentReleaseApplyResult | AgentReleasePostApplyEvidence> {
-			const sql = options.sql ?? getDb();
-			const prepared = prepareAgentReleaseApply(input);
-			const result = await sql.begin(async (tx) =>
-				applyPreparedAgentReleaseInTransaction(tx, {
-					organizationId: input.organizationId,
-					agentId: input.agentId,
-					prepared,
-				}),
-			);
-			return finalizeAgentReleaseApplyEvidence(prepared, result);
-		},
-
 		async getEvidence(input: {
 			organizationId: string;
 			agentId: string;

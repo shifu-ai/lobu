@@ -92,9 +92,10 @@ function safeChangedFieldNames(value: object): string[] {
 }
 
 function rejectedMutationStatus(error: unknown): 'rejected' | 'failed' {
-  return error instanceof AgentConfigurationError ||
-    error instanceof AgentConfigurationFieldError ||
-    error instanceof AgentReleaseError
+  if (error instanceof AgentReleaseError) {
+    return error.status >= 500 ? 'failed' : 'rejected';
+  }
+  return error instanceof AgentConfigurationError || error instanceof AgentConfigurationFieldError
     ? 'rejected'
     : 'failed';
 }

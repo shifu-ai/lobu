@@ -9,6 +9,7 @@ import {
   seedAgentRow,
 } from '../../gateway/__tests__/helpers/db-setup';
 import { createAgentConfigurationAuthority } from '../agent-configuration';
+import { AgentReleaseError } from '../agent-release-service';
 import {
   parseNativeSettingsPatch,
   PERSISTENT_AGENT_CONFIGURATION_FIELD_NAMES,
@@ -1093,6 +1094,58 @@ describe('AgentConfigurationAuthority', () => {
       expect(JSON.stringify(infoSpy.mock.calls)).not.toContain('invalid-value-must-not-be-logged');
     } finally {
       infoSpy.mockRestore();
+    }
+  });
+
+  test('classifies managed release client rejections separately from service failures', async () => {
+    for (const [statusCode, expectedStatus] of [
+      [400, 'rejected'],
+      [503, 'failed'],
+    ] as const) {
+      const releaseError = new AgentReleaseError(
+        `agent_release_observability_${statusCode}`,
+        statusCode,
+        `managed-release-secret-${statusCode}`
+      );
+      const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined);
+      try {
+        const authority = createAgentConfigurationAuthority(undefined, {
+          agentReleaseService: {
+            prepareAgentReleaseApply() {
+              throw releaseError;
+            },
+          } as never,
+        });
+        await expect(
+          authority.applyManagedRelease({
+            organizationId: ORGANIZATION_ID,
+            agentId: AGENT_ID,
+            actor: { kind: 'release' },
+            command: { secret: `managed-release-command-${statusCode}` },
+          })
+        ).rejects.toBe(releaseError);
+        expect(infoSpy.mock.calls.at(-1)).toEqual([
+          {
+            organizationId: ORGANIZATION_ID,
+            agentId: AGENT_ID,
+            mutationKind: 'managed_release',
+            status: expectedStatus,
+            previousRevision: null,
+            resultingRevision: null,
+            commandId: 'managed-release:unmaterialized',
+            changedFieldNames: [],
+          },
+          'agent configuration mutation',
+        ]);
+        expect(JSON.stringify(infoSpy.mock.calls)).not.toContain(
+          `managed-release-secret-${statusCode}`
+        );
+        expect(JSON.stringify(infoSpy.mock.calls)).not.toContain(
+          `managed-release-command-${statusCode}`
+        );
+      } finally {
+        infoSpy.mockRestore();
+      }
     }
   });
 
