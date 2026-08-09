@@ -267,6 +267,75 @@ describe('POST /agents — idempotent same-org create', () => {
     expect(rows).toEqual([{ description: '' }]);
   });
 
+  test('returns durable existing state to a second authorized caller without ownership takeover', async () => {
+    const app = await importAgentRoutes();
+    const request = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'cross-caller-agent',
+        name: 'Cross Caller Agent',
+        description: 'owned by the creator',
+      }),
+    };
+    const created = await app.request('/', request);
+    expect(created.status).toBe(201);
+
+    authStash.user = {
+      id: 'u2',
+      name: 'Second Authorized User',
+      email: 'u2@test',
+      emailVerified: true,
+    };
+    const existing = await app.request('/', request);
+    expect(existing.status).toBe(200);
+    await expect(existing.json()).resolves.toEqual({
+      agentId: 'cross-caller-agent',
+      name: 'Cross Caller Agent',
+      description: 'owned by the creator',
+    });
+
+    const { getDb } = await import('../../db/client.js');
+    const rows = await getDb()`
+      SELECT owner_user_id, mcp_servers, pre_approved_tools
+      FROM agents
+      WHERE organization_id = ${ORG_A} AND id = 'cross-caller-agent'
+    `;
+    expect(rows).toEqual([{
+      owner_user_id: 'u1',
+      mcp_servers: expect.objectContaining({ 'lobu-memory': expect.any(Object) }),
+      pre_approved_tools: ['/mcp/lobu-memory/tools/*'],
+    }]);
+  });
+
+  test('maps a POST bootstrap command conflict to a stable 409 response', async () => {
+    const app = await importAgentRoutes();
+    const request = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'post-command-conflict',
+        name: 'POST Command Conflict',
+      }),
+    };
+    expect((await app.request('/', request)).status).toBe(201);
+
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      UPDATE agent_configuration_commands
+      SET command_digest = ${`sha256:${'f'.repeat(64)}`}
+      WHERE organization_id = ${ORG_A} AND agent_id = 'post-command-conflict'
+    `;
+
+    const conflict = await app.request('/', request);
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toEqual({
+      error: 'agent_configuration_command_conflict',
+      currentRevision: '1',
+    });
+  });
+
   test('idempotent path does not re-inject the Lobu MCP server', async () => {
     const app = await importAgentRoutes();
     const { getDb } = await import('../../db/client.js');

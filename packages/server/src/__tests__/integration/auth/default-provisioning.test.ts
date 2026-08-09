@@ -453,6 +453,65 @@ describe('ensureDefaultAgent', () => {
     }
   });
 
+  it('repairs identity again after a later native command clears it without duplicating exact boots', async () => {
+    const providerSpy = vi
+      .spyOn(moduleSystem, 'getModelProviderModules')
+      .mockReturnValue([]);
+    try {
+      const orgId = `org-recurrent-identity-${generateSecureToken(4)}`;
+      await seedOrg(orgId);
+      const sql = getTestDb();
+      await sql`
+        UPDATE "organization"
+           SET metadata = ${JSON.stringify({
+             [DEFAULT_AGENT_SENTINEL]: new Date().toISOString(),
+           })}
+         WHERE id = ${orgId}
+      `;
+      await sql`
+        INSERT INTO agents (id, organization_id, name, identity_md)
+        VALUES (${DEFAULT_AGENT_ID}, ${orgId}, 'Owletto Personal', '')
+      `;
+
+      await ensureDefaultAgent(orgId);
+      const cleared = await createAgentConfigurationAuthority(sql as never).apply({
+        organizationId: orgId,
+        agentId: DEFAULT_AGENT_ID,
+        commandId: 'legitimate-native-identity-clear',
+        expectedConfigurationRevision: '1',
+        actor: { kind: 'session' },
+        patch: { identityMd: '' },
+      });
+      expect(cleared).toMatchObject({
+        status: 'applied',
+        state: { configurationRevision: '2' },
+      });
+
+      await ensureDefaultAgent(orgId);
+      await ensureDefaultAgent(orgId);
+
+      const rows = await sql`
+        SELECT a.identity_md, c.configuration_revision::text AS configuration_revision,
+               count(command_row.command_id)::int AS command_count
+        FROM agents a
+        JOIN agent_configuration_controls c
+          ON c.organization_id = a.organization_id AND c.agent_id = a.id
+        JOIN agent_configuration_commands command_row
+          ON command_row.organization_id = a.organization_id
+         AND command_row.agent_id = a.id
+        WHERE a.organization_id = ${orgId} AND a.id = ${DEFAULT_AGENT_ID}
+        GROUP BY a.identity_md, c.configuration_revision
+      `;
+      expect(rows).toEqual([{
+        identity_md: DEFAULT_AGENT_IDENTITY,
+        configuration_revision: '3',
+        command_count: 3,
+      }]);
+    } finally {
+      providerSpy.mockRestore();
+    }
+  });
+
   it('skips creation (but stamps sentinel) when other agents already exist', async () => {
     const orgId = `org-provision-${generateSecureToken(4)}`;
     await seedOrg(orgId);

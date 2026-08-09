@@ -1784,23 +1784,52 @@ routes.post('/', async (c) => {
     preApprovedTools: ownerPreApprovedTools,
   };
   const requestDigest = `sha256:${createHash('sha256')
-    .update(JSON.stringify({ agentId, name, description: description ?? null, settings }))
+    .update(
+      JSON.stringify({
+        agentId,
+        name,
+        description: description ?? null,
+        ownerUserId: user.id,
+        settings,
+      })
+    )
     .digest('hex')}` as const;
-  const result = await agentConfigurationAuthority.bootstrap({
-    kind: 'bootstrap',
-    profile: 'native',
-    organizationId: orgId,
-    agentId,
-    commandId: `native-bootstrap:${requestDigest}`,
-    expectedConfigurationRevision: '0',
-    actor: { kind: 'session' },
-    name,
-    description,
-    ownerPlatform: 'lobu',
-    ownerUserId: user.id,
-    settings,
-    requestDigest,
-  });
+  let result;
+  try {
+    result = await agentConfigurationAuthority.bootstrap({
+      kind: 'bootstrap',
+      profile: 'native',
+      organizationId: orgId,
+      agentId,
+      commandId: `native-bootstrap:${requestDigest}`,
+      expectedConfigurationRevision: '0',
+      actor: { kind: 'session' },
+      name,
+      description,
+      ownerPlatform: 'lobu',
+      ownerUserId: user.id,
+      settings,
+      requestDigest,
+    });
+  } catch (error) {
+    if (error instanceof AgentConfigurationError) {
+      const status =
+        error.code === 'agent_configuration_command_conflict' ||
+        error.code === 'agent_configuration_revision_mismatch'
+          ? 409
+          : 400;
+      return c.json(
+        {
+          error: error.code,
+          ...(error.currentRevision === undefined
+            ? {}
+            : { currentRevision: error.currentRevision }),
+        },
+        status
+      );
+    }
+    throw error;
+  }
   if (result.status === 'rejected') {
     return c.json({ error: result.reason }, 409);
   }

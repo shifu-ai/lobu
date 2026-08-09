@@ -22,6 +22,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { canonicalize } from 'json-canonicalize';
 import { getDb } from '../db/client';
 import type { DbClient } from '../db/client';
 import { getModelProviderModules } from '../gateway/modules/module-system';
@@ -202,12 +203,16 @@ async function backfillDefaultAgent(
         : {}),
     };
     const digest = createHash('sha256')
-      .update(JSON.stringify(patch))
+      .update(canonicalize({
+        agentId: DEFAULT_AGENT_ID,
+        observedConfigurationRevision: row.configuration_revision,
+        patch,
+      }))
       .digest('hex');
     const patchResult = await createAgentConfigurationAuthority(client).apply({
       organizationId,
       agentId: DEFAULT_AGENT_ID,
-      commandId: `default-settings-backfill:${digest}`,
+      commandId: `default-settings-backfill:${row.configuration_revision}:${digest}`,
       expectedConfigurationRevision: row.configuration_revision,
       actor: { kind: 'provider_catalog' },
       patch,
