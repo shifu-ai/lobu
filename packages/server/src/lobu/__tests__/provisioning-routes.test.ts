@@ -342,7 +342,12 @@ async function buildApp(
 describe("PUT /api/provisioning/agents/:agentId/managed-settings", () => {
 	test("delegates signed managed release mutation to the injected configuration authority", async () => {
 		const applyManagedRelease = mock(async () => ({
-			evidence: { ok: true, marker: "authority-release-evidence" },
+			evidence: {
+				ok: true,
+				marker: "authority-release-evidence",
+				configurationRevision: "7",
+				managementMode: "native",
+			},
 			state: { configurationRevision: "7", managementMode: "native" },
 		}));
 		const app = await buildApp(["mcp:admin"], {

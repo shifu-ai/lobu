@@ -40,6 +40,13 @@ export interface AgentConfigurationAuthority {
     managementMode: 'native' | 'toolbox_managed';
     configurationRevision: string;
   }>;
+  readManagedRelease(input: { organizationId: string; agentId: string }): Promise<{
+    evidence: Awaited<ReturnType<AgentReleaseService['getEvidence']>>;
+    state: {
+      managementMode: 'native' | 'toolbox_managed';
+      configurationRevision: string;
+    };
+  }>;
 }
 
 type AgentReleaseService = ReturnType<typeof createAgentReleaseService>;
@@ -101,7 +108,10 @@ function materializeNativePatchCommand(input: NativePatchCommandInput): NativePa
 
 export function createAgentConfigurationAuthority(
   sql?: DbClient,
-  options: { agentReleaseService?: AgentReleaseService } = {},
+  options: {
+    agentReleaseService?: AgentReleaseService;
+    readHooks?: { afterEvidenceRead?: () => Promise<void> };
+  } = {},
 ): AgentConfigurationAuthority {
   return {
     apply(input) {
@@ -201,6 +211,10 @@ export function createAgentConfigurationAuthority(
         evidence: releaseService.finalizeAgentReleaseApplyEvidence(
           prepared,
           transactionResult.releaseResult,
+          {
+            configurationRevision: transactionResult.state.configurationRevision,
+            managementMode: transactionResult.state.managementMode,
+          },
         ),
         state: transactionResult.state,
       };
@@ -222,6 +236,45 @@ export function createAgentConfigurationAuthority(
           }
         : { managementMode: 'native', configurationRevision: '0' };
     },
+    async readManagedRelease(input) {
+      const releaseService = options.agentReleaseService;
+      if (!releaseService) {
+        throw new AgentConfigurationError('invalid_native_settings_patch');
+      }
+      return (sql ?? getDb()).begin(async (tx) => {
+        const agents = await tx`
+          SELECT id FROM agents
+          WHERE organization_id=${input.organizationId} AND id=${input.agentId}
+          FOR SHARE
+        `;
+        if (!agents[0]) {
+          return {
+            evidence: null,
+            state: { managementMode: 'native' as const, configurationRevision: '0' },
+          };
+        }
+        const evidence = await releaseService.getEvidenceInTransaction(tx, input);
+        await options.readHooks?.afterEvidenceRead?.();
+        const controls = await tx<{
+          management_mode: 'native' | 'toolbox_managed';
+          configuration_revision: string;
+        }>`
+          SELECT management_mode, configuration_revision::text AS configuration_revision
+          FROM agent_configuration_controls
+          WHERE organization_id=${input.organizationId} AND agent_id=${input.agentId}
+        `;
+        const control = controls[0];
+        return {
+          evidence,
+          state: control
+            ? {
+                managementMode: control.management_mode,
+                configurationRevision: String(control.configuration_revision),
+              }
+            : { managementMode: 'native' as const, configurationRevision: '0' },
+        };
+      });
+    },
   };
 }
 
@@ -229,18 +282,35 @@ function materializeManagedReleaseCommand(
   input: ManagedReleaseCommandInput,
   prepared: PreparedAgentReleaseApply,
 ): { commandId: string; commandDigest: Sha256Digest } {
-  const canonicalCommand = {
+  const publicationKind = prepared.publication.publicationKind ?? 'release';
+  const stableIdentity = {
     kind: 'managed_release',
+    environment: prepared.command.signedManifest.environment,
     agentId: input.agentId,
-    expectedRevision: prepared.command.expectedConfigurationRevision ?? null,
-    releaseCommandDigest: prepared.command.commandDigest,
+    releaseId: prepared.command.signedManifest.releaseId,
+    releaseSequence: prepared.command.signedManifest.releaseSequence,
+    publication: {
+      kind: publicationKind,
+      fromReleaseSequence: prepared.publication.fromReleaseSequence ?? null,
+      toReleaseSequence: prepared.publication.toReleaseSequence ?? null,
+      toReleaseId: prepared.publication.toReleaseId ?? null,
+    },
+  };
+  const stableEffect = {
+    ...stableIdentity,
+    manifestDigest: sha256Canonical(prepared.command.signedManifest),
+    settingsDigest: sha256Canonical(
+      prepared.command.settings ?? prepared.command.signedManifest.managedSettings,
+    ),
   };
   return {
-    commandId: `managed-release:${prepared.command.commandDigest}`,
-    commandDigest: `sha256:${createHash('sha256')
-      .update(canonicalize(canonicalCommand))
-      .digest('hex')}`,
+    commandId: `managed-release:${sha256Canonical(stableIdentity)}`,
+    commandDigest: sha256Canonical(stableEffect),
   };
+}
+
+function sha256Canonical(value: unknown): Sha256Digest {
+  return `sha256:${createHash('sha256').update(canonicalize(value)).digest('hex')}`;
 }
 
 function assertManagedReleaseSettingsOwnership(prepared: PreparedAgentReleaseApply): void {

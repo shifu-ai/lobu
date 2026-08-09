@@ -94,6 +94,7 @@ interface ProvisioningRoutesOptions {
   agentReleaseEvidenceSigningPrivateKeysJson?: string;
   agentReleaseEnvironment?: string;
   agentConfigurationAuthority?: AgentConfigurationAuthority;
+  agentConfigurationReadHooks?: { afterEvidenceRead?: () => Promise<void> };
   legacyProvisioningHooks?: {
     afterAgentLock?: () => Promise<void>;
   };
@@ -262,7 +263,10 @@ export function createProvisioningRoutes(
   });
   const agentConfigurationAuthority =
     options.agentConfigurationAuthority ??
-    createAgentConfigurationAuthority(undefined, { agentReleaseService });
+    createAgentConfigurationAuthority(undefined, {
+      agentReleaseService,
+      readHooks: options.agentConfigurationReadHooks,
+    });
   const releaseAssuranceReadback =
     options.releaseAssuranceReadback ??
     createReleaseAssuranceReadback({
@@ -769,14 +773,7 @@ export function createProvisioningRoutes(
           command,
           actor: { kind: "release" },
         });
-        return c.json(
-          {
-            ...result.evidence,
-            configurationRevision: result.state.configurationRevision,
-            managementMode: result.state.managementMode,
-          },
-          200
-        );
+        return c.json(result.evidence, 200);
       } catch (error) {
         if (error instanceof AgentReleaseError) {
           return c.json(
@@ -819,21 +816,17 @@ export function createProvisioningRoutes(
     if (agentIdError) return c.json({ error: agentIdError }, 400);
 
     try {
-      const evidence = await agentReleaseService.getEvidence({
+      const readback = await agentConfigurationAuthority.readManagedRelease({
         organizationId,
         agentId,
       });
-      if (!evidence)
+      if (!readback.evidence)
         return c.json({ error: "agent_release_evidence_not_found" }, 404);
-      const state = await agentConfigurationAuthority.readConfigurationControl({
-        organizationId,
-        agentId,
-      });
       return c.json(
         {
-          ...evidence,
-          configurationRevision: state.configurationRevision,
-          managementMode: state.managementMode,
+          ...readback.evidence,
+          configurationRevision: readback.state.configurationRevision,
+          managementMode: readback.state.managementMode,
         },
         200
       );

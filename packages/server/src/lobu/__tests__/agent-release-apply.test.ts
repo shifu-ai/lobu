@@ -261,18 +261,13 @@ describe("signed managed agent release apply", () => {
 		});
 		expect(evidence).not.toHaveProperty("baselineVersionId");
 		expect(evidence).not.toHaveProperty("effectiveSettingsDigest");
-		const {
-			configurationRevision: _configurationRevision,
-			managementMode: _managementMode,
-			...signedEvidence
-		} = evidence;
-		const { signature, ...evidenceSigning } = signedEvidence.evidenceSigning;
+		const { signature, ...evidenceSigning } = evidence.evidenceSigning;
 		expect(
 			verifySignature(
 				null,
 				Buffer.from(
 					canonicalizeForTest({
-						...withoutKey(signedEvidence, "evidenceSigning"),
+						...withoutKey(evidence, "evidenceSigning"),
 						evidenceSigning,
 					}),
 				),
@@ -1017,9 +1012,24 @@ describe("signed managed agent release apply", () => {
 		});
 		const response = await putApply(app, latestSignedApplyRequest());
 		expect(response.status).toBe(200);
-		await expect(response.json()).resolves.toMatchObject({
+		const evidence = await response.json();
+		expect(evidence).toMatchObject({
 			evidenceSigning: { keyId: rotatedKeyId },
 		});
+		const { signature, ...evidenceSigning } = evidence.evidenceSigning;
+		expect(
+			verifySignature(
+				null,
+				Buffer.from(
+					canonicalizeForTest({
+						...withoutKey(evidence, "evidenceSigning"),
+						evidenceSigning,
+					}),
+				),
+				createPublicKey(PUBLIC_KEY),
+				Buffer.from(signature, "base64"),
+			),
+		).toBe(true);
 	});
 
 	test("repairs same-sequence drift under a fresh Toolbox attempt and signs the repaired read-back", async () => {
@@ -1056,6 +1066,33 @@ describe("signed managed agent release apply", () => {
 			FROM agent_configuration_controls
 			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}
 		`).toEqual([{ configuration_revision: "2", command_count: 2 }]);
+		const commands = await sql`
+			SELECT command_id
+			FROM agent_configuration_commands
+			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}
+			ORDER BY command_id
+		`;
+		expect(commands).toHaveLength(2);
+		const baseCommandId = String(commands[0]?.command_id);
+		expect(baseCommandId).toMatch(/^managed-release:sha256:[0-9a-f]{64}$/);
+		expect(commands[1]?.command_id).toBe(`${baseCommandId}:repair:1`);
+
+		const replay = latestSignedApplyRequest();
+		replay.expectedCurrentReleaseSequence = 1;
+		replay.claimToken = "99999999-9999-4999-8999-999999999999";
+		replay.stepLeaseToken = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+		replay.commandDigest = commandDigest(replay);
+		const replayResponse = await putApply(app, replay);
+		expect(replayResponse.status).toBe(200);
+		await expect(replayResponse.json()).resolves.toMatchObject({
+			configurationRevision: "2",
+			claimToken: replay.claimToken,
+		});
+		expect(await sql`
+			SELECT count(*)::int AS command_count
+			FROM agent_configuration_commands
+			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}
+		`).toEqual([{ command_count: 2 }]);
 	});
 
 	test("returns fresh exact attempt evidence for an idempotent same-sequence no-drift retry", async () => {
@@ -1111,6 +1148,87 @@ describe("signed managed agent release apply", () => {
 		expect(authorityRows).toEqual([
 			{ configuration_revision: "1", command_count: 1 },
 		]);
+		const commands = await (await db())`
+			SELECT command_id FROM agent_configuration_commands
+			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}
+		`;
+		expect(commands[0]?.command_id).toMatch(/^managed-release:sha256:[0-9a-f]{64}$/);
+	});
+
+	test("rejects a different stable release effect reusing the same authority identity", async () => {
+		const app = await buildApp();
+		const first = signedApplyRequest({
+			releaseId: "stable-effect",
+			managedSettings: { identityMd: "one" },
+		});
+		expect((await putApply(app, first)).status).toBe(200);
+		const conflict = signedApplyRequest({
+			releaseId: "stable-effect",
+			releaseSequence: 1,
+			feedSequence: 2,
+			managedSettings: { identityMd: "two" },
+			expectedCurrentReleaseSequence: 1,
+			expectedConfigurationRevision: "1",
+		});
+		const response = await putApply(app, conflict);
+		expect(response.status).toBe(409);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_configuration_command_conflict",
+		});
+	});
+
+	test("reads release evidence and configuration control from one coherent snapshot", async () => {
+		const initialApp = await buildApp();
+		expect((await putApply(initialApp, latestSignedApplyRequest())).status).toBe(200);
+
+		const evidenceRead = deferred<void>();
+		const finishRead = deferred<void>();
+		const reader = await buildApp({
+			agentConfigurationReadHooks: {
+				afterEvidenceRead: async () => {
+					evidenceRead.resolve(undefined);
+					await finishRead.promise;
+				},
+			},
+		});
+		const writer = await buildApp();
+		const readPromise = reader.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		await within(evidenceRead.promise);
+
+		const next = signedApplyRequest({
+			releaseId: "coherent-read-2",
+			releaseSequence: 2,
+			feedSequence: 2,
+			managedSettings: { identityMd: "coherent read two" },
+			expectedCurrentReleaseSequence: 1,
+			expectedConfigurationRevision: "1",
+		});
+		const writePromise = putApply(writer, next);
+		try {
+			await waitForBlockedAgentLock();
+		} finally {
+			finishRead.resolve(undefined);
+		}
+
+		const read = await readPromise;
+		expect(read.status).toBe(200);
+		await expect(read.json()).resolves.toMatchObject({
+			releaseId: latestSignedApplyRequest().signedManifest.releaseId,
+			releaseSequence: 1,
+			configurationRevision: "1",
+		});
+		expect((await writePromise).status).toBe(200);
+
+		const after = await writer.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		await expect(after.json()).resolves.toMatchObject({
+			releaseId: "coherent-read-2",
+			releaseSequence: 2,
+			configurationRevision: "2",
+		});
 	});
 
 	test("lets only one independent replica apply from the same configuration revision", async () => {
@@ -2351,6 +2469,9 @@ async function buildApp(
 		agentReleaseTransactionHooks?: {
 			afterAgentLock?: () => Promise<void>;
 		};
+		agentConfigurationReadHooks?: {
+			afterEvidenceRead?: () => Promise<void>;
+		};
 	} = {},
 ) {
 	const organizationId = options.organizationId ?? ORG_ID;
@@ -2381,6 +2502,7 @@ async function buildApp(
 					: options.agentReleaseEnvironment,
 			legacyProvisioningHooks: options.legacyProvisioningHooks,
 			agentReleaseTransactionHooks: options.agentReleaseTransactionHooks,
+			agentConfigurationReadHooks: options.agentConfigurationReadHooks,
 		}),
 	);
 	return app;

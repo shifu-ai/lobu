@@ -270,6 +270,8 @@ export interface AgentReleasePostApplyEvidence {
 	expiresAt: string;
 	evidenceRef: string;
 	evidenceSigning: SigningMetadata;
+	configurationRevision?: string;
+	managementMode?: "native" | "toolbox_managed";
 }
 
 export interface AgentReleaseApplyResult extends AgentReleaseEvidence {
@@ -488,20 +490,78 @@ export function createAgentReleaseService(options: {
 	function finalizeAgentReleaseApplyEvidence(
 		prepared: PreparedAgentReleaseApply,
 		result: AgentReleaseApplyResult,
+		configuration?: {
+			configurationRevision: string;
+			managementMode: "native" | "toolbox_managed";
+		},
 	): AgentReleaseApplyResult | AgentReleasePostApplyEvidence {
-		if (!isCurrentApplyCommand(prepared.command)) return result;
+		if (!isCurrentApplyCommand(prepared.command)) {
+			return configuration ? { ...result, ...configuration } : result;
+		}
 		return signPostApplyEvidence({
 			command: prepared.command,
 			result,
 			signer: evidenceSigner.value,
 			now: now(),
+			configuration,
 		});
+	}
+
+	async function getEvidenceInTransaction(
+		tx: DbClient,
+		input: { organizationId: string; agentId: string },
+	): Promise<AgentReleaseEvidence | null> {
+		if (expectedEnvironment.error) throw expectedEnvironment.error;
+		const rows = await tx<ReceiptWithAgentRow>`
+			SELECT r.applied_release_id, r.applied_release_sequence,
+			       r.applied_feed_sequence, r.applied_channel,
+			       r.applied_feed_digest, r.environment,
+			       r.rollback_to_release_id, r.rollback_to_sequence,
+			       r.manifest_digest, r.status,
+			       r.revision_ref, r.settings_hash, r.applied_at,
+			       r.personal_baseline_version_id,
+			       r.personal_baseline_effective_settings_digest,
+			       r.personal_baseline_settings,
+			       r.baseline_override,
+			       r.baseline_override_digest,
+			       a.owner_user_id, a.identity_md, a.soul_md, a.user_md,
+			       a.model, a.model_selection, a.provider_model_preferences,
+			       a.network_config, a.egress_config, a.nix_config, a.mcp_servers,
+			       a.skills_config, a.tools_config, a.plugins_config,
+			       a.installed_providers, a.verbose_logging,
+			       a.pre_approved_tools, a.guardrails
+			FROM agent_release_applies r
+			JOIN agents a
+			  ON a.organization_id = r.organization_id
+			 AND a.id = r.agent_id
+			WHERE r.organization_id = ${input.organizationId}
+			  AND r.agent_id = ${input.agentId}
+			LIMIT 1
+			FOR SHARE OF r, a
+		`;
+		if (rows[0] && rows[0].environment !== expectedEnvironment.value) {
+			throw releaseError(
+				"agent_release_receipt_environment_mismatch",
+				409,
+				"Agent release evidence belongs to another runtime environment",
+			);
+		}
+		if (!rows[0]) return null;
+		const evidence = evidenceFromReceipt(input.agentId, rows[0]);
+		const liveSettingsHash = settingsHashFromAgent(
+			rows[0],
+			rows[0].personal_baseline_settings,
+		);
+		return liveSettingsHash === rows[0].settings_hash
+			? evidence
+			: { ...evidence, status: "drifted", liveSettingsHash };
 	}
 
 	return {
 		prepareAgentReleaseApply,
 		applyPreparedAgentReleaseInTransaction,
 		finalizeAgentReleaseApplyEvidence,
+		getEvidenceInTransaction,
 		async apply(input: {
 			organizationId: string;
 			agentId: string;
@@ -524,52 +584,7 @@ export function createAgentReleaseService(options: {
 			agentId: string;
 		}): Promise<AgentReleaseEvidence | null> {
 			const sql = options.sql ?? getDb();
-			if (expectedEnvironment.error) throw expectedEnvironment.error;
-			return sql.begin(async (tx) => {
-				const rows = await tx<ReceiptWithAgentRow>`
-				SELECT r.applied_release_id, r.applied_release_sequence,
-				       r.applied_feed_sequence, r.applied_channel,
-				       r.applied_feed_digest, r.environment,
-				       r.rollback_to_release_id, r.rollback_to_sequence,
-				       r.manifest_digest, r.status,
-				       r.revision_ref, r.settings_hash, r.applied_at,
-				       r.personal_baseline_version_id,
-				       r.personal_baseline_effective_settings_digest,
-				       r.personal_baseline_settings,
-				       r.baseline_override,
-				       r.baseline_override_digest,
-				       a.owner_user_id, a.identity_md, a.soul_md, a.user_md,
-				       a.model, a.model_selection, a.provider_model_preferences,
-				       a.network_config, a.egress_config, a.nix_config, a.mcp_servers,
-				       a.skills_config, a.tools_config, a.plugins_config,
-				       a.installed_providers, a.verbose_logging,
-				       a.pre_approved_tools, a.guardrails
-				FROM agent_release_applies r
-				JOIN agents a
-				  ON a.organization_id = r.organization_id
-				 AND a.id = r.agent_id
-				WHERE r.organization_id = ${input.organizationId}
-				  AND r.agent_id = ${input.agentId}
-				LIMIT 1
-				FOR SHARE OF r, a
-			`;
-				if (rows[0] && rows[0].environment !== expectedEnvironment.value) {
-					throw releaseError(
-						"agent_release_receipt_environment_mismatch",
-						409,
-						"Agent release evidence belongs to another runtime environment",
-					);
-				}
-				if (!rows[0]) return null;
-				const evidence = evidenceFromReceipt(input.agentId, rows[0]);
-				const liveSettingsHash = settingsHashFromAgent(
-					rows[0],
-					rows[0].personal_baseline_settings,
-				);
-				return liveSettingsHash === rows[0].settings_hash
-					? evidence
-					: { ...evidence, status: "drifted", liveSettingsHash };
-			});
+			return sql.begin((tx) => getEvidenceInTransaction(tx, input));
 		},
 	};
 }
@@ -2848,6 +2863,10 @@ function signPostApplyEvidence(input: {
 	result: AgentReleaseApplyResult;
 	signer: EvidenceSigner;
 	now: Date;
+	configuration?: {
+		configurationRevision: string;
+		managementMode: "native" | "toolbox_managed";
+	};
 }): AgentReleasePostApplyEvidence {
 	const observedAt = input.now.toISOString();
 	const expiresAt = new Date(input.now.getTime() + 5 * 60_000).toISOString();
@@ -2855,6 +2874,7 @@ function signPostApplyEvidence(input: {
 		contract: "lobu-managed-settings-readback-v1",
 		passed: true,
 		settingsHash: input.result.settingsHash,
+		...(input.configuration ?? {}),
 		...(input.result.baselineVersionId === undefined
 			? {}
 			: {
@@ -2882,6 +2902,7 @@ function signPostApplyEvidence(input: {
 		manifestDigest: input.result.manifestDigest,
 		revisionRef: input.result.revisionRef,
 		settingsHash: input.result.settingsHash,
+		...(input.configuration ?? {}),
 		...(input.result.baselineVersionId === undefined
 			? {}
 			: {
