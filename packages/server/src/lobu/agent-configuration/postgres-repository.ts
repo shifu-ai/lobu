@@ -748,7 +748,17 @@ export async function applyNativePatchInTransaction(
   const shadowDecisionMatches =
     canonicalize([...legacyRejectedFields].sort()) ===
     canonicalize([...policyDecision.rejectedFields].sort());
-  if (!shadowDecisionMatches) {
+  // Known, designed divergence — not a signal: in `native` mode the field
+  // policy never rejects (rejectedFields is always []), while the legacy
+  // release predicate rejects release-owned fields whenever an applied
+  // release receipt exists. That legacy rejection is the authoritative
+  // `managed_configuration_sealed` outcome below, so warning here would turn
+  // every legitimate sealed rejection into systematic shadow noise.
+  const knownNativeReceiptSealDivergence =
+    control.management_mode === 'native' &&
+    legacyRejected &&
+    policyDecision.rejectedFields.length === 0;
+  if (!shadowDecisionMatches && !knownNativeReceiptSealDivergence) {
     logger.warn(
       {
         organizationId: command.organizationId,

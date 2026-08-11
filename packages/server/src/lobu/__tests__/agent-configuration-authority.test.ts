@@ -1416,6 +1416,39 @@ describe('AgentConfigurationAuthority', () => {
     });
   });
 
+  test('native receipt-sealed rejection does not emit shadow_decision_mismatch noise', async () => {
+    // Designed divergence: in native mode decideNativeSettingsPatch never
+    // rejects, while the legacy release predicate seals release-owned fields
+    // whenever an applied receipt exists. That is the authoritative
+    // `managed_configuration_sealed` outcome — it must not be reported as a
+    // shadow mismatch on every legitimate rejection.
+    await seedAppliedEnrollmentRelease();
+    const authority = createAgentConfigurationAuthority();
+    const warnSpy = spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await expect(
+        authority.apply({
+          organizationId: ORGANIZATION_ID,
+          agentId: AGENT_ID,
+          commandId: 'native-receipt-sealed-command',
+          expectedConfigurationRevision: '0',
+          actor: { kind: 'session' },
+          patch: { identityMd: 'native write against sealed settings' },
+        })
+      ).resolves.toEqual({
+        status: 'rejected',
+        reason: 'managed_configuration_sealed',
+      });
+      const mismatchCalls = warnSpy.mock.calls.filter(
+        (call) => call[1] === 'shadow_decision_mismatch'
+      );
+      expect(mismatchCalls).toEqual([]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   test('requires a revision for managed operator patches after honoring exact legacy replay', async () => {
     const authority = createAgentConfigurationAuthority();
     const legacyCommand = {
