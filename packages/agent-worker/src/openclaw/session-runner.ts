@@ -3193,7 +3193,7 @@ Use it when the user references past discussions or you need context.`);
     });
     const effectivePromptText = `${inlinePromptPrefix}${annotateRelativeDates(
       contextPreparedPrompt.promptText,
-      new Date(),
+      turnNow,
       turnTimeZone
     )}`;
 
