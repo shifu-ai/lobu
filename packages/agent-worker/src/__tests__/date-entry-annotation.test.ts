@@ -47,6 +47,68 @@ describe("相對日", () => {
   });
 });
 
+describe("複合詞截斷誤標（C1）", () => {
+  test("大後天/大前天 不可誤標成 後天/前天", () => {
+    expect(run("大後天交報告")).toBe("大後天交報告");
+    expect(run("大前天")).toBe("大前天");
+  });
+  test("上上週/下下週 不可誤標成 上週/下週", () => {
+    expect(run("上上週三")).toBe("上上週三");
+    expect(run("下下週一")).toBe("下下週一");
+  });
+  test("「一下週五」的「一下」不可誤標成「下週五」", () => {
+    expect(run("幫我看一下週五的名單")).toBe("幫我看一下週五的名單");
+  });
+});
+
+describe("天氣類碰撞（C2）", () => {
+  test("這星期天氣如何 / 下禮拜天氣好嗎 不可誤標成 星期天/禮拜天", () => {
+    expect(run("這星期天氣如何")).toBe("這星期天氣如何");
+    expect(run("下禮拜天氣好嗎")).toBe("下禮拜天氣好嗎");
+  });
+});
+
+describe("高頻碰撞詞 deny-list（I3）", () => {
+  test("說明天氣 / 如今天氣 / 然後天氣 不可誤標", () => {
+    expect(run("請說明天氣預報的資料來源")).toBe("請說明天氣預報的資料來源");
+    expect(run("如今天氣越來越熱")).toBe("如今天氣越來越熱");
+    expect(run("然後天氣好的話")).toBe("然後天氣好的話");
+  });
+  test("下週日本出差 不可誤標成 下週日", () => {
+    expect(run("下週日本出差")).toBe("下週日本出差");
+  });
+});
+
+describe("列舉寫法孤兒字（I4）", () => {
+  test("上週六日 / 下週三四 整組抑制，不可把後接的星期字孤立", () => {
+    expect(run("上週六日的營收")).toBe("上週六日的營收");
+    expect(run("下週三四會出差")).toBe("下週三四會出差");
+  });
+});
+
+describe("既有抑制迴歸（deferred b）", () => {
+  test("下週日期未定 / 下禮拜三期中考 不可誤標", () => {
+    expect(run("下週日期未定")).toBe("下週日期未定");
+    expect(run("下禮拜三期中考")).toBe("下禮拜三期中考");
+  });
+});
+
+describe("外層 catch fail-open（I2）", () => {
+  test("zonedToday 對兩個時區都 throw 時，outer catch 仍回原文而非拋出", () => {
+    const originalDateTimeFormat = Intl.DateTimeFormat;
+    // @ts-expect-error 刻意打壞 Intl 讓 zonedToday 兩次嘗試都 throw，逼進外層 catch
+    Intl.DateTimeFormat = function () {
+      throw new Error("boom: Intl unavailable");
+    } as unknown as typeof Intl.DateTimeFormat;
+    try {
+      expect(() => annotateRelativeDates("今天", NOW, TZ)).not.toThrow();
+      expect(annotateRelativeDates("今天", NOW, TZ)).toBe("今天");
+    } finally {
+      Intl.DateTimeFormat = originalDateTimeFormat;
+    }
+  });
+});
+
 describe("防重標與冪等", () => {
   test("詞後已有日期 → 不標", () => {
     expect(run("上週二（2026-08-04）的戰報")).toBe("上週二（2026-08-04）的戰報");
