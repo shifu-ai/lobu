@@ -676,10 +676,31 @@ describe('PATCH /:agentId/config — native configuration authority', () => {
     expect(got.status).toBe(200);
     const config = (await got.json()) as Record<string, unknown>;
     delete config.authProfiles;
-    // The production store always stamps updatedAt; the test store may omit
-    // it for a never-written agent, so pin it to keep the regression key in
-    // the round-tripped body either way.
-    config.updatedAt ??= Date.now();
+    // The GET in this suite is served by the mocked store, which can hide the
+    // real projection. Overlay the exact shape the production Postgres store
+    // returns for a just-created agent (the agents-table column DEFAULTs via
+    // rowToSettings, plus the server-stamped updatedAt) so this test fails
+    // whenever PATCH stops accepting a real fresh-agent GET body — the
+    // cli-smoke round-trip contract.
+    Object.assign(config, {
+      modelSelection: {},
+      providerModelPreferences: {},
+      networkConfig: {},
+      nixConfig: {},
+      mcpServers: {},
+      soulMd: '',
+      userMd: '',
+      identityMd: '',
+      skillsConfig: { skills: [] },
+      toolsConfig: {},
+      pluginsConfig: {},
+      installedProviders: [],
+      verboseLogging: false,
+      egressConfig: {},
+      preApprovedTools: [],
+      guardrails: [],
+      updatedAt: Date.now(),
+    });
 
     const response = await app.request(`/${agentId}/config`, {
       method: 'PATCH',

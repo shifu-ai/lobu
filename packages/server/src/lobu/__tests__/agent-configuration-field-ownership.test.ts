@@ -43,6 +43,42 @@ describe('agent configuration field ownership', () => {
     expect(parsed.mcpServers).toBe(nested);
   });
 
+  test('accepts the fresh-agent DB-default projection (legacy accepted set)', () => {
+    // Exactly what GET /config returns for a just-created agent: the agents
+    // table column DEFAULTs ('{}'::jsonb et al) projected through
+    // rowToSettings. The pre-authority PATCH path accepted this body verbatim
+    // (GET → PATCH round-trip, scripts/cli-smoke.sh), and
+    // normalizeNativeSettingsPatchForPersistence itself writes `{}` for null
+    // modelSelection/pluginsConfig — so `{}` is part of the accepted set.
+    const freshAgentGetBody = {
+      modelSelection: {},
+      providerModelPreferences: {},
+      networkConfig: {},
+      nixConfig: {},
+      mcpServers: {},
+      soulMd: '',
+      userMd: '',
+      identityMd: '',
+      skillsConfig: { skills: [] },
+      toolsConfig: {},
+      pluginsConfig: {},
+      installedProviders: [],
+      verboseLogging: false,
+      egressConfig: {},
+      preApprovedTools: [],
+      guardrails: [],
+    };
+    expect(parseNativeSettingsPatch(freshAgentGetBody)).toEqual(freshAgentGetBody);
+
+    // Empty-shape tolerance must not loosen value validation.
+    expect(() => parseNativeSettingsPatch({ modelSelection: { mode: 'bogus' } })).toThrow(
+      'invalid_configuration_field_value'
+    );
+    expect(() => parseNativeSettingsPatch({ pluginsConfig: { plugins: 'broken' } })).toThrow(
+      'invalid_configuration_field_value'
+    );
+  });
+
   test('rejects unknown, timestamp, runtime, and credential fields closed', () => {
     expect(() => parseNativeSettingsPatch({ futureField: true })).toThrow(
       'unknown_configuration_field'

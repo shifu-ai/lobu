@@ -90,12 +90,18 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 const stringArraySchema = z.array(z.string());
 const stringRecordSchema = z.record(z.string(), z.string());
+// `mode` is optional at this boundary: the legacy accepted set includes `{}` —
+// it is the `model_selection` column DEFAULT (every fresh agent GETs it back),
+// and `normalizeNativeSettingsPatchForPersistence` below writes `{}` for null.
+// Rejecting it would break every GET → PATCH config round-trip. The cast keeps
+// the parsed patch typed as the core ModelSelectionState, which read paths
+// already assume for the same DB shape.
 const modelSelectionSchema = z
   .object({
-    mode: z.enum(['auto', 'pinned']),
+    mode: z.enum(['auto', 'pinned']).optional(),
     pinnedModel: z.string().optional(),
   })
-  .passthrough();
+  .passthrough() as z.ZodType<NonNullable<AgentSettings['modelSelection']>>;
 const domainJudgeRuleSchema = z
   .object({ domain: z.string(), judge: z.string().optional() })
   .passthrough();
@@ -223,7 +229,12 @@ const pluginSchema = z
     config: z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough();
-const pluginsConfigSchema = z.object({ plugins: z.array(pluginSchema) }).passthrough();
+// `plugins` is optional at this boundary for the same reason as
+// modelSelectionSchema: `{}` is the `plugins_config` column DEFAULT and the
+// null-normalization shape, so it belongs to the legacy accepted set.
+const pluginsConfigSchema = z
+  .object({ plugins: z.array(pluginSchema).optional() })
+  .passthrough() as z.ZodType<NonNullable<AgentSettings['pluginsConfig']>>;
 const installedProviderSchema = z
   .object({
     providerId: z.string(),
