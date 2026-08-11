@@ -2163,8 +2163,20 @@ routes.patch('/:agentId/config', async (c) => {
   // user-scoped and live in `user_auth_profiles` with secrets in the secret
   // store. Pull them out of the settings patch and persist them through the
   // proper path; otherwise an api-key typed into the UI is silently dropped.
-  const { authProfiles, ...settingsUpdates } = updates as {
+  //
+  // `updatedAt` is a server-emitted read-only timestamp that GET /config
+  // includes in its response. Clients (CLI `agent config patch`, settings
+  // UIs) round-trip the GET body back into PATCH, so strip it here instead
+  // of letting the strict field-ownership parser reject the round-trip with
+  // `unknown_configuration_field`. Dropping it is safe: it was never a
+  // writable field — the store stamps its own timestamp on every write.
+  const {
+    authProfiles,
+    updatedAt: _readOnlyUpdatedAt,
+    ...settingsUpdates
+  } = updates as {
     authProfiles?: AuthProfile[];
+    updatedAt?: unknown;
   } & Record<string, unknown>;
 
   if (authProfiles !== undefined && Object.keys(settingsUpdates).length > 0) {

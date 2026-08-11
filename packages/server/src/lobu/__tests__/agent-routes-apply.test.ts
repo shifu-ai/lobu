@@ -624,6 +624,34 @@ describe('PATCH /:agentId/config — native configuration authority', () => {
     });
   });
 
+  test('accepts a GET /config round-trip body (server-emitted updatedAt is ignored)', async () => {
+    // Contract exercised by `lobu agent config patch` in scripts/cli-smoke.sh:
+    // GET /config, drop authProfiles, PATCH the rest back verbatim. The GET
+    // response includes the read-only `updatedAt` stamp, which must not trip
+    // the strict field-ownership parser.
+    const app = await importAgentRoutes();
+    const agentId = 'native-get-patch-roundtrip';
+    await seedAgent(ORG_A, agentId);
+
+    const got = await app.request(`/${agentId}/config`);
+    expect(got.status).toBe(200);
+    const config = (await got.json()) as Record<string, unknown>;
+    delete config.authProfiles;
+    // The production store always stamps updatedAt; the test store may omit
+    // it for a never-written agent, so pin it to keep the regression key in
+    // the round-tripped body either way.
+    config.updatedAt ??= Date.now();
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ success: true });
+  });
+
   test.each([
     ['mcpServers', 'broken'],
     ['guardrails', {}],
