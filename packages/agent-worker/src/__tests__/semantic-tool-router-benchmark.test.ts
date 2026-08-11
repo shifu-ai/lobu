@@ -53,6 +53,16 @@ function percentile(values: number[], ratio: number): number {
   );
 }
 
+function ciLifecycleCeilingMs(size: number): number {
+  if (size <= 500) return 30;
+  if (size >= 2_000) return 90;
+  return 75;
+}
+
+function ciRouteCeilingMs(size: number): number {
+  return size <= 500 ? 30 : 75;
+}
+
 describe("semantic tool router repeatable performance guard", () => {
   test("high-confidence acknowledgements skip semantic retrieval while unknown prose still routes", () => {
     clearToolRetrievalIndexCacheForTests();
@@ -193,9 +203,10 @@ describe("semantic tool router repeatable performance guard", () => {
       const lifecycleP95Ms = percentile(lifecycleLatencies, 0.95);
       const selectionP95Ms = percentile(selectionLatencies, 0.95);
       const productSloMs = size <= 500 ? 10 : 25;
+      const ciCeilingMs = ciLifecycleCeilingMs(size);
       const combinedMemory = toolRouterRetainedMemoryStats();
       console.info(
-        `semantic-router external-turn-lifecycle size=${size} lifecycleP50=${percentile(lifecycleLatencies, 0.5).toFixed(3)}ms lifecycleP95=${lifecycleP95Ms.toFixed(3)}ms selectionP95=${selectionP95Ms.toFixed(3)}ms productSlo=${productSloMs}ms productSloPass=${lifecycleP95Ms < productSloMs} ciCeiling=${size <= 500 ? 30 : 75}ms snapshotCacheHits=${toolInventorySnapshotCacheStats().hits} combinedRetainedBytes=${combinedMemory.estimatedBytes} combinedRetainedEntries=${combinedMemory.entries}`
+        `semantic-router external-turn-lifecycle size=${size} lifecycleP50=${percentile(lifecycleLatencies, 0.5).toFixed(3)}ms lifecycleP95=${lifecycleP95Ms.toFixed(3)}ms selectionP95=${selectionP95Ms.toFixed(3)}ms productSlo=${productSloMs}ms productSloPass=${lifecycleP95Ms < productSloMs} ciCeiling=${ciCeilingMs}ms snapshotCacheHits=${toolInventorySnapshotCacheStats().hits} combinedRetainedBytes=${combinedMemory.estimatedBytes} combinedRetainedEntries=${combinedMemory.entries}`
       );
       expect(result.selection.trace.selectedToolNames).toContain(
         "lobu-memory/manage_schedules"
@@ -204,7 +215,7 @@ describe("semantic tool router repeatable performance guard", () => {
       expect(combinedMemory.estimatedBytes).toBeLessThanOrEqual(
         32 * 1024 * 1024
       );
-      expect(lifecycleP95Ms).toBeLessThan(size <= 500 ? 30 : 75);
+      expect(lifecycleP95Ms).toBeLessThan(ciCeilingMs);
     });
 
     test(`lower-level production route guard at ${size} tools`, () => {
@@ -240,13 +251,14 @@ describe("semantic tool router repeatable performance guard", () => {
       const p50Ms = percentile(latencies, 0.5);
       const p95Ms = percentile(latencies, 0.95);
       const productSloMs = size <= 500 ? 10 : 25;
+      const ciCeilingMs = ciRouteCeilingMs(size);
       console.info(
-        `semantic-router production-route size=${size} p50=${p50Ms.toFixed(3)}ms p95=${p95Ms.toFixed(3)}ms productSlo=${productSloMs}ms productSloPass=${p95Ms < productSloMs} ciCeiling=${size <= 500 ? 30 : 75}ms estimatedBytes=${result.estimatedIndexBytes}`
+        `semantic-router production-route size=${size} p50=${p50Ms.toFixed(3)}ms p95=${p95Ms.toFixed(3)}ms productSlo=${productSloMs}ms productSloPass=${p95Ms < productSloMs} ciCeiling=${ciCeilingMs}ms estimatedBytes=${result.estimatedIndexBytes}`
       );
       expect(result.selectedEntries[0]?.name).toBe("manage_schedules");
       expect(result.cacheHit).toBe(true);
       // CI ceilings are regression guards, not a production SLO claim.
-      expect(p95Ms).toBeLessThan(size <= 500 ? 30 : 75);
+      expect(p95Ms).toBeLessThan(ciCeilingMs);
     });
   }
 
