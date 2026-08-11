@@ -624,6 +624,45 @@ describe('PATCH /:agentId/config — native configuration authority', () => {
     });
   });
 
+  test('compat path (no If-Match) applies two different patches under the same trace id', async () => {
+    // x-shifu-trace-id spans a whole journey (many calls in one turn). If the
+    // compat command id were derived from it, the second, different PATCH in
+    // the same trace would hit `agent_configuration_command_conflict` and the
+    // change would be silently dropped. The legacy path applied both; the
+    // compat path must too.
+    const app = await importAgentRoutes();
+    const agentId = 'native-compat-trace-reuse';
+    await seedAgent(ORG_A, agentId);
+
+    const first = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'x-shifu-trace-id': 'trace-one-turn',
+      },
+      body: JSON.stringify({ userMd: 'first write' }),
+    });
+    expect(first.status).toBe(200);
+
+    const second = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'x-shifu-trace-id': 'trace-one-turn',
+      },
+      body: JSON.stringify({ userMd: 'second write' }),
+    });
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({ success: true });
+
+    const { getDb } = await import('../../db/client.js');
+    const rows = await getDb()`
+      SELECT user_md FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(rows).toEqual([{ user_md: 'second write' }]);
+  });
+
   test('accepts a GET /config round-trip body (server-emitted updatedAt is ignored)', async () => {
     // Contract exercised by `lobu agent config patch` in scripts/cli-smoke.sh:
     // GET /config, drop authProfiles, PATCH the rest back verbatim. The GET

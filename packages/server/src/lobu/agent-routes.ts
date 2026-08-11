@@ -91,10 +91,16 @@ function parseAgentConfigurationCommandId(value: string | undefined): string {
   return value;
 }
 
-function compatibilityCommandId(requestId: string | undefined): string {
-  return `compat:${
-    requestId && IDEMPOTENCY_KEY_PATTERN.test(requestId) ? requestId : randomUUID()
-  }`;
+function compatibilityCommandId(): string {
+  // Always mint a fresh command id for the no-If-Match compatibility path.
+  // Reusing a request-scoped header (x-shifu-trace-id / x-request-id) here
+  // is wrong: trace ids span a whole journey, so a second, different PATCH
+  // within the same trace would collide in the command journal and be
+  // rejected with `agent_configuration_command_conflict` — silently dropping
+  // the second change. The legacy path never had replay dedup, so the compat
+  // path doesn't either; clients that want idempotency send If-Match +
+  // Idempotency-Key.
+  return `compat:${randomUUID()}`;
 }
 
 type ProviderAuthType = 'oauth' | 'device-code' | 'api-key';
@@ -2224,9 +2230,7 @@ routes.patch('/:agentId/config', async (c) => {
       throw error;
     }
   } else {
-    commandId = compatibilityCommandId(
-      c.req.header('x-shifu-trace-id') ?? c.req.header('x-request-id')
-    );
+    commandId = compatibilityCommandId();
     logger.warn({ organizationId, agentId }, 'missing_revision_precondition');
   }
 
