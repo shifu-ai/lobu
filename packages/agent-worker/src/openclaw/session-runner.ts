@@ -69,6 +69,7 @@ import {
   createOpenClawCustomTools,
 } from "./custom-tools";
 import { buildCurrentDateContext, resolveTurnTimeZone } from "./date-context";
+import { annotateRelativeDates } from "./date-entry-annotation";
 import {
   type DateGuardResult,
   extractTrustedTemporalCandidates,
@@ -3190,7 +3191,11 @@ Use it when the user references past discussions or you need context.`);
       runId: conversationId,
       effectiveCapTokens: 24_000,
     });
-    const effectivePromptText = `${inlinePromptPrefix}${contextPreparedPrompt.promptText}`;
+    const effectivePromptText = `${inlinePromptPrefix}${annotateRelativeDates(
+      contextPreparedPrompt.promptText,
+      new Date(),
+      turnTimeZone
+    )}`;
 
     // Load image attachments for vision-capable models
     const images = await loadImageAttachments();
