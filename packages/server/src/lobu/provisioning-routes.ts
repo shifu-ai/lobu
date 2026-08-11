@@ -20,18 +20,26 @@ import {
   refreshCredential,
 } from "../gateway/routes/internal/device-auth.js";
 import type { WritableSecretStore } from "../gateway/secrets/index.js";
+import {
+  resolveRuntimeCapabilitySnapshot,
+  type RuntimeEnvironment,
+} from "../gateway/services/runtime-capability-snapshot.js";
 import type { Env } from "../index";
 import {
-  AgentReleaseError,
-  createAgentReleaseService,
-} from "./agent-release-service.js";
-import {
-  AgentSettingsManagedByFencedProvisioningError,
-  AgentSettingsManagedByReleaseError,
+  AGENT_CONFIGURATION_RESPONSE_VERSION,
+  AGENT_CONFIGURATION_VERSION_HEADER,
+  AgentConfigurationError,
+  AgentProvisioningModeError,
   ProvisioningFenceError,
-  provisionFencedAgent,
-  provisionLegacyAgent,
-} from "./legacy-agent-settings-service.js";
+  type AgentConfigurationAuthority,
+  type AgentConfigurationResponseVersion,
+  createRuntimeAgentConfigurationAuthority,
+  type Sha256Digest,
+} from "./agent-configuration/index.js";
+import { parseNativeSettingsPatch } from "./agent-configuration/field-ownership.js";
+import {
+  AgentReleaseError,
+} from "./agent-release-service.js";
 import {
   validateExpectedGrantPatterns,
   verifyRuntimeGrantPatterns,
@@ -42,7 +50,7 @@ import {
 } from "./sales-battle-report-schedule-reconcile.js";
 import {
   AGENT_ID_PATTERN,
-  createPostgresAgentConfigStore,
+  createPostgresAgentConfigReadMetadataStore,
   createPostgresAgentConnectionStore,
 } from "./stores/postgres-stores";
 import { parseStrictJsonBytes, StrictJsonError } from "./strict-json-parser.js";
@@ -77,7 +85,7 @@ export type ShifuMcpStatusReasonCode =
   | "runtime_status_unavailable"
   | "ui_unmanaged_connector";
 
-const configStore = createPostgresAgentConfigStore();
+const configStore = createPostgresAgentConfigReadMetadataStore();
 const connectionStore = createPostgresAgentConnectionStore();
 const grantStore = new GrantStore();
 
@@ -88,6 +96,12 @@ interface ProvisioningRoutesOptions {
   agentReleaseTrustedPublicKeysJson?: string;
   agentReleaseEvidenceSigningPrivateKeysJson?: string;
   agentReleaseEnvironment?: string;
+  agentConfigurationAuthority?: AgentConfigurationAuthority;
+  agentConfigurationReadHooks?: { afterEvidenceRead?: () => Promise<void> };
+  agentConfigurationTransactionHooks?: {
+    beforeAgentLock?: () => Promise<void>;
+  };
+  runtimeCapabilitySnapshotResolver?: typeof resolveRuntimeCapabilitySnapshot;
   legacyProvisioningHooks?: {
     afterAgentLock?: () => Promise<void>;
   };
@@ -107,11 +121,21 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function parseAgentConfigurationResponseVersion(
+  value: string | undefined
+): AgentConfigurationResponseVersion | undefined | null {
+  if (value === undefined) return undefined;
+  return value.trim() === AGENT_CONFIGURATION_RESPONSE_VERSION
+    ? AGENT_CONFIGURATION_RESPONSE_VERSION
+    : null;
+}
+
 function validateSettings(settings: unknown): Omit<AgentSettings, "updatedAt"> {
   if (settings === undefined) return {};
   if (!isObject(settings)) {
     throw new Error("settings must be an object");
   }
+  parseNativeSettingsPatch(settings);
   return settings as Omit<AgentSettings, "updatedAt">;
 }
 
@@ -133,8 +157,10 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const BASELINE_VERSION_PATTERN = /^personal-agent-baseline-v1-[0-9a-f]{64}$/;
 const SHA256_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const CONFIGURATION_ETAG_PATTERN = /^"agent-config:(0|[1-9][0-9]*)"$/;
+const IDEMPOTENCY_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
 
-function requestDigest(value: unknown): string {
+function requestDigest(value: unknown): Sha256Digest {
   return `sha256:${createHash("sha256").update(canonicalize(value)).digest("hex")}`;
 }
 
@@ -226,34 +252,26 @@ async function ensureUsableOAuthCredential(
   return refreshed;
 }
 
-async function syncProvisioningGrants(
-  agentId: string,
-  settings: Omit<AgentSettings, "updatedAt">,
-  organizationId: string
-): Promise<void> {
-  for (const domain of settings.networkConfig?.allowedDomains ?? []) {
-    await grantStore.grant(agentId, domain, null, undefined, organizationId);
-  }
-  for (const pattern of settings.preApprovedTools ?? []) {
-    await grantStore.grant(agentId, pattern, null, undefined, organizationId);
-  }
-}
-
 export function createProvisioningRoutes(
   options: ProvisioningRoutesOptions = {}
 ): Hono<{ Bindings: Env }> {
   const provisioningRoutes = new Hono<{ Bindings: Env }>();
-  const agentReleaseService = createAgentReleaseService({
-    trustedPublicKeysJson:
-      options.agentReleaseTrustedPublicKeysJson ??
-      process.env.AGENT_RELEASE_TRUSTED_PUBLIC_KEYS_JSON,
-    evidenceSigningPrivateKeysJson:
-      options.agentReleaseEvidenceSigningPrivateKeysJson ??
-      process.env.AGENT_RELEASE_EVIDENCE_SIGNING_PRIVATE_KEYS_JSON,
-    expectedEnvironment:
-      options.agentReleaseEnvironment ?? process.env.AGENT_RELEASE_ENVIRONMENT,
-    transactionHooks: options.agentReleaseTransactionHooks,
-  });
+  const agentConfigurationAuthority =
+    options.agentConfigurationAuthority ??
+    createRuntimeAgentConfigurationAuthority({
+      agentReleaseTrustedPublicKeysJson:
+        options.agentReleaseTrustedPublicKeysJson,
+      agentReleaseEvidenceSigningPrivateKeysJson:
+        options.agentReleaseEvidenceSigningPrivateKeysJson,
+      agentReleaseEnvironment: options.agentReleaseEnvironment,
+      agentReleaseTransactionHooks: options.agentReleaseTransactionHooks,
+      agentConfigurationReadHooks: options.agentConfigurationReadHooks,
+      agentConfigurationTransactionHooks:
+        options.agentConfigurationTransactionHooks,
+      legacyProvisioningHooks: options.legacyProvisioningHooks,
+    });
+  const runtimeCapabilitySnapshotResolver =
+    options.runtimeCapabilitySnapshotResolver ?? resolveRuntimeCapabilitySnapshot;
   const releaseAssuranceReadback =
     options.releaseAssuranceReadback ??
     createReleaseAssuranceReadback({
@@ -267,16 +285,19 @@ export function createProvisioningRoutes(
         const metadata = await configStore.getMetadata(agentId);
         if (!metadata || metadata.organizationId !== organizationId)
           return null;
-        const receipt = await agentReleaseService.getEvidence({
-          organizationId,
-          agentId,
-        });
+        const readback = await agentConfigurationAuthority.readManagedRelease({
+            organizationId,
+            agentId,
+          });
+        const receipt = readback.evidence;
         return {
           managedReleaseReceipt: receipt,
           liveManagedSettingsDigest:
             receipt?.status === "drifted"
               ? (receipt.liveSettingsHash ?? null)
               : (receipt?.settingsHash ?? null),
+          configurationRevision: readback.state.configurationRevision,
+          managementMode: readback.state.managementMode,
         };
       },
     });
@@ -542,9 +563,21 @@ export function createProvisioningRoutes(
         effectiveSettingsDigest,
       };
       try {
-        const result = await provisionFencedAgent({
+        const digest = requestDigest({
+          agentId,
+          name,
+          description: description ?? null,
+          ownerUserId,
+          settings,
+          ...fence,
+        });
+        const result = await agentConfigurationAuthority.bootstrap({
+          kind: "bootstrap",
+          profile: "toolbox_personal",
           organizationId,
           agentId,
+          commandId: `toolbox-fence:${targetId}:${claimGeneration}`,
+          actor: { kind: "provisioning" },
           name,
           description,
           ownerUserId,
@@ -556,15 +589,19 @@ export function createProvisioningRoutes(
           ),
           settings,
           fence,
-          requestDigest: requestDigest({
-            agentId,
-            name,
-            description: description ?? null,
-            ownerUserId,
-            settings,
-            ...fence,
-          }),
+          requestDigest: digest,
         });
+        if (result.status === "rejected") {
+          return c.json(
+            {
+              error:
+                result.reason === "bootstrap_owner_superseded"
+                  ? result.reason
+                  : "agent_settings_managed_by_release",
+            },
+            409
+          );
+        }
         return c.json(
           {
             ok: true,
@@ -580,8 +617,20 @@ export function createProvisioningRoutes(
         if (error instanceof ProvisioningFenceError) {
           return c.json({ error: error.code }, 409);
         }
-        if (error instanceof AgentSettingsManagedByReleaseError) {
-          return c.json({ error: error.code }, 409);
+        if (
+          error instanceof AgentConfigurationError &&
+          (error.code === "agent_configuration_command_conflict" ||
+            error.code === "agent_configuration_revision_mismatch")
+        ) {
+          return c.json(
+            {
+              error: error.code,
+              ...(error.currentRevision === undefined
+                ? {}
+                : { currentRevision: error.currentRevision }),
+            },
+            409
+          );
         }
         throw error;
       }
@@ -648,11 +697,22 @@ export function createProvisioningRoutes(
       );
     }
 
-    let provisioned: Awaited<ReturnType<typeof provisionLegacyAgent>>;
+    let provisioned;
     try {
-      provisioned = await provisionLegacyAgent({
+      const digest = requestDigest({
+        agentId,
+        name,
+        description: description ?? null,
+        ownerUserId,
+        settings,
+      });
+      provisioned = await agentConfigurationAuthority.bootstrap({
+        kind: "bootstrap",
+        profile: "toolbox_personal",
         organizationId,
         agentId,
+        commandId: `toolbox-bootstrap:${digest}`,
+        actor: { kind: "provisioning" },
         name,
         description,
         ownerUserId,
@@ -660,21 +720,42 @@ export function createProvisioningRoutes(
         membershipId: deterministicMembershipId(organizationId, ownerUserId),
         ownerEmail: deterministicToolboxOwnerEmail(organizationId, ownerUserId),
         settings,
-        transactionHooks: options.legacyProvisioningHooks,
+        requestDigest: digest,
       });
+      if (provisioned.status === "rejected") {
+        if (provisioned.reason === "bootstrap_owner_superseded") {
+          return c.json({ error: provisioned.reason }, 409);
+        }
+        return c.json(
+          {
+            error: "agent_settings_managed_by_release",
+            error_description:
+              "Agent release-owned settings must be changed through managed release apply",
+          },
+          409
+        );
+      }
     } catch (error) {
-      if (error instanceof AgentSettingsManagedByFencedProvisioningError) {
+      if (error instanceof AgentProvisioningModeError) {
         return c.json({ error: error.code }, 409);
       }
-      if (error instanceof AgentSettingsManagedByReleaseError) {
+      if (
+        error instanceof AgentConfigurationError &&
+        (error.code === "agent_configuration_command_conflict" ||
+          error.code === "agent_configuration_revision_mismatch")
+      ) {
         return c.json(
-          { error: error.code, error_description: error.message },
+          {
+            error: error.code,
+            ...(error.currentRevision === undefined
+              ? {}
+              : { currentRevision: error.currentRevision }),
+          },
           409
         );
       }
       throw error;
     }
-    await syncProvisioningGrants(agentId, settings, organizationId);
 
     return c.json(
       {
@@ -708,6 +789,159 @@ export function createProvisioningRoutes(
 
   provisioningRoutes.route("/", createRuntimeReadModelRoutes());
 
+  provisioningRoutes.post(
+    "/agents/:agentId/configuration-management/enroll",
+    async (c) => {
+      const denied = requireAdminPat(c);
+      if (denied) return denied;
+      const organizationId = c.get("organizationId") as string | null;
+      if (!organizationId)
+        return c.json({ error: "Authentication required" }, 401);
+      const agentId = c.req.param("agentId")?.trim() ?? "";
+      const agentIdError = validateShifuAgentId(agentId);
+      if (agentIdError) return c.json({ error: agentIdError }, 400);
+
+      const ifMatch = c.req.header("If-Match");
+      if (ifMatch === undefined) {
+        return c.json({ error: "agent_configuration_revision_required" }, 400);
+      }
+      const revisionMatch = CONFIGURATION_ETAG_PATTERN.exec(ifMatch);
+      if (!revisionMatch) {
+        return c.json({ error: "invalid_revision_precondition" }, 400);
+      }
+      const commandId = c.req.header("Idempotency-Key");
+      if (commandId === undefined) {
+        return c.json({ error: "missing_idempotency_key" }, 400);
+      }
+      if (!IDEMPOTENCY_KEY_PATTERN.test(commandId)) {
+        return c.json({ error: "invalid_idempotency_key" }, 400);
+      }
+
+      let body: Record<string, unknown>;
+      try {
+        const parsed = parseStrictJsonBytes(
+          new Uint8Array(await c.req.arrayBuffer())
+        );
+        if (!isObject(parsed)) throw new Error("invalid enrollment body");
+        body = parsed;
+      } catch {
+        return c.json({ error: "invalid_json" }, 400);
+      }
+      if (
+        Object.keys(body).length !== 2 ||
+        !Object.hasOwn(body, "toolboxUserId") ||
+        !Object.hasOwn(body, "environment")
+      ) {
+        return c.json({ error: "invalid_agent_configuration_enrollment" }, 400);
+      }
+      const toolboxUserId =
+        typeof body.toolboxUserId === "string" ? body.toolboxUserId.trim() : "";
+      const environment = body.environment;
+      if (!toolboxUserId || toolboxUserId.length > 200) {
+        return c.json({ error: "invalid_agent_configuration_enrollment" }, 400);
+      }
+      if (environment !== "staging" && environment !== "production") {
+        return c.json({ error: "invalid_agent_configuration_enrollment" }, 400);
+      }
+      const configuredEnvironment =
+        options.agentReleaseEnvironment ?? process.env.AGENT_RELEASE_ENVIRONMENT;
+      if (
+        configuredEnvironment !== "staging" &&
+        configuredEnvironment !== "production"
+      ) {
+        return c.json(
+          { error: "agent_configuration_runtime_environment_unavailable" },
+          503
+        );
+      }
+      if (environment !== configuredEnvironment) {
+        return c.json(
+          { error: "agent_configuration_environment_mismatch" },
+          409
+        );
+      }
+
+      let snapshot: Awaited<ReturnType<typeof resolveRuntimeCapabilitySnapshot>>;
+      try {
+        snapshot = await runtimeCapabilitySnapshotResolver(
+          { environment, toolboxUserId, agentId },
+          { bypassCache: true }
+        );
+      } catch {
+        return c.json(
+          { error: "agent_configuration_capability_snapshot_unavailable" },
+          503
+        );
+      }
+
+      try {
+        const result = await agentConfigurationAuthority.enrollToolboxManaged({
+          organizationId,
+          agentId,
+          commandId,
+          expectedConfigurationRevision: revisionMatch[1],
+          actor: { kind: "admin_pat" },
+          toolboxUserId,
+          environment,
+          runtimeEnvironment: configuredEnvironment as RuntimeEnvironment,
+          snapshot,
+        });
+        if (result.status === "conflict") {
+          return c.json(
+            {
+              error:
+                result.conflict === "revision_mismatch"
+                  ? "agent_configuration_revision_mismatch"
+                  : "agent_configuration_command_conflict",
+              currentRevision: result.currentRevision,
+            },
+            409
+          );
+        }
+        if (result.status === "rejected") {
+          return c.json({ error: `agent_configuration_${result.reason}` }, 409);
+        }
+        if (result.status === "already_managed") {
+          return c.json(
+            {
+              ok: true,
+              status: "no_change",
+              reason: "already_toolbox_managed",
+              managementMode: result.managementMode,
+              configurationRevision: result.configurationRevision,
+            },
+            200
+          );
+        }
+        return c.json(
+          {
+            ok: true,
+            status: result.status,
+            managementMode: result.state.managementMode,
+            configurationRevision: result.state.configurationRevision,
+            settingsDigest: result.state.settingsDigest,
+          },
+          200
+        );
+      } catch (error) {
+        if (error instanceof AgentConfigurationError) {
+          const status =
+            error.code === "agent_configuration_not_found" ? 404 : 400;
+          return c.json(
+            {
+              error: error.code,
+              ...(error.currentRevision === undefined
+                ? {}
+                : { currentRevision: error.currentRevision }),
+            },
+            status
+          );
+        }
+        throw error;
+      }
+    }
+  );
+
   provisioningRoutes.put(
     "/agents/:agentId/managed-settings",
     bodyLimit({
@@ -731,6 +965,12 @@ export function createProvisioningRoutes(
       const agentId = c.req.param("agentId")?.trim() ?? "";
       const agentIdError = validateShifuAgentId(agentId);
       if (agentIdError) return c.json({ error: agentIdError }, 400);
+      const responseVersion = parseAgentConfigurationResponseVersion(
+        c.req.header(AGENT_CONFIGURATION_VERSION_HEADER)
+      );
+      if (responseVersion === null) {
+        return c.json({ error: "unsupported_agent_configuration_version" }, 400);
+      }
 
       let command: unknown;
       try {
@@ -754,17 +994,37 @@ export function createProvisioningRoutes(
       }
 
       try {
-        const result = await agentReleaseService.apply({
+        const result = await agentConfigurationAuthority.applyManagedRelease({
           organizationId,
           agentId,
           command,
+          actor: { kind: "release" },
+          ...(responseVersion === undefined ? {} : { responseVersion }),
         });
-        return c.json(result, 200);
+        return c.json(result.evidence, 200);
       } catch (error) {
         if (error instanceof AgentReleaseError) {
           return c.json(
             { error: error.code, error_description: error.message },
             error.status
+          );
+        }
+        if (error instanceof AgentConfigurationError) {
+          const status =
+            error.code === "agent_configuration_not_found"
+              ? 404
+              : error.code === "invalid_revision_precondition"
+                ? 400
+                : 409;
+          return c.json(
+            {
+              error: error.code,
+              error_description: error.message,
+              ...(error.currentRevision === undefined
+                ? {}
+                : { currentRevision: error.currentRevision }),
+            },
+            status
           );
         }
         throw error;
@@ -782,15 +1042,32 @@ export function createProvisioningRoutes(
     const agentId = c.req.param("agentId")?.trim() ?? "";
     const agentIdError = validateShifuAgentId(agentId);
     if (agentIdError) return c.json({ error: agentIdError }, 400);
+    const responseVersion = parseAgentConfigurationResponseVersion(
+      c.req.header(AGENT_CONFIGURATION_VERSION_HEADER)
+    );
+    if (responseVersion === null) {
+      return c.json({ error: "unsupported_agent_configuration_version" }, 400);
+    }
 
     try {
-      const evidence = await agentReleaseService.getEvidence({
+      const readback = await agentConfigurationAuthority.readManagedRelease({
         organizationId,
         agentId,
       });
-      if (!evidence)
+      if (!readback.evidence)
         return c.json({ error: "agent_release_evidence_not_found" }, 404);
-      return c.json(evidence, 200);
+      return c.json(
+        {
+          ...readback.evidence,
+          ...(responseVersion === AGENT_CONFIGURATION_RESPONSE_VERSION
+            ? {
+                configurationRevision: readback.state.configurationRevision,
+                managementMode: readback.state.managementMode,
+              }
+            : {}),
+        },
+        200
+      );
     } catch (error) {
       if (error instanceof AgentReleaseError) {
         return c.json(

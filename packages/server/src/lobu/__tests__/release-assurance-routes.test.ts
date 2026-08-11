@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import { createProvisioningRoutes } from "../provisioning-routes";
+import { createReleaseAssuranceReadback } from '../release-assurance-readback';
 import { orgContext } from "../stores/org-context";
 
 const ORG_ID = "org-release-readback";
@@ -32,6 +33,36 @@ function appWith(
 }
 
 describe("release assurance bounded provisioning readback", () => {
+	it('adds configuration revision and mode without exposing configuration values', async () => {
+		const readback = createReleaseAssuranceReadback({
+			findAgentBase: async () => ({
+				managedReleaseReceipt: { status: 'applied' },
+				liveManagedSettingsDigest: `sha256:${'a'.repeat(64)}`,
+				configurationRevision: '7',
+				managementMode: 'toolbox_managed',
+			}),
+			inventoryStore: { read: async () => ({
+				status: 'missing' as const,
+				names: [],
+				fingerprint: null,
+				observedAt: null,
+				expiresAt: null,
+				releaseId: null,
+				releaseSequence: null,
+				capabilitySnapshotDigest: null,
+			}) },
+			now: () => new Date('2026-08-09T00:00:00.000Z'),
+		});
+		const result = await readback.readAgent({
+			organizationId: ORG_ID,
+			agentId: 'shifu-u-test',
+		});
+		expect(result).toMatchObject({
+			configurationRevision: '7',
+			managementMode: 'toolbox_managed',
+		});
+		expect(JSON.stringify(result)).not.toContain('identityMd');
+	});
 	it("requires an organization-scoped mcp:admin PAT", async () => {
 		const response = await appWith(
 			{ readRuntime: async () => ({}), readAgent: async () => null },

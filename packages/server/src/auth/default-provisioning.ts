@@ -21,12 +21,15 @@
  *     exact device via `device_worker_id`.
  */
 
+import { createHash } from 'node:crypto';
+import { canonicalize } from 'json-canonicalize';
 import { getDb } from '../db/client';
 import type { DbClient } from '../db/client';
 import { getModelProviderModules } from '../gateway/modules/module-system';
 import { getNextNumericId } from '../tools/admin/helpers/db-helpers';
 import { nextRunAt } from '../utils/cron';
 import logger from '../utils/logger';
+import { createAgentConfigurationAuthority } from '../lobu/agent-configuration';
 
 export const DEFAULT_AGENT_SENTINEL = 'default_agent_provisioned';
 export const DEFAULT_WATCHER_SENTINEL = 'default_watcher_provisioned';
@@ -123,6 +126,7 @@ export async function hasOrgSentinel(
  *     ownership check in `verifyOwnedAgentAccess`).
  *   - agent_users mapping for that (platform, user_id) so `ownsAgent`
  *     returns true on the PAT-session path.
+ *   - the default identity restored when the legacy value is blank.
  *   - installed_providers populated with all currently-available
  *     system-key providers when empty. Never removes existing entries
  *     and never overwrites a non-empty list — admins may have curated
@@ -136,15 +140,18 @@ async function backfillDefaultAgent(
   client: DbClient
 ): Promise<void> {
   const rows = (await client`
-    SELECT owner_platform, owner_user_id, installed_providers
-      FROM agents
-     WHERE organization_id = ${organizationId}
-       AND id = ${DEFAULT_AGENT_ID}
+    SELECT a.identity_md, a.installed_providers,
+           COALESCE(c.configuration_revision, 0)::text AS configuration_revision
+      FROM agents a
+      LEFT JOIN agent_configuration_controls c
+        ON c.organization_id = a.organization_id AND c.agent_id = a.id
+     WHERE a.organization_id = ${organizationId}
+       AND a.id = ${DEFAULT_AGENT_ID}
      LIMIT 1
   `) as unknown as Array<{
-    owner_platform: string | null;
-    owner_user_id: string | null;
+    identity_md: string | null;
     installed_providers: unknown;
+    configuration_revision: string;
   }>;
   const row = rows[0];
   if (!row) return;
@@ -156,6 +163,34 @@ async function backfillDefaultAgent(
       ? ownerUserIdRaw
       : null;
 
+  const ownerRepair = await repairDefaultAgentOwner(
+    organizationId,
+    ownerUserId,
+    client
+  );
+  if (ownerRepair.status === 'applied_release') {
+    logger.warn(
+      {
+        organizationId,
+        agentId: DEFAULT_AGENT_ID,
+        reason: 'managed_configuration_sealed',
+      },
+      '[default-provisioning] Managed default-agent backfill deferred'
+    );
+    return;
+  }
+  if (ownerRepair.status === 'managed_control' && ownerUserId) {
+    logger.warn(
+      {
+        organizationId,
+        agentId: DEFAULT_AGENT_ID,
+        reason: 'managed_configuration_sealed',
+      },
+      '[default-provisioning] Managed default-agent owner backfill deferred'
+    );
+    return;
+  }
+
   const installedNow = Array.isArray(row.installed_providers)
     ? (row.installed_providers as Array<{ providerId: string }>)
     : [];
@@ -164,51 +199,171 @@ async function backfillDefaultAgent(
     .filter((m) => m.hasSystemKey() && !installedIds.has(m.providerId))
     .map((m) => ({ providerId: m.providerId, installedAt: Date.now() }));
 
-  const needsOwnerFix =
-    ownerUserId &&
-    (row.owner_user_id !== ownerUserId || row.owner_platform !== 'external');
   const needsProvidersFix =
     installedNow.length === 0 && missingSystemProviders.length > 0;
+  const needsIdentityFix =
+    typeof row.identity_md !== 'string' || row.identity_md.trim().length === 0;
 
-  if (needsOwnerFix || needsProvidersFix) {
-    const nextProviders = needsProvidersFix
-      ? missingSystemProviders
-      : installedNow;
-    await client`
-      UPDATE agents SET
-        owner_platform = ${needsOwnerFix ? 'external' : row.owner_platform},
-        owner_user_id = ${needsOwnerFix ? ownerUserId : row.owner_user_id},
-        installed_providers = ${client.json(nextProviders)},
-        updated_at = NOW()
-      WHERE organization_id = ${organizationId}
-        AND id = ${DEFAULT_AGENT_ID}
-    `;
+  let providersAdded: string[] = [];
+  let identityFixed = false;
+  let settingsApplied = false;
+  if (needsIdentityFix || needsProvidersFix) {
+    const patch = {
+      ...(needsIdentityFix ? { identityMd: DEFAULT_AGENT_IDENTITY } : {}),
+      ...(needsProvidersFix
+        ? { installedProviders: missingSystemProviders }
+        : {}),
+    };
+    const digest = createHash('sha256')
+      .update(canonicalize({
+        agentId: DEFAULT_AGENT_ID,
+        observedConfigurationRevision: row.configuration_revision,
+        patch,
+      }))
+      .digest('hex');
+    const patchResult = await createAgentConfigurationAuthority(client).apply({
+      organizationId,
+      agentId: DEFAULT_AGENT_ID,
+      commandId: `default-settings-backfill:${row.configuration_revision}:${digest}`,
+      expectedConfigurationRevision: row.configuration_revision,
+      actor: { kind: 'provider_catalog' },
+      patch,
+    });
+    if (patchResult.status === 'rejected') {
+      logger.warn(
+        { organizationId, agentId: DEFAULT_AGENT_ID, reason: patchResult.reason },
+        '[default-provisioning] Managed default-agent settings backfill deferred'
+      );
+    } else if (patchResult.status === 'conflict') {
+      logger.warn(
+        {
+          organizationId,
+          agentId: DEFAULT_AGENT_ID,
+          conflict: patchResult.conflict,
+          currentRevision: patchResult.currentRevision,
+        },
+        '[default-provisioning] Default-agent settings backfill deferred after revision conflict'
+      );
+    } else if (patchResult.status === 'applied') {
+      providersAdded = missingSystemProviders.map((provider) => provider.providerId);
+      identityFixed = needsIdentityFix;
+      settingsApplied = true;
+    }
+  }
+
+  if (ownerRepair.ownerFixed || ownerRepair.mappingEnsured || settingsApplied) {
     logger.info(
       {
         organizationId,
         agentId: DEFAULT_AGENT_ID,
-        ownerFixed: !!needsOwnerFix,
-        providersAdded: needsProvidersFix
-          ? missingSystemProviders.map((p) => p.providerId)
-          : [],
+        ownerFixed: ownerRepair.ownerFixed,
+        mappingEnsured: ownerRepair.mappingEnsured,
+        identityFixed,
+        providersAdded,
       },
       '[default-provisioning] Backfilled default agent'
     );
   }
+}
 
-  if (ownerUserId) {
-    await client`
-      INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
-      VALUES (${organizationId}, ${DEFAULT_AGENT_ID}, 'external', ${ownerUserId}, now())
-      ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
+async function repairDefaultAgentOwner(
+  organizationId: string,
+  ownerUserId: string | null,
+  client: DbClient
+): Promise<
+  | {
+      status: 'missing' | 'managed_control' | 'applied_release';
+      ownerFixed: false;
+      mappingEnsured: false;
+    }
+  | { status: 'repaired' | 'unchanged'; ownerFixed: boolean; mappingEnsured: boolean }
+> {
+  return client.begin(async (tx) => {
+    const agents = await tx<{
+      owner_platform: string | null;
+      owner_user_id: string | null;
+    }>`
+      SELECT owner_platform, owner_user_id
+      FROM agents
+      WHERE organization_id = ${organizationId} AND id = ${DEFAULT_AGENT_ID}
+      FOR UPDATE
     `;
-  }
+    const agent = agents[0];
+    if (!agent) {
+      return { status: 'missing', ownerFixed: false, mappingEnsured: false } as const;
+    }
+
+    await tx`
+      INSERT INTO agent_configuration_controls (
+        organization_id, agent_id, management_mode, configuration_revision,
+        created_at, updated_at
+      ) VALUES (${organizationId}, ${DEFAULT_AGENT_ID}, 'native', 0, NOW(), NOW())
+      ON CONFLICT (organization_id, agent_id) DO NOTHING
+    `;
+    const controls = await tx<{ management_mode: 'native' | 'toolbox_managed' }>`
+      SELECT management_mode
+      FROM agent_configuration_controls
+      WHERE organization_id = ${organizationId} AND agent_id = ${DEFAULT_AGENT_ID}
+      FOR UPDATE
+    `;
+    const releaseReceipts = await tx<{
+      status: 'applying' | 'applied' | 'failed';
+      applied_at: Date | null;
+    }>`
+      SELECT status, applied_at
+      FROM agent_release_applies
+      WHERE organization_id = ${organizationId} AND agent_id = ${DEFAULT_AGENT_ID}
+      FOR UPDATE
+    `;
+    if (
+      releaseReceipts[0]?.status === 'applied' &&
+      releaseReceipts[0].applied_at !== null
+    ) {
+      return {
+        status: 'applied_release',
+        ownerFixed: false,
+        mappingEnsured: false,
+      } as const;
+    }
+    if (controls[0]?.management_mode === 'toolbox_managed') {
+      return {
+        status: 'managed_control',
+        ownerFixed: false,
+        mappingEnsured: false,
+      } as const;
+    }
+    if (!ownerUserId) {
+      return { status: 'unchanged', ownerFixed: false, mappingEnsured: false } as const;
+    }
+
+    const ownerFixed =
+      agent.owner_platform !== 'external' || agent.owner_user_id !== ownerUserId;
+    if (ownerFixed) {
+      await tx`
+        UPDATE agents SET owner_platform = 'external', owner_user_id = ${ownerUserId},
+          updated_at = NOW()
+        WHERE organization_id = ${organizationId} AND id = ${DEFAULT_AGENT_ID}
+      `;
+    }
+    const mappings = await tx`
+      INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
+      VALUES (${organizationId}, ${DEFAULT_AGENT_ID}, 'external', ${ownerUserId}, NOW())
+      ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
+      RETURNING 1
+    `;
+    const mappingEnsured = mappings.length > 0;
+    return {
+      status: ownerFixed || mappingEnsured ? 'repaired' : 'unchanged',
+      ownerFixed,
+      mappingEnsured,
+    } as const;
+  });
 }
 
 /**
  * Provision the default Owletto agent for the given org, exactly once. Also
  * runs `backfillDefaultAgent` on every call so legacy installs (where the
- * row was inserted before this code populated owner/providers) heal in
+ * row was inserted before this code populated owner/identity/providers) heal in
  * place — that part is idempotent and only writes on divergence.
  *
  * Three guards stack on the create path:
@@ -280,31 +435,29 @@ export async function ensureDefaultAgent(
         ? ownerForInsertRaw
         : null;
 
-    // Insert the default agent. The PK is (organization_id, id) so we can
-    // ON CONFLICT DO NOTHING to guard against a parallel boot.
-    await client`
-      INSERT INTO agents (
-        id, organization_id, name, identity_md,
-        owner_platform, owner_user_id, is_workspace_agent,
-        installed_providers,
-        created_at, updated_at
-      ) VALUES (
-        ${DEFAULT_AGENT_ID}, ${organizationId}, ${DEFAULT_AGENT_NAME}, ${DEFAULT_AGENT_IDENTITY},
-        'external', ${ownerUserId}, false,
-        ${client.json(systemProviders)},
-        NOW(), NOW()
-      )
-      ON CONFLICT (organization_id, id) DO NOTHING
-    `;
-
-    // Mirror the ownership into agent_users so `userAgentsStore.ownsAgent`
-    // returns true on the PAT-session path used by `lobu chat -c local`.
-    if (ownerUserId) {
-      await client`
-        INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
-        VALUES (${organizationId}, ${DEFAULT_AGENT_ID}, 'external', ${ownerUserId}, now())
-        ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
-      `;
+    const settings = {
+      identityMd: DEFAULT_AGENT_IDENTITY,
+      installedProviders: systemProviders,
+    };
+    const requestDigest = `sha256:${createHash('sha256')
+      .update(JSON.stringify({ organizationId, ownerUserId, settings }))
+      .digest('hex')}` as const;
+    const bootstrap = await createAgentConfigurationAuthority(client).bootstrap({
+      kind: 'bootstrap',
+      profile: 'native',
+      organizationId,
+      agentId: DEFAULT_AGENT_ID,
+      commandId: `default-agent-bootstrap:${requestDigest}`,
+      expectedConfigurationRevision: '0',
+      actor: { kind: 'provisioning' },
+      name: DEFAULT_AGENT_NAME,
+      ownerPlatform: 'external',
+      ownerUserId,
+      settings,
+      requestDigest,
+    });
+    if (bootstrap.status === 'rejected') {
+      throw new Error(bootstrap.reason);
     }
 
     await writeOrgSentinel(
@@ -318,7 +471,10 @@ export async function ensureDefaultAgent(
       { organizationId, agentId: DEFAULT_AGENT_ID, ownerUserId },
       '[default-provisioning] Provisioned default agent'
     );
-    return { created: true, reason: 'inserted' };
+    return {
+      created: bootstrap.created,
+      reason: bootstrap.created ? 'inserted' : 'has_agents',
+    };
   } catch (err) {
     logger.warn(
       { organizationId, err: err instanceof Error ? err.message : String(err) },

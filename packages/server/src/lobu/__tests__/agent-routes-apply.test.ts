@@ -231,6 +231,111 @@ describe('POST /agents — idempotent same-org create', () => {
     expect(rows.length).toBe(1);
   });
 
+  test('preserves an explicitly empty description on create and replay', async () => {
+    const app = await importAgentRoutes();
+    const request = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'empty-description-agent',
+        name: 'Empty Description Agent',
+        description: '',
+      }),
+    };
+
+    const created = await app.request('/', request);
+    expect(created.status).toBe(201);
+    await expect(created.json()).resolves.toEqual({
+      agentId: 'empty-description-agent',
+      name: 'Empty Description Agent',
+      description: '',
+    });
+
+    const replay = await app.request('/', request);
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toEqual({
+      agentId: 'empty-description-agent',
+      name: 'Empty Description Agent',
+      description: '',
+    });
+
+    const { getDb } = await import('../../db/client.js');
+    const rows = await getDb()`
+      SELECT description FROM agents
+      WHERE organization_id = ${ORG_A} AND id = 'empty-description-agent'
+    `;
+    expect(rows).toEqual([{ description: '' }]);
+  });
+
+  test('returns durable existing state to a second authorized caller without ownership takeover', async () => {
+    const app = await importAgentRoutes();
+    const request = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'cross-caller-agent',
+        name: 'Cross Caller Agent',
+        description: 'owned by the creator',
+      }),
+    };
+    const created = await app.request('/', request);
+    expect(created.status).toBe(201);
+
+    authStash.user = {
+      id: 'u2',
+      name: 'Second Authorized User',
+      email: 'u2@test',
+      emailVerified: true,
+    };
+    const existing = await app.request('/', request);
+    expect(existing.status).toBe(200);
+    await expect(existing.json()).resolves.toEqual({
+      agentId: 'cross-caller-agent',
+      name: 'Cross Caller Agent',
+      description: 'owned by the creator',
+    });
+
+    const { getDb } = await import('../../db/client.js');
+    const rows = await getDb()`
+      SELECT owner_user_id, mcp_servers, pre_approved_tools
+      FROM agents
+      WHERE organization_id = ${ORG_A} AND id = 'cross-caller-agent'
+    `;
+    expect(rows).toEqual([{
+      owner_user_id: 'u1',
+      mcp_servers: expect.objectContaining({ 'lobu-memory': expect.any(Object) }),
+      pre_approved_tools: ['/mcp/lobu-memory/tools/*'],
+    }]);
+  });
+
+  test('maps a POST bootstrap command conflict to a stable 409 response', async () => {
+    const app = await importAgentRoutes();
+    const request = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'post-command-conflict',
+        name: 'POST Command Conflict',
+      }),
+    };
+    expect((await app.request('/', request)).status).toBe(201);
+
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      UPDATE agent_configuration_commands
+      SET command_digest = ${`sha256:${'f'.repeat(64)}`}
+      WHERE organization_id = ${ORG_A} AND agent_id = 'post-command-conflict'
+    `;
+
+    const conflict = await app.request('/', request);
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toEqual({
+      error: 'agent_configuration_command_conflict',
+      currentRevision: '1',
+    });
+  });
+
   test('idempotent path does not re-inject the Lobu MCP server', async () => {
     const app = await importAgentRoutes();
     const { getDb } = await import('../../db/client.js');
@@ -415,6 +520,481 @@ describe('PATCH /:agentId/config — managed release fence', () => {
     expect(rows[0]?.mcp_servers).toEqual({
       current: { url: 'https://current.example' },
     });
+  });
+});
+
+describe('PATCH /:agentId/config — native configuration authority', () => {
+  beforeEach(async () => {
+    await resetTestDatabase();
+    resetApplyRouteStores();
+    await seedOrg(ORG_A);
+    resetApplyAuth();
+    coreServicesStash.services = null;
+  });
+
+  test('applies one revisioned native patch and rejects a stale writer', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-cas-tracer';
+    await seedAgent(ORG_A, agentId);
+
+    const first = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': '"agent-config:0"',
+        'idempotency-key': 'native-cas-tracer-1',
+      },
+      body: JSON.stringify({ verboseLogging: true }),
+    });
+
+    expect(first.status).toBe(200);
+    expect(first.headers.get('etag')).toBe('"agent-config:1"');
+    await expect(first.json()).resolves.toMatchObject({
+      success: true,
+      configurationRevision: '1',
+      managementMode: 'native',
+    });
+
+    const stale = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': '"agent-config:0"',
+        'idempotency-key': 'native-cas-tracer-2',
+      },
+      body: JSON.stringify({ verboseLogging: false }),
+    });
+
+    expect(stale.status).toBe(409);
+    await expect(stale.json()).resolves.toEqual({
+      error: 'agent_configuration_revision_mismatch',
+      currentRevision: '1',
+    });
+  });
+
+  test('applies mcpServers without changing omitted userMd through the authority', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-partial-mcp';
+    await seedAgent(ORG_A, agentId);
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      UPDATE agents SET user_md = 'keep user prompt'
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mcpServers: { new: { url: 'https://new.example' } } }),
+    });
+
+    expect(response.status).toBe(200);
+    const rows = await sql`
+      SELECT user_md, mcp_servers FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(rows).toEqual([
+      {
+        user_md: 'keep user prompt',
+        mcp_servers: { new: { url: 'https://new.example' } },
+      },
+    ]);
+    const commands = await sql`
+      SELECT result_status FROM agent_configuration_commands
+      WHERE organization_id = ${ORG_A} AND agent_id = ${agentId}
+    `;
+    expect(commands).toEqual([{ result_status: 'applied' }]);
+  });
+
+  test('rejects unknown configuration fields before authority mutation', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-unknown-field';
+    await seedAgent(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ futureField: true }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: 'unknown_configuration_field',
+    });
+  });
+
+  test('compat path (no If-Match) applies two different patches under the same trace id', async () => {
+    // x-shifu-trace-id spans a whole journey (many calls in one turn). If the
+    // compat command id were derived from it, the second, different PATCH in
+    // the same trace would hit `agent_configuration_command_conflict` and the
+    // change would be silently dropped. The legacy path applied both; the
+    // compat path must too.
+    const app = await importAgentRoutes();
+    const agentId = 'native-compat-trace-reuse';
+    await seedAgent(ORG_A, agentId);
+
+    const first = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'x-shifu-trace-id': 'trace-one-turn',
+      },
+      body: JSON.stringify({ userMd: 'first write' }),
+    });
+    expect(first.status).toBe(200);
+
+    const second = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'x-shifu-trace-id': 'trace-one-turn',
+      },
+      body: JSON.stringify({ userMd: 'second write' }),
+    });
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({ success: true });
+
+    const { getDb } = await import('../../db/client.js');
+    const rows = await getDb()`
+      SELECT user_md FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(rows).toEqual([{ user_md: 'second write' }]);
+  });
+
+  test('accepts a GET /config round-trip body (server-emitted updatedAt and mcpInstallNotified are ignored)', async () => {
+    // Contract exercised by `lobu agent config patch` in scripts/cli-smoke.sh:
+    // GET /config, drop authProfiles, PATCH the rest back verbatim. The GET
+    // response includes the read-only `updatedAt` stamp, which must not trip
+    // the strict field-ownership parser.
+    const app = await importAgentRoutes();
+    const agentId = 'native-get-patch-roundtrip';
+    await seedAgent(ORG_A, agentId);
+
+    const got = await app.request(`/${agentId}/config`);
+    expect(got.status).toBe(200);
+    const config = (await got.json()) as Record<string, unknown>;
+    delete config.authProfiles;
+    // The GET in this suite is served by the mocked store, which can hide the
+    // real projection. Overlay the exact shape the production Postgres store
+    // returns for a just-created agent (the agents-table column DEFAULTs via
+    // rowToSettings, plus the server-stamped updatedAt) so this test fails
+    // whenever PATCH stops accepting a real fresh-agent GET body — the
+    // cli-smoke round-trip contract. `mcpInstallNotified` covers the used
+    // agent: it is runtime-owned and appears in GET once the agent has used
+    // an MCP, so the round-trip must tolerate it too.
+    Object.assign(config, {
+      mcpInstallNotified: { 'mcp-notion': Date.now() },
+      modelSelection: {},
+      providerModelPreferences: {},
+      networkConfig: {},
+      nixConfig: {},
+      mcpServers: {},
+      soulMd: '',
+      userMd: '',
+      identityMd: '',
+      skillsConfig: { skills: [] },
+      toolsConfig: {},
+      pluginsConfig: {},
+      installedProviders: [],
+      verboseLogging: false,
+      egressConfig: {},
+      preApprovedTools: [],
+      guardrails: [],
+      updatedAt: Date.now(),
+    });
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ success: true });
+  });
+
+  test.each([
+    ['mcpServers', 'broken'],
+    ['guardrails', {}],
+    ['verboseLogging', 'yes'],
+    ['identityMd', 42],
+  ])('returns stable 400 for malformed %s', async (field, value) => {
+    const app = await importAgentRoutes();
+    const agentId = `native-malformed-${field.toLowerCase()}`;
+    await seedAgent(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ [field]: value }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: 'invalid_configuration_field_value',
+    });
+  });
+
+  test('in toolbox_managed mode rejects every release-owned field and permits only operator mutation', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-toolbox-managed-ownership';
+    await seedAgent(ORG_A, agentId);
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      INSERT INTO agent_configuration_controls (
+        organization_id, agent_id, management_mode
+      ) VALUES (${ORG_A}, ${agentId}, 'toolbox_managed')
+    `;
+    const releaseOwnedPatches = [
+      { model: 'legacy-model' },
+      { modelSelection: { mode: 'auto' } },
+      { providerModelPreferences: { openai: 'gpt-test' } },
+      { networkConfig: { allowedDomains: ['example.com'] } },
+      { egressConfig: { enabled: true } },
+      { nixConfig: { packages: ['jq'] } },
+      { mcpServers: { test: { url: 'https://mcp.example' } } },
+      { soulMd: 'soul' },
+      { userMd: 'user' },
+      { identityMd: 'identity' },
+      { skillsConfig: { skills: [] } },
+      { toolsConfig: { allow: ['read'] } },
+      { guardrails: ['secret-scan'] },
+      { pluginsConfig: { plugins: [{ source: 'test-plugin', slot: 'tool' }] } },
+      { installedProviders: [] },
+      { preApprovedTools: ['/mcp/test/tools/read'] },
+    ];
+
+    for (const [index, body] of releaseOwnedPatches.entries()) {
+      const response = await app.request(`/${agentId}/config`, {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json',
+          'if-match': '"agent-config:0"',
+          'idempotency-key': `managed-release-field-${index}`,
+        },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        error: 'agent_configuration_rejected',
+        reason: 'field_owned_by_managed_release',
+      });
+    }
+
+    const operatorResponse = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': '"agent-config:0"',
+        'idempotency-key': 'managed-operator-field',
+      },
+      body: JSON.stringify({ verboseLogging: true }),
+    });
+    expect(operatorResponse.status).toBe(200);
+    expect((await sql`
+      SELECT verbose_logging FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `)[0]?.verbose_logging).toBe(true);
+  });
+
+  test('rejects malformed native revision preconditions', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-invalid-etag';
+    await seedAgent(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': 'agent-config:0',
+        'idempotency-key': 'native-invalid-etag-1',
+      },
+      body: JSON.stringify({ verboseLogging: true }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: 'invalid_revision_precondition',
+    });
+  });
+
+  test('requires an idempotency key for revisioned native patches', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-missing-command';
+    await seedAgent(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': '"agent-config:0"',
+      },
+      body: JSON.stringify({ verboseLogging: true }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: 'agent_configuration_idempotency_key_required',
+    });
+  });
+
+  test.each([
+    ['empty', ''],
+    ['too-long', 'x'.repeat(201)],
+    ['unsafe-ascii', 'unsafe-é'],
+  ])('rejects %s idempotency keys for revisioned patches', async (_label, commandId) => {
+    const app = await importAgentRoutes();
+    const agentId = `native-invalid-idempotency-${commandId.length}`;
+    await seedAgent(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'if-match': '"agent-config:0"',
+        'idempotency-key': commandId,
+      },
+      body: JSON.stringify({ verboseLogging: true }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: 'agent_configuration_idempotency_key_required',
+    });
+  });
+
+  test('records an empty revisioned patch as no_change without invoking the legacy writer', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-empty-patch';
+    await seedAgent(ORG_A, agentId);
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      UPDATE agents
+      SET updated_at = TIMESTAMPTZ '2000-01-01 00:00:00+00'
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+
+    const request = () =>
+      app.request(`/${agentId}/config`, {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json',
+          'if-match': '"agent-config:0"',
+          'idempotency-key': 'native-empty-patch-1',
+        },
+        body: JSON.stringify({}),
+      });
+
+    const first = await request();
+    expect(first.status).toBe(200);
+    expect(first.headers.get('etag')).toBe('"agent-config:0"');
+    await expect(first.json()).resolves.toEqual({
+      success: true,
+      configurationRevision: '0',
+      managementMode: 'native',
+    });
+
+    const replay = await request();
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get('etag')).toBe('"agent-config:0"');
+
+    const agentRows = await sql`
+      SELECT updated_at = TIMESTAMPTZ '2000-01-01 00:00:00+00' AS untouched
+      FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(agentRows).toEqual([{ untouched: true }]);
+    const commands = await sql`
+      SELECT command_id, resulting_revision, result_status
+      FROM agent_configuration_commands
+      WHERE organization_id = ${ORG_A} AND agent_id = ${agentId}
+    `;
+    expect(commands).toEqual([
+      {
+        command_id: 'native-empty-patch-1',
+        resulting_revision: 0,
+        result_status: 'no_change',
+      },
+    ]);
+  });
+
+  test('runs credential-only reconciliation after a revisioned no_change without credential ledger data', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'native-auth-profiles-only';
+    await seedAgent(ORG_A, agentId);
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      UPDATE agents
+      SET updated_at = TIMESTAMPTZ '2000-01-01 00:00:00+00'
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    let upsertCalls = 0;
+    coreServicesStash.services = authProfileServices(async () => {
+      const commands = await sql`
+        SELECT result_status
+        FROM agent_configuration_commands
+        WHERE organization_id = ${ORG_A} AND agent_id = ${agentId}
+      `;
+      expect(commands).toEqual([{ result_status: 'no_change' }]);
+      upsertCalls += 1;
+    });
+    const request = (credential: string) =>
+      app.request(`/${agentId}/config`, {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json',
+          'if-match': '"agent-config:0"',
+          'idempotency-key': 'native-auth-profiles-only-1',
+        },
+        body: JSON.stringify({
+          authProfiles: [
+            {
+              id: 'profile-1',
+              provider: 'openai',
+              credential,
+              authType: 'api-key',
+            },
+          ],
+        }),
+      });
+
+    const first = await request('first-secret-key');
+    expect(first.status).toBe(200);
+    expect(first.headers.get('etag')).toBe('"agent-config:0"');
+    await expect(first.json()).resolves.toEqual({
+      success: true,
+      configurationRevision: '0',
+      managementMode: 'native',
+    });
+
+    const replayWithRotatedCredential = await request('rotated-secret-key');
+    expect(replayWithRotatedCredential.status).toBe(200);
+    expect(replayWithRotatedCredential.headers.get('etag')).toBe('"agent-config:0"');
+    expect(upsertCalls).toBe(2);
+
+    const agentRows = await sql`
+      SELECT updated_at = TIMESTAMPTZ '2000-01-01 00:00:00+00' AS untouched
+      FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(agentRows).toEqual([{ untouched: true }]);
+    const commands = await sql`
+      SELECT command_digest, resulting_revision, result_status
+      FROM agent_configuration_commands
+      WHERE organization_id = ${ORG_A} AND agent_id = ${agentId}
+    `;
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({
+      command_digest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      resulting_revision: 0,
+      result_status: 'no_change',
+    });
+    expect(JSON.stringify(commands)).not.toContain('secret-key');
   });
 });
 
@@ -862,6 +1442,22 @@ describe('concurrent-apply race fixes', () => {
       'lobu-memory': { url: expect.stringContaining('/mcp/'), type: 'streamable-http' },
     });
     expect(settings[0].pre_approved_tools).toEqual(['/mcp/lobu-memory/tools/*']);
+
+    const authorityRows = await sql`
+      SELECT c.configuration_revision::text AS configuration_revision,
+             command_row.mutation_kind,
+             count(*) OVER ()::int AS command_count
+      FROM agent_configuration_controls c
+      JOIN agent_configuration_commands command_row
+        ON command_row.organization_id = c.organization_id
+       AND command_row.agent_id = c.agent_id
+      WHERE c.organization_id = ${ORG_A} AND c.agent_id = 'race-agent'
+    `;
+    expect(authorityRows).toEqual([{
+      configuration_revision: '1',
+      mutation_kind: 'bootstrap',
+      command_count: 1,
+    }]);
   });
 
   test('POST /agents — concurrent create cannot overwrite operator-set MCP servers', async () => {

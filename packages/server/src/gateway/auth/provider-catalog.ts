@@ -1,9 +1,19 @@
+import { randomUUID } from "node:crypto";
 import { createLogger, type InstalledProvider } from "@lobu/core";
+import { orgContext } from "../../lobu/stores/org-context.js";
 import {
   getModelProviderModules,
   type ModelProviderModule,
 } from "../modules/module-system.js";
 import type { DeclaredAgentRegistry } from "../services/declared-agent-registry.js";
+import {
+  AgentConfigurationMutationConflictError,
+  type AgentConfigurationMutationPort,
+  AgentConfigurationMutationRejectedError,
+  AgentConfigurationMutationTargetNotFoundError,
+  type ProviderMutationSubject,
+  type UndigestedNativePatchInput,
+} from "./agent-configuration-mutation-port.js";
 import type { AgentSettingsStore } from "./settings/agent-settings-store.js";
 import type { AuthProfilesManager } from "./settings/auth-profiles-manager.js";
 import { reconcileModelSelectionForInstalledProviders } from "./settings/model-selection.js";
@@ -35,7 +45,10 @@ export class ProviderCatalogService {
   constructor(
     private agentSettingsStore: AgentSettingsStore,
     private authProfilesManager: AuthProfilesManager,
-    private declaredAgents: DeclaredAgentRegistry
+    private declaredAgents: DeclaredAgentRegistry,
+    private configurationMutations: AgentConfigurationMutationPort,
+    private createCommandId: () => string = randomUUID,
+    private now: () => number = Date.now
   ) {}
 
   private guardDeclared(agentId: string): void {
@@ -81,10 +94,11 @@ export class ProviderCatalogService {
    * Install a provider for an agent. Appends to the end of the list.
    */
   async installProvider(
-    agentId: string,
+    subject: ProviderMutationSubject,
     providerId: string,
     config?: InstalledProvider["config"]
   ): Promise<void> {
+    const { agentId } = subject;
     this.guardDeclared(agentId);
     const allModules = getModelProviderModules();
     const module = allModules.find((m) => m.providerId === providerId);
@@ -92,7 +106,8 @@ export class ProviderCatalogService {
       throw new Error(`Unknown provider: ${providerId}`);
     }
 
-    const settings = await this.agentSettingsStore.getSettings(agentId);
+    const { settings, configurationRevision } =
+      await this.readMutationInputs(subject);
     const installed = settings?.installedProviders || [];
 
     if (installed.some((ip) => ip.providerId === providerId)) {
@@ -104,7 +119,7 @@ export class ProviderCatalogService {
 
     const entry: InstalledProvider = {
       providerId,
-      installedAt: Date.now(),
+      installedAt: this.now(),
       ...(config ? { config } : {}),
     };
     const nextInstalledProviders = [...installed, entry];
@@ -115,9 +130,11 @@ export class ProviderCatalogService {
       installedProviders: nextInstalledProviders,
     });
 
-    await this.agentSettingsStore.updateSettings(agentId, {
+    await this.applyProviderPatch(subject, configurationRevision, {
       installedProviders: nextInstalledProviders,
-      ...reconciled,
+      model: reconciled.model ?? null,
+      modelSelection: reconciled.modelSelection,
+      providerModelPreferences: reconciled.providerModelPreferences ?? null,
     });
 
     logger.info(`Installed provider ${providerId} for agent ${agentId}`);
@@ -126,9 +143,14 @@ export class ProviderCatalogService {
   /**
    * Uninstall a provider from an agent. Also cleans up auth profiles.
    */
-  async uninstallProvider(agentId: string, providerId: string): Promise<void> {
+  async uninstallProvider(
+    subject: ProviderMutationSubject,
+    providerId: string
+  ): Promise<void> {
+    const { agentId } = subject;
     this.guardDeclared(agentId);
-    const settings = await this.agentSettingsStore.getSettings(agentId);
+    const { settings, configurationRevision } =
+      await this.readMutationInputs(subject);
     const installed = settings?.installedProviders || [];
 
     const filtered = installed.filter((ip) => ip.providerId !== providerId);
@@ -143,7 +165,6 @@ export class ProviderCatalogService {
     // UserAuthProfileStore stay put — uninstalling a provider on a
     // runtime agent shouldn't cascade-delete every user's tokens; users
     // remove their own credentials from the per-user UI.
-    await this.authProfilesManager.deleteProviderProfiles(agentId, providerId);
     const reconciled = reconcileModelSelectionForInstalledProviders({
       model: settings?.model,
       modelSelection: settings?.modelSelection,
@@ -151,10 +172,13 @@ export class ProviderCatalogService {
       installedProviders: filtered,
     });
 
-    await this.agentSettingsStore.updateSettings(agentId, {
+    await this.applyProviderPatch(subject, configurationRevision, {
       installedProviders: filtered,
-      ...reconciled,
+      model: reconciled.model ?? null,
+      modelSelection: reconciled.modelSelection,
+      providerModelPreferences: reconciled.providerModelPreferences ?? null,
     });
+    await this.authProfilesManager.deleteProviderProfiles(agentId, providerId);
 
     logger.info(`Uninstalled provider ${providerId} for agent ${agentId}`);
   }
@@ -193,9 +217,14 @@ export class ProviderCatalogService {
    * Reorder installed providers. The orderedIds must contain
    * exactly the same provider IDs as currently installed.
    */
-  async reorderProviders(agentId: string, orderedIds: string[]): Promise<void> {
+  async reorderProviders(
+    subject: ProviderMutationSubject,
+    orderedIds: string[]
+  ): Promise<void> {
+    const { agentId } = subject;
     this.guardDeclared(agentId);
-    const settings = await this.agentSettingsStore.getSettings(agentId);
+    const { settings, configurationRevision } =
+      await this.readMutationInputs(subject);
     const installed = settings?.installedProviders || [];
 
     const installedMap = new Map(installed.map((ip) => [ip.providerId, ip]));
@@ -224,13 +253,60 @@ export class ProviderCatalogService {
       installedProviders: reordered,
     });
 
-    await this.agentSettingsStore.updateSettings(agentId, {
+    await this.applyProviderPatch(subject, configurationRevision, {
       installedProviders: reordered,
-      ...reconciled,
+      model: reconciled.model ?? null,
+      modelSelection: reconciled.modelSelection,
+      providerModelPreferences: reconciled.providerModelPreferences ?? null,
     });
 
     logger.info(
       `Reordered providers for agent ${agentId}: ${orderedIds.join(", ")}`
     );
+  }
+
+  private async applyProviderPatch(
+    subject: ProviderMutationSubject,
+    expectedConfigurationRevision: string,
+    patch: UndigestedNativePatchInput["patch"]
+  ): Promise<void> {
+    const result = await this.configurationMutations.updateNativeConfiguration({
+      ...subject,
+      commandId: this.createCommandId(),
+      expectedConfigurationRevision,
+      actor: { kind: "provider_catalog" },
+      patch,
+    });
+    if ("state" in result) {
+      return;
+    }
+    if (result.status === "rejected") {
+      throw new AgentConfigurationMutationRejectedError(result.reason);
+    }
+    if (result.status === "conflict") {
+      throw new AgentConfigurationMutationConflictError(
+        result.conflict,
+        result.currentRevision
+      );
+    }
+  }
+
+  private async readMutationInputs(subject: ProviderMutationSubject) {
+    const appliedState =
+      await this.configurationMutations.readAppliedState(subject);
+    if (!appliedState) {
+      throw new AgentConfigurationMutationTargetNotFoundError();
+    }
+    const settings = await orgContext.run(
+      { organizationId: subject.organizationId },
+      () => this.agentSettingsStore.getSettings(subject.agentId)
+    );
+    if (!settings) {
+      throw new AgentConfigurationMutationTargetNotFoundError();
+    }
+    return {
+      configurationRevision: appliedState.configurationRevision,
+      settings,
+    };
   }
 }

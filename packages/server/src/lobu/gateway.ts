@@ -14,6 +14,7 @@ import { Hono as HonoApp } from 'hono';
 import { createAuth } from '../auth';
 import { authenticatePat, extractPatBearer } from '../auth/pat-auth';
 import { ApiPlatform } from '../gateway/api/platform';
+import { createAgentConfigurationMutationPort } from '../gateway/auth/agent-configuration-mutation-port';
 import { createGatewayApp } from '../gateway/cli/gateway';
 import { ChatInstanceManager } from '../gateway/connections/chat-instance-manager';
 import { ChatResponseBridge } from '../gateway/connections/chat-response-bridge';
@@ -37,9 +38,10 @@ import { createLocalEgoWebSocketRoute } from '../gateway/browser/local-ego-webso
 import { createCourseAwareWakeRoutes } from './course-aware-wake-routes';
 import { resolveWakeThreadId } from '../scheduled/wake-target';
 import { PostgresSecretStore } from './stores/postgres-secret-store';
+import { createRuntimeAgentConfigurationAuthority } from './agent-configuration';
 import {
   createPostgresAgentAccessStore,
-  createPostgresAgentConfigStore,
+  createPostgresAgentConfigReadMetadataStore,
   createPostgresAgentConnectionStore,
 } from './stores/postgres-stores';
 
@@ -339,19 +341,23 @@ export async function initLobuGateway(): Promise<Hono | null> {
     orchestrator = new Orchestrator(gatewayConfig.orchestration);
 
     // Create PostgreSQL-backed stores
-    const configStore = createPostgresAgentConfigStore();
+    const configStore = createPostgresAgentConfigReadMetadataStore();
     const connectionStore = createPostgresAgentConnectionStore();
     const accessStore = createPostgresAgentAccessStore();
     const postgresSecretStore = new PostgresSecretStore();
     const secretStore = new SecretStoreRegistry(postgresSecretStore, {
       secret: postgresSecretStore,
     });
+    const agentConfigurationAuthority = createRuntimeAgentConfigurationAuthority();
 
     gateway = new Gateway(gatewayConfig, {
       configStore,
       connectionStore,
       accessStore,
       secretStore,
+      agentConfigurationMutationPort: createAgentConfigurationMutationPort(
+        agentConfigurationAuthority
+      ),
     });
 
     // Register API platform
@@ -470,6 +476,7 @@ export async function initLobuGateway(): Promise<Hono | null> {
         mcpConfigService: coreServices.getMcpConfigService(),
         secretStore: coreServices.getSecretStore(),
         publicGatewayUrl: coreServices.getPublicGatewayUrl(),
+        agentConfigurationAuthority,
       })
     );
     lobuApp.route('/api/browser/local-ego', createLocalEgoWebSocketRoute());

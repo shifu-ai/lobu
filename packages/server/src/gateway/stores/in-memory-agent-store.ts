@@ -21,9 +21,28 @@ import {
   getOrCreateSet,
 } from "./base-agent-store.js";
 
+export class InMemoryAgentAggregateNotFoundError extends Error {
+  readonly code = "embedded_agent_aggregate_not_found";
+
+  constructor(readonly agentId: string) {
+    super(`Embedded agent aggregate was not found: ${agentId}`);
+    this.name = "InMemoryAgentAggregateNotFoundError";
+  }
+}
+
+export class InMemoryAgentIncarnationMismatchError extends Error {
+  readonly code = "embedded_agent_incarnation_mismatch";
+
+  constructor(readonly agentId: string) {
+    super(`Embedded agent incarnation changed during mutation: ${agentId}`);
+    this.name = "InMemoryAgentIncarnationMismatchError";
+  }
+}
+
 export class InMemoryAgentStore extends BaseAgentStore {
   private settings = new Map<string, AgentSettings>();
   private metadata = new Map<string, AgentMetadata>();
+  private incarnations = new Map<string, symbol>();
   private connections = new Map<string, StoredConnection>();
   private connectionsAll = new Set<string>();
   private connectionsByAgent = new Map<string, Set<string>>();
@@ -45,6 +64,7 @@ export class InMemoryAgentStore extends BaseAgentStore {
     agentId: string,
     settings: AgentSettings
   ): Promise<void> {
+    this.assertLiveAgent(agentId);
     this.settings.set(agentId, settings);
   }
 
@@ -63,7 +83,13 @@ export class InMemoryAgentStore extends BaseAgentStore {
   }
 
   async saveMetadata(agentId: string, metadata: AgentMetadata): Promise<void> {
+    if (!this.metadata.has(agentId)) {
+      this.incarnations.set(agentId, Symbol(agentId));
+    }
     this.metadata.set(agentId, metadata);
+    if (!this.settings.has(agentId)) {
+      this.settings.set(agentId, { updatedAt: Date.now() });
+    }
   }
 
   async updateMetadata(
@@ -75,8 +101,52 @@ export class InMemoryAgentStore extends BaseAgentStore {
     await this.saveMetadata(agentId, { ...existing, ...updates });
   }
 
+  override async updateSettings(
+    agentId: string,
+    updates: Partial<AgentSettings>
+  ): Promise<void> {
+    const incarnation = this.captureLiveIncarnation(agentId);
+    const existing = await this.readSettings(agentId);
+    this.assertCurrentIncarnation(agentId, incarnation);
+    await this.writeSettings(agentId, {
+      ...(existing || {}),
+      ...updates,
+      updatedAt: Date.now(),
+    } as AgentSettings);
+  }
+
   protected async deleteMetadataRaw(agentId: string): Promise<void> {
+    // Intentionally no await: once aggregate deletion starts, every map/index
+    // is cleared in one JS turn. Child writers validate metadata synchronously,
+    // so they either commit before this turn or reject after it.
+    const connectionIds = Array.from(this.connectionsByAgent.get(agentId) ?? []);
+    for (const connectionId of connectionIds) {
+      if (this.connections.get(connectionId)?.agentId === agentId) {
+        this.deleteConnectionNow(connectionId);
+      }
+    }
+    this.connectionsByAgent.delete(agentId);
+
+    const bindingKeys = Array.from(this.channelBindingIndex.get(agentId) ?? []);
+    for (const key of bindingKeys) {
+      if (this.channelBindings.get(key)?.agentId === agentId) {
+        this.channelBindings.delete(key);
+      }
+    }
+    this.channelBindingIndex.delete(agentId);
+
+    const grantPrefix = `${agentId}:`;
+    for (const key of this.grants.keys()) {
+      if (key.startsWith(grantPrefix)) this.grants.delete(key);
+    }
+    for (const [key, agentIds] of this.userAgents) {
+      agentIds.delete(agentId);
+      if (agentIds.size === 0) this.userAgents.delete(key);
+    }
+
     this.metadata.delete(agentId);
+    this.settings.delete(agentId);
+    this.incarnations.delete(agentId);
   }
 
   protected async hasMetadataRaw(agentId: string): Promise<boolean> {
@@ -96,6 +166,17 @@ export class InMemoryAgentStore extends BaseAgentStore {
   }
 
   protected async writeConnection(connection: StoredConnection): Promise<void> {
+    if (connection.agentId) this.assertLiveAgent(connection.agentId);
+    const previous = this.connections.get(connection.id);
+    if (previous?.agentId && previous.agentId !== connection.agentId) {
+      const previousAgentConnections = this.connectionsByAgent.get(
+        previous.agentId
+      );
+      previousAgentConnections?.delete(connection.id);
+      if (previousAgentConnections?.size === 0) {
+        this.connectionsByAgent.delete(previous.agentId);
+      }
+    }
     this.connections.set(connection.id, connection);
     this.connectionsAll.add(connection.id);
     if (connection.agentId) {
@@ -105,7 +186,55 @@ export class InMemoryAgentStore extends BaseAgentStore {
     }
   }
 
+  override async updateConnection(
+    connectionId: string,
+    updates: Partial<StoredConnection>
+  ): Promise<void> {
+    const connectionAtStart = this.connections.get(connectionId);
+    if (!connectionAtStart) return;
+    const sourceAgentId = connectionAtStart.agentId;
+    const hasDestinationUpdate = Object.prototype.hasOwnProperty.call(
+      updates,
+      "agentId"
+    );
+    const destinationAgentId = hasDestinationUpdate
+      ? updates.agentId
+      : sourceAgentId;
+    const sourceIncarnation = sourceAgentId
+      ? this.captureLiveIncarnation(sourceAgentId)
+      : null;
+    const destinationIncarnation =
+      destinationAgentId && destinationAgentId !== sourceAgentId
+        ? this.captureLiveIncarnation(destinationAgentId)
+        : sourceIncarnation;
+    const existing = await this.readConnection(connectionId);
+    if (!existing) return;
+    if (sourceAgentId && sourceIncarnation) {
+      this.assertCurrentIncarnation(sourceAgentId, sourceIncarnation);
+    }
+    if (
+      destinationAgentId &&
+      destinationAgentId !== sourceAgentId &&
+      destinationIncarnation
+    ) {
+      this.assertCurrentIncarnation(
+        destinationAgentId,
+        destinationIncarnation
+      );
+    }
+    await this.saveConnection({
+      ...existing,
+      ...updates,
+      id: connectionId,
+      updatedAt: Date.now(),
+    });
+  }
+
   protected async deleteConnectionRaw(connectionId: string): Promise<void> {
+    this.deleteConnectionNow(connectionId);
+  }
+
+  private deleteConnectionNow(connectionId: string): void {
     const conn = this.connections.get(connectionId);
     this.connections.delete(connectionId);
     this.connectionsAll.delete(connectionId);
@@ -164,6 +293,7 @@ export class InMemoryAgentStore extends BaseAgentStore {
     expiresAt: number | null,
     denied?: boolean
   ): Promise<void> {
+    this.assertLiveAgent(agentId);
     this.grants.set(this.grantKey(agentId, pattern), {
       expiresAt,
       grantedAt: Date.now(),
@@ -241,6 +371,7 @@ export class InMemoryAgentStore extends BaseAgentStore {
     userId: string,
     agentId: string
   ): Promise<void> {
+    this.assertLiveAgent(agentId);
     getOrCreateSet(this.userAgents, this.userKey(platform, userId)).add(
       agentId
     );
@@ -298,11 +429,22 @@ export class InMemoryAgentStore extends BaseAgentStore {
   }
 
   async createChannelBinding(binding: ChannelBinding): Promise<void> {
+    this.assertLiveAgent(binding.agentId);
     const key = this.channelBindingKey(
       binding.platform,
       binding.channelId,
       binding.teamId
     );
+    const previous = this.channelBindings.get(key);
+    if (previous && previous.agentId !== binding.agentId) {
+      const previousAgentBindings = this.channelBindingIndex.get(
+        previous.agentId
+      );
+      previousAgentBindings?.delete(key);
+      if (previousAgentBindings?.size === 0) {
+        this.channelBindingIndex.delete(previous.agentId);
+      }
+    }
     this.channelBindings.set(key, binding);
     getOrCreateSet(this.channelBindingIndex, binding.agentId).add(key);
   }
@@ -344,5 +486,24 @@ export class InMemoryAgentStore extends BaseAgentStore {
     }
     this.channelBindingIndex.delete(agentId);
     return count;
+  }
+
+  private assertLiveAgent(agentId: string): void {
+    if (!this.metadata.has(agentId)) {
+      throw new InMemoryAgentAggregateNotFoundError(agentId);
+    }
+  }
+
+  private captureLiveIncarnation(agentId: string): symbol {
+    this.assertLiveAgent(agentId);
+    const incarnation = this.incarnations.get(agentId);
+    if (!incarnation) throw new InMemoryAgentAggregateNotFoundError(agentId);
+    return incarnation;
+  }
+
+  private assertCurrentIncarnation(agentId: string, expected: symbol): void {
+    if (this.incarnations.get(agentId) !== expected) {
+      throw new InMemoryAgentIncarnationMismatchError(agentId);
+    }
   }
 }

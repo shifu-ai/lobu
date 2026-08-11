@@ -1,7 +1,7 @@
 import {
   inferGrantKind,
   type AgentAccessStore,
-  type AgentConfigStore,
+  type AgentConfigReadMetadataStore,
   type AgentConnectionStore,
   type AgentMetadata,
   type AgentSettings,
@@ -139,8 +139,9 @@ function rowToGrant(row: Record<string, any>): Grant {
   };
 }
 
-export function createPostgresAgentConfigStore(): AgentConfigStore {
-  const store: AgentConfigStore = {
+export function createPostgresAgentConfigReadMetadataStore():
+  AgentConfigReadMetadataStore {
+  const store: AgentConfigReadMetadataStore = {
     async getSettings(agentId) {
       const sql = getDb();
       // Workers/gateway-internal callers run without org context — agent IDs
@@ -171,54 +172,6 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
           `;
       if (rows.length === 0) return null;
       return rowToSettings(rows[0]);
-    },
-    async saveSettings(agentId, settings) {
-      const sql = getDb();
-      const orgId = getOrgId();
-      const now = new Date();
-      await sql`
-        UPDATE agents SET
-          model = ${settings.model ?? null},
-          model_selection = ${sql.json(settings.modelSelection ?? {})},
-          provider_model_preferences = ${sql.json(settings.providerModelPreferences ?? {})},
-          network_config = ${sql.json(settings.networkConfig ?? {})},
-          egress_config = ${sql.json(settings.egressConfig ?? {})},
-          nix_config = ${sql.json(settings.nixConfig ?? {})},
-          mcp_servers = ${sql.json(settings.mcpServers ?? {})},
-          soul_md = ${settings.soulMd ?? ''},
-          user_md = ${settings.userMd ?? ''},
-          identity_md = ${settings.identityMd ?? ''},
-          skills_config = ${sql.json(settings.skillsConfig ?? { skills: [] })},
-          tools_config = ${sql.json(settings.toolsConfig ?? {})},
-          plugins_config = ${sql.json(settings.pluginsConfig ?? {})},
-          installed_providers = ${sql.json(settings.installedProviders ?? [])},
-          verbose_logging = ${settings.verboseLogging ?? false},
-          pre_approved_tools = ${sql.json(settings.preApprovedTools ?? [])},
-          guardrails = ${sql.json(settings.guardrails ?? [])},
-          updated_at = ${now}
-        WHERE id = ${agentId} AND organization_id = ${orgId}
-      `;
-    },
-    async updateSettings(agentId, updates) {
-      const existing = await store.getSettings(agentId);
-      if (!existing) return;
-      await store.saveSettings(agentId, { ...existing, ...updates, updatedAt: Date.now() });
-    },
-    async deleteSettings(agentId) {
-      const sql = getDb();
-      const orgId = getOrgId();
-      await sql`
-        UPDATE agents SET
-          model = NULL, model_selection = '{}', provider_model_preferences = '{}',
-          network_config = '{}', egress_config = '{}', nix_config = '{}',
-          mcp_servers = '{}',
-          soul_md = '', user_md = '', identity_md = '',
-          skills_config = '{"skills": []}', tools_config = '{}', plugins_config = '{}',
-          installed_providers = '[]', verbose_logging = false,
-          pre_approved_tools = '[]', guardrails = '[]',
-          updated_at = now()
-        WHERE id = ${agentId} AND organization_id = ${orgId}
-      `;
     },
     async hasSettings(agentId) {
       return store.hasAgent(agentId);
@@ -331,6 +284,9 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
   };
   return store;
 }
+
+/** @deprecated Test compatibility alias. Production composition uses the narrow named factory. */
+export const createPostgresAgentConfigStore = createPostgresAgentConfigReadMetadataStore;
 
 export function createPostgresAgentConnectionStore(): AgentConnectionStore {
   return {

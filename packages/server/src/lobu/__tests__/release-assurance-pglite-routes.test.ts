@@ -40,11 +40,14 @@ describe("authenticated agent release readback with isolated Postgres", () => {
 			observed_at=excluded.observed_at`, [ORG, AGENT, DIGEST, inventoryFingerprint(["kept"])]);
 		const readback = createReleaseAssuranceReadback({ sql: tagged(db),
 			findAgentBase: async () => ({ managedReleaseReceipt: { status: "applied" },
-				liveManagedSettingsDigest: DIGEST }) });
+				liveManagedSettingsDigest: DIGEST, configurationRevision: "7",
+				managementMode: "toolbox_managed" }) });
 		const app = authenticatedApp(readback);
 		const fresh = await app.request(`/api/provisioning/agents/${AGENT}/release-assurance`);
 		expect(fresh.status).toBe(200);
-		expect((await fresh.json()).effectiveMcpToolInventory).toMatchObject({ status: "available", names: ["kept"] });
+		const freshBody = await fresh.json();
+		expect(freshBody).toMatchObject({ configurationRevision: "7", managementMode: "toolbox_managed" });
+		expect(freshBody.effectiveMcpToolInventory).toMatchObject({ status: "available", names: ["kept"] });
 		await db.query("UPDATE public.agent_effective_tool_inventory_snapshots SET observed_at='2019-01-01T00:00:00Z', expires_at='2020-01-01T00:00:00Z'");
 		const expired = await app.request(`/api/provisioning/agents/${AGENT}/release-assurance`);
 		expect((await expired.json()).effectiveMcpToolInventory).toMatchObject({ status: "missing", names: [] });
@@ -97,7 +100,8 @@ describe("authenticated agent release readback with isolated Postgres", () => {
 		const readback = createReleaseAssuranceReadback({ sql: tagged(db),
 			now: () => new Date("2026-07-20T10:01:10Z"),
 			findAgentBase: async () => ({ managedReleaseReceipt: { status: "applied" },
-				liveManagedSettingsDigest: DIGEST }) });
+				liveManagedSettingsDigest: DIGEST, configurationRevision: "7",
+				managementMode: "toolbox_managed" }) });
 		const app = authenticatedApp(readback);
 
 		const correlated = await app.request(`/api/provisioning/agents/${AGENT}/release-assurance`);

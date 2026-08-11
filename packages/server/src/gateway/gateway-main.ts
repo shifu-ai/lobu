@@ -2,12 +2,13 @@
 
 import {
   type AgentAccessStore,
-  type AgentConfigStore,
+  type AgentConfigReadMetadataStore,
   type AgentConnectionStore,
   createLogger,
   type ProviderRegistryEntry,
 } from "@lobu/core";
 import type { GatewayConfig } from "./config/index.js";
+import type { AgentConfigurationMutationPort } from "./auth/agent-configuration-mutation-port.js";
 import type { RuntimeProviderCredentialResolver } from "./embedded.js";
 import { type PlatformAdapter, platformRegistry } from "./platform.js";
 import { UnifiedThreadResponseConsumer } from "./platform/unified-thread-consumer.js";
@@ -35,7 +36,7 @@ const logger = createLogger("gateway");
  */
 export interface GatewayOptions {
   /** Agent settings + metadata store. Defaults to InMemoryAgentStore. */
-  configStore?: AgentConfigStore;
+  configStore?: AgentConfigReadMetadataStore;
   /** Connections + channel bindings store. Defaults to InMemoryAgentStore. */
   connectionStore?: AgentConnectionStore;
   /** Grants + user-agent associations store. Defaults to InMemoryAgentStore. */
@@ -46,6 +47,8 @@ export interface GatewayOptions {
   secretStore?: SecretStoreRegistry;
   /** Resolve provider credentials dynamically at runtime (embedded mode). */
   providerCredentialResolver?: RuntimeProviderCredentialResolver;
+  /** Revisioned authority for persistent agent configuration mutations. */
+  agentConfigurationMutationPort?: AgentConfigurationMutationPort;
 }
 
 export class Gateway {
@@ -65,6 +68,7 @@ export class Gateway {
       providerRegistry: options?.providerRegistry,
       secretStore: options?.secretStore,
       providerCredentialResolver: options?.providerCredentialResolver,
+      agentConfigurationMutationPort: options?.agentConfigurationMutationPort,
     });
   }
 

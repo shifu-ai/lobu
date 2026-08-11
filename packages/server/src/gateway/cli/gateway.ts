@@ -840,7 +840,6 @@ export function createGatewayApp(
       const agentManagementRouter = createAgentRoutes({
         userAgentsStore,
         agentMetadataStore,
-        agentSettingsStore,
         channelBindingService,
       });
       app.route("/api/v1/agents", agentManagementRouter);

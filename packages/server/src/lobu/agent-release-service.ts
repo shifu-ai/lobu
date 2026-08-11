@@ -9,40 +9,23 @@ import {
 import type { AgentSettings, ReleaseCapabilityClaim } from "@lobu/core";
 import { canonicalize } from "json-canonicalize";
 import { type DbClient, getDb } from "../db/client.js";
-import type { RuntimeCapabilitySnapshot } from "../gateway/services/runtime-capability-snapshot.js";
+import type { RuntimeCapabilitySnapshot } from "./runtime-capability-snapshot-contract.js";
 import {
-	replaceAgentSettings,
+	applyLegacyManagedSettingsInTransaction,
+	replaceReleaseOwnedAgentConfigurationSettingsInTransaction,
 	syncProvisioningGrantsInTransaction,
-} from "./legacy-agent-settings-service.js";
+} from "./agent-configuration/postgres-repository.js";
+import {
+	LEGACY_MANAGED_RELEASE_SETTING_KEYS,
+	PERSONAL_BASELINE_RELEASE_SETTING_KEYS,
+} from "./agent-configuration/field-ownership.js";
 import { parseStrictJsonBytes } from "./strict-json-parser.js";
 
-const MANAGED_SETTING_KEYS = [
-	"identityMd",
-	"soulMd",
-	"userMd",
-	"modelSelection",
-	"toolsConfig",
-] as const;
+const MANAGED_SETTING_KEYS = LEGACY_MANAGED_RELEASE_SETTING_KEYS;
 // Lobu persists and reads these fields from live agent state. The remaining
 // personal baseline fields are signed, immutable source metadata only; they
 // may seed live digest reconstruction but can never mask a mutable field.
-const PERSONAL_BASELINE_LOBU_OWNED_KEYS = [
-	"identityMd",
-	"soulMd",
-	"userMd",
-	"mcpServers",
-	"skillsConfig",
-	"preApprovedTools",
-	"modelSelection",
-	"providerModelPreferences",
-	"networkConfig",
-	"egressConfig",
-	"nixConfig",
-	"toolsConfig",
-	"pluginsConfig",
-	"guardrails",
-	"installedProviders",
-] as const;
+const PERSONAL_BASELINE_LOBU_OWNED_KEYS = PERSONAL_BASELINE_RELEASE_SETTING_KEYS;
 const PERSONAL_BASELINE_IMMUTABLE_METADATA_KEYS = [
 	"templateKey",
 	"scope",
@@ -54,6 +37,7 @@ const PERSONAL_BASELINE_SETTING_KEYS = [
 	...PERSONAL_BASELINE_LOBU_OWNED_KEYS,
 ] as const;
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const DECIMAL_REVISION_PATTERN = /^(0|[1-9][0-9]*)$/;
 const PERSONAL_BASELINE_VERSION_PATTERN =
 	/^personal-agent-baseline-v1-[0-9a-f]{64}$/;
 const BASE64_PATTERN =
@@ -212,6 +196,7 @@ export interface AgentReleaseApplyCommand {
 	signedFeed: SignedFeed;
 	assignment: ReleaseAssignment;
 	expectedCurrentReleaseSequence: number | null;
+	expectedConfigurationRevision?: string;
 	assignmentRevision?: string;
 	claimToken?: string;
 	stepOrdinal?: number;
@@ -268,11 +253,19 @@ export interface AgentReleasePostApplyEvidence {
 	expiresAt: string;
 	evidenceRef: string;
 	evidenceSigning: SigningMetadata;
+	configurationRevision?: string;
+	managementMode?: "native" | "toolbox_managed";
 }
 
 export interface AgentReleaseApplyResult extends AgentReleaseEvidence {
 	idempotent: boolean;
 	repaired: boolean;
+}
+
+export interface PreparedAgentReleaseApply {
+	command: AgentReleaseApplyCommand;
+	publication: FeedPublication;
+	feedDigest: string;
 }
 
 export class AgentReleaseError extends Error {
@@ -425,115 +418,161 @@ export function createAgentReleaseService(options: {
 	const evidenceSigner = parseEvidenceSigner(
 		options.evidenceSigningPrivateKeysJson,
 	);
+	const now = options.now ?? (() => new Date());
 
-	return {
-		async apply(input: {
+	function prepareAgentReleaseApply(input: {
+		organizationId: string;
+		agentId: string;
+		command: unknown;
+	}): PreparedAgentReleaseApply {
+		if (keyring.error) throw keyring.error;
+		if (expectedEnvironment.error) throw expectedEnvironment.error;
+		assertAgentReleaseJsonValue(input.command);
+		const command = parseApplyCommand(input.command);
+		validateApplyEnvelope(input.agentId, command, expectedEnvironment.value);
+		verifySignedManifest(command.signedManifest, keyring.keys);
+		verifySignedFeed(command.signedFeed, keyring.keys);
+		validateCurrentContract(command);
+		const publication = validatePublication(command, now());
+		const feedDigest = digestValue(command.signedFeed);
+		const expectedCommandDigest = digestValue(
+			withoutOwnKey(command, "commandDigest"),
+		);
+		if (!safeDigestEqual(command.commandDigest, expectedCommandDigest)) {
+			throw releaseError(
+				"agent_release_command_digest_mismatch",
+				400,
+				"Agent release command digest does not match its canonical payload",
+			);
+		}
+		validatePersonalBaselineCommand(command, now());
+		if (isCurrentApplyCommand(command) && evidenceSigner.error) {
+			throw evidenceSigner.error;
+		}
+		return { command, publication, feedDigest };
+	}
+
+	function applyPreparedAgentReleaseInTransaction(
+		tx: DbClient,
+		input: {
 			organizationId: string;
 			agentId: string;
-			command: unknown;
-		}): Promise<AgentReleaseApplyResult | AgentReleasePostApplyEvidence> {
-			const sql = options.sql ?? getDb();
-			if (keyring.error) throw keyring.error;
-			if (expectedEnvironment.error) throw expectedEnvironment.error;
-			assertAgentReleaseJsonValue(input.command);
-			const command = parseApplyCommand(input.command);
-			validateApplyEnvelope(input.agentId, command, expectedEnvironment.value);
-			verifySignedManifest(command.signedManifest, keyring.keys);
-			verifySignedFeed(command.signedFeed, keyring.keys);
-			validateCurrentContract(command);
-			const publication = validatePublication(
-				command,
-				(options.now ?? (() => new Date()))(),
-			);
-			const feedDigest = digestValue(command.signedFeed);
-			const expectedCommandDigest = digestValue(
-				withoutOwnKey(command, "commandDigest"),
-			);
-			if (!safeDigestEqual(command.commandDigest, expectedCommandDigest)) {
-				throw releaseError(
-					"agent_release_command_digest_mismatch",
-					400,
-					"Agent release command digest does not match its canonical payload",
-				);
-			}
-			validatePersonalBaselineCommand(
-				command,
-				(options.now ?? (() => new Date()))(),
-			);
-			if (isCurrentApplyCommand(command) && evidenceSigner.error) {
-				throw evidenceSigner.error;
-			}
-
-			const result = await sql.begin(async (tx) =>
-				applyInTransaction(tx, {
-					organizationId: input.organizationId,
-					agentId: input.agentId,
-					command,
-					publication,
-					feedDigest,
-					transactionHooks: options.transactionHooks,
-				}),
-			);
-			if (!isCurrentApplyCommand(command)) return result;
-			return signPostApplyEvidence({
-				command,
-				result,
-				signer: evidenceSigner.value,
-				now: (options.now ?? (() => new Date()))(),
-			});
+			prepared: PreparedAgentReleaseApply;
+			configurationRevision: string;
 		},
+	): Promise<AgentReleaseApplyResult> {
+		return applyInTransaction(tx, {
+			organizationId: input.organizationId,
+			agentId: input.agentId,
+			command: input.prepared.command,
+			publication: input.prepared.publication,
+			feedDigest: input.prepared.feedDigest,
+			configurationRevision: input.configurationRevision,
+			transactionHooks: options.transactionHooks,
+		});
+	}
 
+	function finalizeAgentReleaseApplyEvidence(
+		prepared: PreparedAgentReleaseApply,
+		result: AgentReleaseApplyResult,
+		configuration?: {
+			configurationRevision: string;
+			managementMode: "native" | "toolbox_managed";
+		},
+	): AgentReleaseApplyResult | AgentReleasePostApplyEvidence {
+		if (!isCurrentApplyCommand(prepared.command)) {
+			return configuration ? { ...result, ...configuration } : result;
+		}
+		return signPostApplyEvidence({
+			command: prepared.command,
+			result,
+			signer: evidenceSigner.value,
+			now: now(),
+			configuration,
+		});
+	}
+
+	async function getEvidenceInTransaction(
+		tx: DbClient,
+		input: { organizationId: string; agentId: string },
+	): Promise<AgentReleaseEvidence | null> {
+		if (expectedEnvironment.error) throw expectedEnvironment.error;
+		const rows = await tx<ReceiptWithAgentRow>`
+			SELECT r.applied_release_id, r.applied_release_sequence,
+			       r.applied_feed_sequence, r.applied_channel,
+			       r.applied_feed_digest, r.environment,
+			       r.rollback_to_release_id, r.rollback_to_sequence,
+			       r.manifest_digest, r.status,
+			       r.revision_ref, r.settings_hash, r.applied_at,
+			       r.personal_baseline_version_id,
+			       r.personal_baseline_effective_settings_digest,
+			       r.personal_baseline_settings,
+			       r.baseline_override,
+			       r.baseline_override_digest,
+			       a.owner_user_id, a.identity_md, a.soul_md, a.user_md,
+			       a.model, a.model_selection, a.provider_model_preferences,
+			       a.network_config, a.egress_config, a.nix_config, a.mcp_servers,
+			       a.skills_config, a.tools_config, a.plugins_config,
+			       a.installed_providers, a.verbose_logging,
+			       a.pre_approved_tools, a.guardrails
+			FROM agent_release_applies r
+			JOIN agents a
+			  ON a.organization_id = r.organization_id
+			 AND a.id = r.agent_id
+			WHERE r.organization_id = ${input.organizationId}
+			  AND r.agent_id = ${input.agentId}
+			LIMIT 1
+			FOR SHARE OF r, a
+		`;
+		if (rows[0] && rows[0].environment !== expectedEnvironment.value) {
+			throw releaseError(
+				"agent_release_receipt_environment_mismatch",
+				409,
+				"Agent release evidence belongs to another runtime environment",
+			);
+		}
+		if (!rows[0]) return null;
+		const evidence = evidenceFromReceipt(input.agentId, rows[0]);
+		const liveSettingsHash = settingsHashFromAgent(
+			rows[0],
+			rows[0].personal_baseline_settings,
+		);
+		return liveSettingsHash === rows[0].settings_hash
+			? evidence
+			: { ...evidence, status: "drifted", liveSettingsHash };
+	}
+
+	async function preparedReleaseRequiresConfigurationMutationInTransaction(
+		tx: DbClient,
+		input: {
+			organizationId: string;
+			agentId: string;
+			prepared: PreparedAgentReleaseApply;
+		},
+	): Promise<boolean> {
+		const evidence = await getEvidenceInTransaction(tx, input);
+		if (!evidence) return true;
+		return (
+			evidence.releaseId !== input.prepared.command.signedManifest.releaseId ||
+			evidence.releaseSequence !==
+				input.prepared.command.signedManifest.releaseSequence ||
+			evidence.manifestDigest !== input.prepared.publication.manifestDigest ||
+			evidence.status === "drifted"
+		);
+	}
+
+	return {
+		prepareAgentReleaseApply,
+		applyPreparedAgentReleaseInTransaction,
+		finalizeAgentReleaseApplyEvidence,
+		getEvidenceInTransaction,
+		preparedReleaseRequiresConfigurationMutationInTransaction,
 		async getEvidence(input: {
 			organizationId: string;
 			agentId: string;
 		}): Promise<AgentReleaseEvidence | null> {
 			const sql = options.sql ?? getDb();
-			if (expectedEnvironment.error) throw expectedEnvironment.error;
-			return sql.begin(async (tx) => {
-				const rows = await tx<ReceiptWithAgentRow>`
-				SELECT r.applied_release_id, r.applied_release_sequence,
-				       r.applied_feed_sequence, r.applied_channel,
-				       r.applied_feed_digest, r.environment,
-				       r.rollback_to_release_id, r.rollback_to_sequence,
-				       r.manifest_digest, r.status,
-				       r.revision_ref, r.settings_hash, r.applied_at,
-				       r.personal_baseline_version_id,
-				       r.personal_baseline_effective_settings_digest,
-				       r.personal_baseline_settings,
-				       r.baseline_override,
-				       r.baseline_override_digest,
-				       a.owner_user_id, a.identity_md, a.soul_md, a.user_md,
-				       a.model, a.model_selection, a.provider_model_preferences,
-				       a.network_config, a.egress_config, a.nix_config, a.mcp_servers,
-				       a.skills_config, a.tools_config, a.plugins_config,
-				       a.installed_providers, a.verbose_logging,
-				       a.pre_approved_tools, a.guardrails
-				FROM agent_release_applies r
-				JOIN agents a
-				  ON a.organization_id = r.organization_id
-				 AND a.id = r.agent_id
-				WHERE r.organization_id = ${input.organizationId}
-				  AND r.agent_id = ${input.agentId}
-				LIMIT 1
-				FOR SHARE OF r, a
-			`;
-				if (rows[0] && rows[0].environment !== expectedEnvironment.value) {
-					throw releaseError(
-						"agent_release_receipt_environment_mismatch",
-						409,
-						"Agent release evidence belongs to another runtime environment",
-					);
-				}
-				if (!rows[0]) return null;
-				const evidence = evidenceFromReceipt(input.agentId, rows[0]);
-				const liveSettingsHash = settingsHashFromAgent(
-					rows[0],
-					rows[0].personal_baseline_settings,
-				);
-				return liveSettingsHash === rows[0].settings_hash
-					? evidence
-					: { ...evidence, status: "drifted", liveSettingsHash };
-			});
+			return sql.begin((tx) => getEvidenceInTransaction(tx, input));
 		},
 	};
 }
@@ -546,6 +585,7 @@ async function applyInTransaction(
 		command: AgentReleaseApplyCommand;
 		publication: FeedPublication;
 		feedDigest: string;
+		configurationRevision: string;
 		transactionHooks?: {
 			afterAgentLock?: () => Promise<void>;
 		};
@@ -891,38 +931,15 @@ async function applyManagedSettings(
 	organizationId: string,
 	agentId: string,
 	settings: ManagedSettings,
+	expectedConfigurationRevision: string,
 ): Promise<AgentSettingsRow> {
-	const updatedRows = await tx<AgentSettingsRow>`
-		UPDATE agents SET
-			identity_md = CASE
-				WHEN ${hasOwn(settings, "identityMd")} THEN ${settings.identityMd ?? ""}
-				ELSE identity_md
-			END,
-			soul_md = CASE
-				WHEN ${hasOwn(settings, "soulMd")} THEN ${settings.soulMd ?? ""}
-				ELSE soul_md
-			END,
-			user_md = CASE
-				WHEN ${hasOwn(settings, "userMd")} THEN ${settings.userMd ?? ""}
-				ELSE user_md
-			END,
-			model_selection = CASE
-				WHEN ${hasOwn(settings, "modelSelection")}
-					THEN ${tx.json(settings.modelSelection ?? {})}
-				ELSE model_selection
-			END,
-			tools_config = CASE
-				WHEN ${hasOwn(settings, "toolsConfig")}
-					THEN ${tx.json(settings.toolsConfig ?? {})}
-				ELSE tools_config
-			END,
-			updated_at = NOW()
-		WHERE organization_id = ${organizationId}
-		  AND id = ${agentId}
-		RETURNING owner_user_id, identity_md, soul_md, user_md,
-		          model_selection, tools_config
-	`;
-	const updated = updatedRows[0];
+	const updated = await applyLegacyManagedSettingsInTransaction(
+		tx,
+		organizationId,
+		agentId,
+		settings,
+		expectedConfigurationRevision,
+	);
 	if (!updated) {
 		throw releaseError(
 			"agent_release_agent_not_found",
@@ -939,6 +956,7 @@ async function applyCommandSettings(
 		organizationId: string;
 		agentId: string;
 		command: AgentReleaseApplyCommand;
+		configurationRevision: string;
 	},
 ): Promise<AgentSettingsRow> {
 	if (!input.command.settings) {
@@ -947,13 +965,15 @@ async function applyCommandSettings(
 			input.organizationId,
 			input.agentId,
 			input.command.signedManifest.managedSettings,
+			input.configurationRevision,
 		);
 	}
-	await replaceAgentSettings(
+	await replaceReleaseOwnedAgentConfigurationSettingsInTransaction(
 		tx,
 		input.organizationId,
 		input.agentId,
 		input.command.settings as Omit<AgentSettings, "updatedAt">,
+		input.configurationRevision,
 	);
 	await syncProvisioningGrantsInTransaction(
 		tx,
@@ -1228,6 +1248,7 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 			"stepOrdinal",
 			"stepLeaseToken",
 			"expectedCurrentReleaseSequence",
+			"expectedConfigurationRevision",
 			"commandDigest",
 		],
 		"command",
@@ -1328,6 +1349,16 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 			"Expected current release sequence must be null or a positive safe integer",
 		);
 	}
+	const expectedConfigurationRevision = value.expectedConfigurationRevision;
+	if (
+		expectedConfigurationRevision !== undefined &&
+		(typeof expectedConfigurationRevision !== "string" ||
+			!DECIMAL_REVISION_PATTERN.test(expectedConfigurationRevision))
+	) {
+		throw invalidRequest(
+			"Expected configuration revision must be a nonnegative decimal string",
+		);
+	}
 	if (
 		typeof value.commandDigest !== "string" ||
 		!SHA256_PATTERN.test(value.commandDigest)
@@ -1362,6 +1393,9 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 				}
 			: {}),
 		expectedCurrentReleaseSequence,
+		...(expectedConfigurationRevision === undefined
+			? {}
+			: { expectedConfigurationRevision }),
 		commandDigest: value.commandDigest,
 	};
 }
@@ -2798,6 +2832,10 @@ function signPostApplyEvidence(input: {
 	result: AgentReleaseApplyResult;
 	signer: EvidenceSigner;
 	now: Date;
+	configuration?: {
+		configurationRevision: string;
+		managementMode: "native" | "toolbox_managed";
+	};
 }): AgentReleasePostApplyEvidence {
 	const observedAt = input.now.toISOString();
 	const expiresAt = new Date(input.now.getTime() + 5 * 60_000).toISOString();
@@ -2805,6 +2843,7 @@ function signPostApplyEvidence(input: {
 		contract: "lobu-managed-settings-readback-v1",
 		passed: true,
 		settingsHash: input.result.settingsHash,
+		...(input.configuration ?? {}),
 		...(input.result.baselineVersionId === undefined
 			? {}
 			: {
@@ -2832,6 +2871,7 @@ function signPostApplyEvidence(input: {
 		manifestDigest: input.result.manifestDigest,
 		revisionRef: input.result.revisionRef,
 		settingsHash: input.result.settingsHash,
+		...(input.configuration ?? {}),
 		...(input.result.baselineVersionId === undefined
 			? {}
 			: {

@@ -29,6 +29,7 @@ import { getDb } from "../../db/client.js";
 import { createCourseMemoryRuntimeService } from "../../lobu/course-memory-runtime-service.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { createPostgresAgentConfigStore } from "../../lobu/stores/postgres-stores.js";
+import { seedAgentSettings } from "../../lobu/__tests__/helpers/agent-settings-fixture.js";
 import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
 import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import type { SettingsTokenPayload } from "../auth/settings/token-service.js";
@@ -81,7 +82,6 @@ function makeExpiredSession(
 
 describe("auth: missing and expired sessions", () => {
   let agentMetadataStore: AgentMetadataStore;
-  let agentSettingsStore: AgentSettingsStore;
   let userAgentsStore: UserAgentsStore;
 
   beforeAll(async () => {
@@ -92,7 +92,6 @@ describe("auth: missing and expired sessions", () => {
     await resetTestDatabase();
     const configStore = createPostgresAgentConfigStore();
     agentMetadataStore = new AgentMetadataStore(configStore);
-    agentSettingsStore = new AgentSettingsStore(configStore);
     userAgentsStore = new UserAgentsStore();
 
     await orgContext.run({ organizationId: ORG_A }, async () => {
@@ -114,7 +113,6 @@ describe("auth: missing and expired sessions", () => {
     const app = createAgentRoutes({
       userAgentsStore,
       agentMetadataStore,
-      agentSettingsStore,
       channelBindingService: {
         async getBinding() { return null; },
         async createBinding() { return true; },
@@ -133,7 +131,6 @@ describe("auth: missing and expired sessions", () => {
     const app = createAgentRoutes({
       userAgentsStore,
       agentMetadataStore,
-      agentSettingsStore,
       channelBindingService: {
         async getBinding() { return null; },
         async createBinding() { return true; },
@@ -156,7 +153,6 @@ describe("auth: missing and expired sessions", () => {
     const app = createAgentRoutes({
       userAgentsStore,
       agentMetadataStore,
-      agentSettingsStore,
       channelBindingService: {
         async getBinding() { return null; },
         async createBinding() { return true; },
@@ -179,7 +175,6 @@ describe("auth: missing and expired sessions", () => {
     const app = createAgentRoutes({
       userAgentsStore,
       agentMetadataStore,
-      agentSettingsStore,
       channelBindingService: {
         async getBinding() { return null; },
         async createBinding() { return true; },
@@ -200,7 +195,6 @@ describe("auth: missing and expired sessions", () => {
     const app = createAgentRoutes({
       userAgentsStore,
       agentMetadataStore,
-      agentSettingsStore,
       channelBindingService: {
         async getBinding() { return null; },
         async createBinding() { return true; },
@@ -235,7 +229,6 @@ describe("auth: missing and expired sessions", () => {
 
 describe("cross-org isolation: agents cannot leak across organizations", () => {
   let agentMetadataStoreA: AgentMetadataStore;
-  let agentSettingsStoreA: AgentSettingsStore;
   let userAgentsStoreA: UserAgentsStore;
   let agentMetadataStoreB: AgentMetadataStore;
 
@@ -247,7 +240,6 @@ describe("cross-org isolation: agents cannot leak across organizations", () => {
     await resetTestDatabase();
     const configStoreA = createPostgresAgentConfigStore();
     agentMetadataStoreA = new AgentMetadataStore(configStoreA);
-    agentSettingsStoreA = new AgentSettingsStore(configStoreA);
     userAgentsStoreA = new UserAgentsStore();
 
     const configStoreB = createPostgresAgentConfigStore();
@@ -287,7 +279,6 @@ describe("cross-org isolation: agents cannot leak across organizations", () => {
     const app = createAgentRoutes({
       userAgentsStore: userAgentsStoreA,
       agentMetadataStore: agentMetadataStoreB, // org-b's store
-      agentSettingsStore: agentSettingsStoreA,
       channelBindingService: {
         async getBinding() { return null; },
         async createBinding() { return true; },
@@ -316,7 +307,6 @@ describe("cross-org isolation: agents cannot leak across organizations", () => {
     const app = createAgentRoutes({
       userAgentsStore: userAgentsStoreA,
       agentMetadataStore: agentMetadataStoreB,
-      agentSettingsStore: agentSettingsStoreA,
       channelBindingService: {
         async getBinding() { return null; },
         async createBinding() { return true; },
@@ -399,7 +389,6 @@ describe("agent CRUD: access control and input validation", () => {
     return createAgentRoutes({
       userAgentsStore,
       agentMetadataStore,
-      agentSettingsStore,
       channelBindingService: channelBindingService ?? {
         async getBinding() { return null; },
         async createBinding() { return true; },
@@ -576,9 +565,7 @@ describe("agent CRUD: access control and input validation", () => {
 
   test("owner can delete an agent after a course projection while retaining its immutable receipt", async () => {
     const sql = getDb();
-    await orgContext.run({ organizationId: ORG_A }, () =>
-      agentSettingsStore.updateSettings("my-agent", { soulMd: "must be removed" })
-    );
+    await seedAgentSettings(ORG_A, "my-agent", { soulMd: "must be removed" });
     const bindings = new Set(["line:delete-regression"]);
     const channelBindingService = {
       async getBinding() { return null; },
@@ -1064,7 +1051,6 @@ describe("/lobu prefix routing — Agent API reachability", () => {
 
 describe("input validation: agentId format and edge cases", () => {
   let agentMetadataStore: AgentMetadataStore;
-  let agentSettingsStore: AgentSettingsStore;
   let userAgentsStore: UserAgentsStore;
 
   beforeAll(async () => {
@@ -1075,7 +1061,6 @@ describe("input validation: agentId format and edge cases", () => {
     await resetTestDatabase();
     const configStore = createPostgresAgentConfigStore();
     agentMetadataStore = new AgentMetadataStore(configStore);
-    agentSettingsStore = new AgentSettingsStore(configStore);
     userAgentsStore = new UserAgentsStore();
   });
 
@@ -1087,7 +1072,6 @@ describe("input validation: agentId format and edge cases", () => {
     return createAgentRoutes({
       userAgentsStore,
       agentMetadataStore,
-      agentSettingsStore,
       channelBindingService: {
         async getBinding() { return null; },
         async createBinding() { return true; },

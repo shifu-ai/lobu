@@ -20,6 +20,8 @@ import { mock } from 'bun:test';
 import {
   agentExistsInOrganization as importedAgentExistsInOrganization,
   createPostgresAgentConfigStore as importedCreatePostgresAgentConfigStore,
+  createPostgresAgentConfigReadMetadataStore as
+    importedCreatePostgresAgentConfigReadMetadataStore,
   createPostgresAgentConnectionStore as importedCreatePostgresAgentConnectionStore,
   touchAgentLastUsed as importedTouchAgentLastUsed,
 } from '../../stores/postgres-stores.js';
@@ -29,6 +31,8 @@ import {
 // retains an unmocked implementation.
 const realAgentExistsInOrganization = importedAgentExistsInOrganization;
 const createRealPostgresAgentConfigStore = importedCreatePostgresAgentConfigStore;
+const createRealPostgresAgentConfigReadMetadataStore =
+  importedCreatePostgresAgentConfigReadMetadataStore;
 const createRealPostgresAgentConnectionStore = importedCreatePostgresAgentConnectionStore;
 const realTouchAgentLastUsed = importedTouchAgentLastUsed;
 
@@ -277,24 +281,6 @@ export function installRouteTestMocks(): void {
         fakeRouteAgents.has(agentId) || (await readAgentMetadataFromDb(agentId)) !== null,
       getSettings: async (agentId: string) =>
         fakeRouteSettings.get(agentId) ?? (await readAgentSettingsFromDb(agentId)),
-      saveSettings: async (agentId: string, settings: any) => {
-        fakeRouteSettings.set(agentId, settings);
-        const { getDb } = await import('../../../db/client.js');
-        const sql = getDb();
-        await sql`
-          UPDATE agents
-          SET
-            mcp_servers = COALESCE(${sql.json(settings.mcpServers ?? null)}::jsonb, mcp_servers),
-            pre_approved_tools = COALESCE(${sql.json(settings.preApprovedTools ?? null)}::jsonb, pre_approved_tools),
-            updated_at = NOW()
-          WHERE organization_id = ${authStash.organizationId} AND id = ${agentId}
-        `;
-      },
-      updateSettings: async (agentId: string, updates: any) => {
-        const current = fakeRouteSettings.get(agentId) ?? {};
-        const next = { ...current, ...updates };
-        fakeRouteSettings.set(agentId, next);
-      },
       updateMetadata: async (agentId: string, updates: any) => {
         const current = fakeRouteAgents.get(agentId);
         if (current) fakeRouteAgents.set(agentId, { ...current, ...updates });
@@ -303,6 +289,23 @@ export function installRouteTestMocks(): void {
         fakeRouteAgents.delete(agentId);
       },
     }, createRealPostgresAgentConfigStore()),
+    createPostgresAgentConfigReadMetadataStore: () =>
+      switchingStore({
+        getMetadata: async (agentId: string) =>
+          fakeRouteAgents.get(agentId) ?? (await readAgentMetadataFromDb(agentId)),
+        listAgents: async () => [...fakeRouteAgents.values()],
+        hasAgent: async (agentId: string) =>
+          fakeRouteAgents.has(agentId) || (await readAgentMetadataFromDb(agentId)) !== null,
+        getSettings: async (agentId: string) =>
+          fakeRouteSettings.get(agentId) ?? (await readAgentSettingsFromDb(agentId)),
+        updateMetadata: async (agentId: string, updates: any) => {
+          const current = fakeRouteAgents.get(agentId);
+          if (current) fakeRouteAgents.set(agentId, { ...current, ...updates });
+        },
+        deleteMetadata: async (agentId: string) => {
+          fakeRouteAgents.delete(agentId);
+        },
+      }, createRealPostgresAgentConfigReadMetadataStore()),
     createPostgresAgentConnectionStore: () => switchingStore({
       getConnection: async (connectionId: string) => {
         const connection =

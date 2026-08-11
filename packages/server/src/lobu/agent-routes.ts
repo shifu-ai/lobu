@@ -4,7 +4,7 @@
  * All routes are org-scoped via mcpAuth middleware and orgContext.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { encrypt, type AuthProfile, type StoredConnection } from '@lobu/core';
@@ -18,6 +18,7 @@ import { ChannelBindingService } from '../gateway/channels/binding-service';
 import { createAuthProfileLabel } from '../gateway/auth/settings/auth-profiles-manager';
 import type { Env } from '../index';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
+import logger from '../utils/logger';
 import { countRuntimeMessagingClientsByAgent } from './client-routes';
 import { memoryRoutes } from './memory-routes';
 import { getChatInstanceManager, getLobuCoreServices } from './gateway';
@@ -27,7 +28,7 @@ import {
 } from './onboarding-discovery-job-service';
 import {
   AGENT_ID_PATTERN,
-  createPostgresAgentConfigStore,
+  createPostgresAgentConfigReadMetadataStore,
   createPostgresAgentConnectionStore,
 } from './stores/postgres-stores';
 import { orgContext } from './stores/org-context';
@@ -43,9 +44,13 @@ import { buildMcpConnectUrl } from '../gateway/auth/mcp/connect-link-url';
 import { emitAgentObsEvent } from '@lobu/core';
 import { parseShifuTraceHeaders } from '../observability/trace-context';
 import {
-  AgentSettingsManagedByReleaseError,
-  patchLegacyAgentSettings,
-} from './legacy-agent-settings-service';
+  AgentConfigurationFieldError,
+  parseNativeSettingsPatch,
+} from './agent-configuration/field-ownership';
+import {
+  AgentConfigurationError,
+  createAgentConfigurationAuthority,
+} from './agent-configuration';
 
 const routes = new Hono<{ Bindings: Env }>();
 const toolboxMcpRoutes = new Hono<{ Bindings: Env }>();
@@ -66,8 +71,37 @@ function toStringArray(value: unknown): string[] {
   return [];
 }
 
-const configStore = createPostgresAgentConfigStore();
+const configStore = createPostgresAgentConfigReadMetadataStore();
 const connectionStore = createPostgresAgentConnectionStore();
+const agentConfigurationAuthority = createAgentConfigurationAuthority();
+
+function parseAgentConfigurationEtag(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const match = /^"agent-config:(0|[1-9][0-9]*)"$/.exec(value);
+  if (!match) throw new AgentConfigurationError('invalid_revision_precondition');
+  return match[1];
+}
+
+const IDEMPOTENCY_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
+
+function parseAgentConfigurationCommandId(value: string | undefined): string {
+  if (!value || !IDEMPOTENCY_KEY_PATTERN.test(value)) {
+    throw new AgentConfigurationError('missing_idempotency_key');
+  }
+  return value;
+}
+
+function compatibilityCommandId(): string {
+  // Always mint a fresh command id for the no-If-Match compatibility path.
+  // Reusing a request-scoped header (x-shifu-trace-id / x-request-id) here
+  // is wrong: trace ids span a whole journey, so a second, different PATCH
+  // within the same trace would collide in the command journal and be
+  // rejected with `agent_configuration_command_conflict` — silently dropping
+  // the second change. The legacy path never had replay dedup, so the compat
+  // path doesn't either; clients that want idempotency send If-Match +
+  // Idempotency-Key.
+  return `compat:${randomUUID()}`;
+}
 
 type ProviderAuthType = 'oauth' | 'device-code' | 'api-key';
 
@@ -1741,18 +1775,9 @@ routes.post('/', async (c) => {
 
   const orgId = c.get('organizationId') as string;
 
-  // Atomic create + auto-inject. Two concurrent `lobu apply` runs from the
-  // same operator can both reach this endpoint with the same agentId. The
-  // previous version did INSERT-then-saveSettings as two separate writes:
-  // a "loser" returning 200 in the idempotent branch could see the row
-  // before the winner's saveSettings landed, then immediately PATCH
-  // `mcpServers` with operator config — only for the winner's deferred
-  // saveSettings to clobber it moments later. Folding `mcp_servers` into
-  // the same INSERT statement closes that gap: the row + auto-injected
-  // MCP server land atomically and the loser's idempotent 200 already
-  // reflects fully-initialized state.
-  const sql = getDb();
-  const now = new Date();
+  // The authority bootstrap commits the agent, auto-injected MCP settings,
+  // ownership, configuration control, and command receipt atomically. A
+  // concurrent idempotent create therefore observes a complete aggregate.
   const orgSlug = c.req.param('orgSlug');
   const publicUrl =
     getConfiguredPublicOrigin() || `http://localhost:${process.env.PORT || '8787'}`;
@@ -1760,39 +1785,67 @@ routes.post('/', async (c) => {
     'lobu-memory': { url: `${publicUrl}/mcp/${orgSlug}`, type: 'streamable-http' },
   };
   const ownerPreApprovedTools = ['/mcp/lobu-memory/tools/*'];
-  const inserted = await sql`
-    INSERT INTO agents (
-      id, organization_id, name, description, owner_platform, owner_user_id,
-      mcp_servers, pre_approved_tools, created_at, updated_at
-    )
-    VALUES (
-      ${agentId}, ${orgId}, ${name}, ${description ?? null},
-      'lobu', ${user.id},
-      ${sql.json(ownerMcpServers)}, ${sql.json(ownerPreApprovedTools)}, ${now}, ${now}
-    )
-    ON CONFLICT (organization_id, id) DO NOTHING
-    RETURNING id
-  `;
-
-  if (inserted.length === 0) {
-    // Another writer (or a previous apply cycle) already owns this id in
-    // *this* org. Return idempotent 200 with the existing row's metadata.
-    // Cross-org collisions are no longer possible — the PK is per-org now.
-    const existing = await configStore.getMetadata(agentId);
-    if (!existing) {
-      return c.json({ error: 'Agent metadata missing' }, 500);
-    }
-    return c.json(
-      {
+  const settings = {
+    mcpServers: ownerMcpServers,
+    preApprovedTools: ownerPreApprovedTools,
+  };
+  const requestDigest = `sha256:${createHash('sha256')
+    .update(
+      JSON.stringify({
         agentId,
-        name: existing.name,
-        description: existing.description,
-      },
-      200
-    );
+        name,
+        description: description ?? null,
+        ownerUserId: user.id,
+        settings,
+      })
+    )
+    .digest('hex')}` as const;
+  let result;
+  try {
+    result = await agentConfigurationAuthority.bootstrap({
+      kind: 'bootstrap',
+      profile: 'native',
+      organizationId: orgId,
+      agentId,
+      commandId: `native-bootstrap:${requestDigest}`,
+      actor: { kind: 'session' },
+      name,
+      description,
+      ownerPlatform: 'lobu',
+      ownerUserId: user.id,
+      settings,
+      requestDigest,
+    });
+  } catch (error) {
+    if (error instanceof AgentConfigurationError) {
+      const status =
+        error.code === 'agent_configuration_command_conflict' ||
+        error.code === 'agent_configuration_revision_mismatch'
+          ? 409
+          : 400;
+      return c.json(
+        {
+          error: error.code,
+          ...(error.currentRevision === undefined
+            ? {}
+            : { currentRevision: error.currentRevision }),
+        },
+        status
+      );
+    }
+    throw error;
   }
-
-  return c.json({ agentId, name, description }, 201);
+  if (result.status === 'rejected') {
+    return c.json({ error: result.reason }, 409);
+  }
+  return c.json(
+    {
+      agentId,
+      name: result.metadata.name,
+      description: result.metadata.description,
+    },
+    result.created ? 201 : 200
+  );
 });
 
 // ── Get agent detail ─────────────────────────────────────────────────────────
@@ -2102,18 +2155,41 @@ routes.patch('/:agentId/config', async (c) => {
   const denied = requireSessionOrAdminPat(c);
   if (denied) return denied;
   const { agentId } = c.req.param();
-  const updates = await c.req.json();
-
-  if (!(await configStore.hasAgent(agentId))) {
-    return c.json({ error: 'Agent not found' }, 404);
+  let updates: unknown;
+  try {
+    updates = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid or missing JSON body' }, 400);
+  }
+  if (updates === null || typeof updates !== 'object' || Array.isArray(updates)) {
+    return c.json({ error: 'unknown_configuration_field' }, 400);
   }
 
   // Auth profiles aren't part of the agent settings row — they're
   // user-scoped and live in `user_auth_profiles` with secrets in the secret
   // store. Pull them out of the settings patch and persist them through the
   // proper path; otherwise an api-key typed into the UI is silently dropped.
-  const { authProfiles, ...settingsUpdates } = updates as {
+  //
+  // `updatedAt` and `mcpInstallNotified` are server-emitted fields that
+  // GET /config includes in its response. Clients (CLI `agent config patch`,
+  // settings UIs) round-trip the GET body back into PATCH, so strip them here
+  // instead of letting the strict field-ownership parser reject the
+  // round-trip (`unknown_configuration_field` for the read-only updatedAt
+  // stamp, `runtime_field_requires_runtime_api` for the runtime-owned MCP
+  // acknowledgement marker — which every agent that has used an MCP carries).
+  // Dropping them is safe and matches the legacy path's tolerance: the store
+  // stamps its own timestamp, and callers that want to change
+  // mcpInstallNotified must go through the runtime API — the Authority still
+  // rejects it when addressed directly.
+  const {
+    authProfiles,
+    updatedAt: _readOnlyUpdatedAt,
+    mcpInstallNotified: _runtimeOwnedMcpInstallNotified,
+    ...settingsUpdates
+  } = updates as {
     authProfiles?: AuthProfile[];
+    updatedAt?: unknown;
+    mcpInstallNotified?: unknown;
   } & Record<string, unknown>;
 
   if (authProfiles !== undefined && Object.keys(settingsUpdates).length > 0) {
@@ -2127,13 +2203,102 @@ routes.patch('/:agentId/config', async (c) => {
     );
   }
 
+  let settingsPatch;
+  try {
+    settingsPatch = parseNativeSettingsPatch(settingsUpdates);
+  } catch (error) {
+    if (error instanceof AgentConfigurationFieldError) {
+      return c.json({ error: error.reason }, 400);
+    }
+    throw error;
+  }
+
   const organizationId = c.get('organizationId');
   if (!organizationId) return c.json({ error: 'Organization required' }, 401);
+
+  let expectedConfigurationRevision: string | null;
   try {
-    await patchLegacyAgentSettings(organizationId, agentId, settingsUpdates);
+    expectedConfigurationRevision = parseAgentConfigurationEtag(c.req.header('if-match'));
   } catch (error) {
-    if (error instanceof AgentSettingsManagedByReleaseError) {
-      return c.json({ error: error.code, error_description: error.message }, 409);
+    if (error instanceof AgentConfigurationError) {
+      return c.json({ error: error.code }, 400);
+    }
+    throw error;
+  }
+
+  let commandId: string;
+  if (expectedConfigurationRevision !== null) {
+    try {
+      commandId = parseAgentConfigurationCommandId(c.req.header('idempotency-key'));
+    } catch (error) {
+      if (error instanceof AgentConfigurationError) {
+        return c.json({ error: 'agent_configuration_idempotency_key_required' }, 400);
+      }
+      throw error;
+    }
+  } else {
+    commandId = compatibilityCommandId();
+    logger.warn({ organizationId, agentId }, 'missing_revision_precondition');
+  }
+
+  let revisionedResponse: {
+    configurationRevision: string;
+    managementMode: 'native' | 'toolbox_managed';
+  } | null = null;
+  const authSource = c.get('authSource');
+  const actor = {
+    kind: authSource === 'session' ? ('session' as const) : ('admin_pat' as const),
+  };
+
+  try {
+    const result = await agentConfigurationAuthority.apply({
+      organizationId,
+      agentId,
+      commandId,
+      expectedConfigurationRevision,
+      actor,
+      patch: settingsPatch,
+    });
+    if (result.status === 'conflict') {
+      return c.json(
+        {
+          error: `agent_configuration_${result.conflict}`,
+          currentRevision: result.currentRevision,
+        },
+        409
+      );
+    }
+    if (result.status === 'rejected') {
+      if (
+        expectedConfigurationRevision === null &&
+        result.reason === 'managed_configuration_sealed'
+      ) {
+        return c.json(
+          {
+            error: 'agent_settings_managed_by_release',
+            error_description:
+              'Agent release-owned settings must be changed through managed release apply',
+          },
+          409
+        );
+      }
+      return c.json(
+        { error: 'agent_configuration_rejected', reason: result.reason },
+        409
+      );
+    }
+    if (expectedConfigurationRevision !== null) {
+      revisionedResponse = {
+        configurationRevision: result.state.configurationRevision,
+        managementMode: result.state.managementMode,
+      };
+    }
+  } catch (error) {
+    if (error instanceof AgentConfigurationError) {
+      if (error.code === 'agent_configuration_not_found') {
+        return c.json({ error: 'Agent not found' }, 404);
+      }
+      return c.json({ error: error.code }, 400);
     }
     throw error;
   }
@@ -2164,6 +2329,10 @@ routes.patch('/:agentId/config', async (c) => {
     }
   }
 
+  if (revisionedResponse) {
+    c.header('ETag', `"agent-config:${revisionedResponse.configurationRevision}"`);
+    return c.json({ success: true, ...revisionedResponse });
+  }
   return c.json({ success: true });
 });
 

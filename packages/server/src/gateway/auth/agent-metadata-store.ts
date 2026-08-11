@@ -1,5 +1,5 @@
 import {
-  type AgentConfigStore,
+  type AgentConfigReadMetadataStore,
   type AgentMetadata,
   createLogger,
 } from "@lobu/core";
@@ -18,7 +18,15 @@ const logger = createLogger("agent-metadata-store");
  * `AgentMetadata` object instead.
  */
 export class AgentMetadataStore {
-  constructor(private readonly configStore: AgentConfigStore) {}
+  constructor(
+    private readonly configStore: AgentConfigReadMetadataStore,
+    private readonly lifecycle?: {
+      deleteAgent(
+        agentId: string,
+        deleteMetadata: () => Promise<void>
+      ): Promise<void>;
+    }
+  ) {}
 
   /**
    * Create a new agent with metadata. Throws if an agent with the same id
@@ -71,7 +79,12 @@ export class AgentMetadataStore {
    * (channel bindings, grants, etc.) via FK constraints.
    */
   async deleteAgent(agentId: string): Promise<void> {
-    await this.configStore.deleteMetadata(agentId);
+    const deleteMetadata = () => this.configStore.deleteMetadata(agentId);
+    if (this.lifecycle) {
+      await this.lifecycle.deleteAgent(agentId, deleteMetadata);
+    } else {
+      await deleteMetadata();
+    }
     logger.info(`Deleted metadata for agent ${agentId}`);
   }
 

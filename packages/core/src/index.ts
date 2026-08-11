@@ -9,6 +9,7 @@ export * from "./credentials";
 // Agent store interface (unified storage abstraction)
 export type {
   AgentAccessStore,
+  AgentConfigReadMetadataStore,
   AgentConfigStore,
   AgentConnectionStore,
   AgentMetadata,

@@ -2,6 +2,7 @@
 
 import {
   type AgentAccessStore,
+  type AgentConfigReadMetadataStore,
   type AgentConfigStore,
   type AgentConnectionStore,
   CommandRegistry,
@@ -12,6 +13,10 @@ import {
 } from "@lobu/core";
 import { registerBuiltinGuardrails } from "../guardrails/builtins.js";
 import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
+import {
+  type AgentConfigurationMutationPort,
+  EmbeddedInMemoryAgentConfigurationMutationAdapter,
+} from "../auth/agent-configuration-mutation-port.js";
 import { ApiKeyProviderModule } from "../auth/api-key-provider-module.js";
 import { BedrockProviderModule } from "../auth/bedrock/provider-module.js";
 import { ChatGPTOAuthModule } from "../auth/chatgpt/chatgpt-oauth-module.js";
@@ -150,6 +155,7 @@ export class CoreServices {
   private artifactStore?: ArtifactStore;
   private userAgentsStore?: UserAgentsStore;
   private agentMetadataStore?: AgentMetadataStore;
+  private agentConfigurationMutationPort?: AgentConfigurationMutationPort;
 
   // ============================================================================
   // External OAuth
@@ -176,7 +182,7 @@ export class CoreServices {
   // ============================================================================
   // Agent Sub-Stores (injectable — host can provide its own implementations)
   // ============================================================================
-  private configStore?: AgentConfigStore;
+  private configStore?: AgentConfigReadMetadataStore;
   private connectionStore?: AgentConnectionStore;
   private accessStore?: AgentAccessStore;
 
@@ -187,24 +193,26 @@ export class CoreServices {
 
   // Options stored for deferred initialization
   private options?: {
-    configStore?: AgentConfigStore;
+    configStore?: AgentConfigReadMetadataStore;
     connectionStore?: AgentConnectionStore;
     accessStore?: AgentAccessStore;
     providerRegistry?: ProviderRegistryEntry[];
     secretStore?: SecretStoreRegistry;
     providerCredentialResolver?: RuntimeProviderCredentialResolver;
+    agentConfigurationMutationPort?: AgentConfigurationMutationPort;
     stateAdapter?: import("chat").StateAdapter;
   };
 
   constructor(
     private readonly config: GatewayConfig,
     options?: {
-      configStore?: AgentConfigStore;
+      configStore?: AgentConfigReadMetadataStore;
       connectionStore?: AgentConnectionStore;
       accessStore?: AgentAccessStore;
       providerRegistry?: ProviderRegistryEntry[];
       secretStore?: SecretStoreRegistry;
       providerCredentialResolver?: RuntimeProviderCredentialResolver;
+      agentConfigurationMutationPort?: AgentConfigurationMutationPort;
       stateAdapter?: import("chat").StateAdapter;
     }
   ) {
@@ -215,7 +223,7 @@ export class CoreServices {
     if (options?.accessStore) this.accessStore = options.accessStore;
   }
 
-  getConfigStore(): AgentConfigStore | undefined {
+  getConfigStore(): AgentConfigReadMetadataStore | undefined {
     return this.configStore;
   }
 
@@ -380,10 +388,10 @@ export class CoreServices {
     this.channelBindingService = new ChannelBindingService();
     this.userAgentsStore = new UserAgentsStore();
 
-    // Initialize agent sub-stores. The configStore here owns all Postgres I/O
-    // for agent settings + metadata; the AgentSettingsStore / AgentMetadataStore
-    // wrappers below add the declared-agent overlay and convenience helpers
-    // without duplicating the storage layer.
+    // Initialize agent sub-stores. Persistent configStore implementations expose
+    // settings reads and metadata lifecycle only; revisioned settings writes use
+    // agentConfigurationMutationPort. The built-in in-memory store implements
+    // both surfaces for SDK-embedded mode.
     if (!this.configStore || !this.connectionStore || !this.accessStore) {
       if (this.config.agents?.length) {
         const inMemoryStore = new InMemoryAgentStore();
@@ -408,7 +416,52 @@ export class CoreServices {
     }
 
     this.agentSettingsStore = new AgentSettingsStore(this.configStore);
-    this.agentMetadataStore = new AgentMetadataStore(this.configStore);
+    let embeddedConfigurationAdapter:
+      | EmbeddedInMemoryAgentConfigurationMutationAdapter
+      | undefined;
+    const usesBuiltInInMemoryStore =
+      Object.getPrototypeOf(this.configStore) === InMemoryAgentStore.prototype;
+    if (this.options?.agentConfigurationMutationPort) {
+      this.agentConfigurationMutationPort =
+        this.options.agentConfigurationMutationPort;
+      logger.debug("Using injected persistent agent configuration authority");
+    } else if (usesBuiltInInMemoryStore) {
+      embeddedConfigurationAdapter =
+        new EmbeddedInMemoryAgentConfigurationMutationAdapter(
+          this.configStore as AgentConfigStore
+        );
+      this.agentConfigurationMutationPort = embeddedConfigurationAdapter;
+      logger.debug(
+        "Using built-in embedded in-memory agent configuration mutation adapter"
+      );
+    } else {
+      throw new Error(
+        "Agent configuration mutation port is required for host-provided config stores"
+      );
+    }
+    this.agentMetadataStore = new AgentMetadataStore(
+      this.configStore,
+      usesBuiltInInMemoryStore
+        ? {
+            deleteAgent: async (agentId, deleteMetadata) => {
+              const deleteAggregate = async () => {
+                await deleteMetadata();
+                this.agentSettingsStore!
+                  .getEphemeralAuthProfiles()
+                  .delete(agentId);
+              };
+              if (embeddedConfigurationAdapter) {
+                await embeddedConfigurationAdapter.deleteAgent(
+                  agentId,
+                  deleteAggregate
+                );
+              } else {
+                await deleteAggregate();
+              }
+            },
+          }
+        : undefined
+    );
     logger.debug(
       "Agent settings, channel binding, user agents & metadata stores initialized"
     );
@@ -664,7 +717,8 @@ export class CoreServices {
     this.providerCatalogService = new ProviderCatalogService(
       this.agentSettingsStore,
       this.authProfilesManager,
-      this.declaredAgentRegistry
+      this.declaredAgentRegistry,
+      this.agentConfigurationMutationPort!
     );
     logger.debug("Provider catalog service initialized");
 
@@ -1027,6 +1081,13 @@ export class CoreServices {
     if (!this.agentSettingsStore)
       throw new Error("Agent settings store not initialized");
     return this.agentSettingsStore;
+  }
+
+  getAgentConfigurationMutationPort(): AgentConfigurationMutationPort {
+    if (!this.agentConfigurationMutationPort) {
+      throw new Error("Agent configuration mutation port not initialized");
+    }
+    return this.agentConfigurationMutationPort;
   }
 
   getChannelBindingService(): ChannelBindingService {
