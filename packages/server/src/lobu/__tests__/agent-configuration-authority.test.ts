@@ -9,6 +9,8 @@ import {
   seedAgentRow,
 } from '../../gateway/__tests__/helpers/db-setup';
 import { createAgentConfigurationAuthority } from '../agent-configuration';
+import { enrollToolboxManagedInTransaction } from '../agent-configuration/postgres-repository';
+import type { ManagedEnrollmentCommand } from '../agent-configuration/types';
 import { AgentReleaseError } from '../agent-release-service';
 import {
   parseNativeSettingsPatch,
@@ -1448,6 +1450,129 @@ describe('AgentConfigurationAuthority', () => {
       warnSpy.mockRestore();
     }
   });
+
+  test('applyManagedRelease ownership assert rejects non-release fields even when prepare bypasses the parser', async () => {
+    // Direct test of the defense-in-depth layer at authority.ts
+    // `assertManagedReleaseSettingsOwnership`: even if the prepare pipeline
+    // (parser/manifest validation) were to hand over settings containing a
+    // field outside release ownership, the authority must refuse before any
+    // transaction starts. Stubbing prepareAgentReleaseApply is exactly the
+    // bypass this assert exists for.
+    const prepared = {
+      command: {
+        expectedConfigurationRevision: '0',
+        settings: {
+          identityMd: 'release-owned identity',
+          verboseLogging: true, // lobu_operator-owned — outside release ownership
+        },
+        signedManifest: { managedSettings: {} },
+      },
+      publication: {},
+      feedDigest: 'sha256:feed',
+    };
+    type AuthorityOptions = NonNullable<Parameters<typeof createAgentConfigurationAuthority>[1]>;
+    const authority = createAgentConfigurationAuthority(undefined, {
+      agentReleaseService: {
+        prepareAgentReleaseApply: () => prepared,
+      } as unknown as AuthorityOptions['agentReleaseService'],
+    });
+
+    await expect(
+      authority.applyManagedRelease({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        command: {},
+        actor: { kind: 'admin_pat' },
+      })
+    ).rejects.toMatchObject({
+      name: 'AgentReleaseError',
+      code: 'agent_release_invalid_managed_settings',
+      status: 400,
+    });
+
+    // The rejection must happen before any command materializes.
+    const commands = await getDb()`
+      SELECT count(*)::int AS count FROM agent_configuration_commands
+      WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+    `;
+    expect(commands).toEqual([{ count: 0 }]);
+  });
+
+  test.each([
+    [
+      'management mode flips away from native',
+      `UPDATE agent_configuration_controls SET management_mode = 'toolbox_managed'`,
+    ],
+    [
+      'configuration revision advances',
+      `UPDATE agent_configuration_controls SET configuration_revision = configuration_revision + 1`,
+    ],
+  ])(
+    'enrollment CAS UPDATE affects zero rows when %s between validation and write',
+    async (_name, sabotageSql) => {
+      // Direct repository-level test of the CAS predicate on the enrollment
+      // UPDATE (`WHERE management_mode = 'native' AND configuration_revision =
+      // expected`). The in-transaction validations read the control row first,
+      // so the predicate only matters if the row changes between that read and
+      // the UPDATE — simulate exactly that by mutating the row (through the
+      // same transaction, which holds the lock) right before the CAS UPDATE
+      // executes.
+      await seedAppliedEnrollmentRelease();
+      const command: ManagedEnrollmentCommand = {
+        kind: 'managed_enrollment',
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        commandId: `managed-enrollment-cas-${_name.replaceAll(' ', '-')}`,
+        commandDigest: canonicalDigest({ cas: _name }),
+        expectedConfigurationRevision: '0',
+        actor: { kind: 'admin_pat' },
+        toolboxUserId: TOOLBOX_USER_ID,
+        environment: 'production',
+        runtimeEnvironment: 'production',
+        snapshot: enrollmentSnapshot(),
+      };
+
+      const result = await getDb().begin(async (tx) => {
+        let sabotaged = false;
+        const casMarker = "SET management_mode = 'toolbox_managed'";
+        const sabotagingTx = new Proxy(tx, {
+          apply(target, thisArg, args) {
+            const strings = args[0];
+            if (
+              !sabotaged &&
+              Array.isArray(strings) &&
+              strings.join('').includes(casMarker)
+            ) {
+              sabotaged = true;
+              return tx
+                .unsafe(
+                  `${sabotageSql}
+                   WHERE organization_id = '${ORGANIZATION_ID}' AND agent_id = '${AGENT_ID}'`
+                )
+                .then(() => Reflect.apply(target, thisArg, args));
+            }
+            return Reflect.apply(target, thisArg, args);
+          },
+        }) as DbClient;
+        const enrollment = await enrollToolboxManagedInTransaction(sabotagingTx, command);
+        expect(sabotaged).toBe(true);
+        return enrollment;
+      });
+
+      expect(result).toEqual({
+        status: 'conflict',
+        conflict: 'revision_mismatch',
+        currentRevision: '0',
+      });
+      const rows = await getDb()`
+        SELECT
+          (SELECT count(*)::int FROM agent_configuration_commands
+            WHERE organization_id = ${ORGANIZATION_ID} AND agent_id = ${AGENT_ID}
+              AND command_id = ${command.commandId}) AS command_count
+      `;
+      expect(rows).toEqual([{ command_count: 0 }]);
+    }
+  );
 
   test('requires a revision for managed operator patches after honoring exact legacy replay', async () => {
     const authority = createAgentConfigurationAuthority();
