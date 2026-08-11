@@ -2170,19 +2170,26 @@ routes.patch('/:agentId/config', async (c) => {
   // store. Pull them out of the settings patch and persist them through the
   // proper path; otherwise an api-key typed into the UI is silently dropped.
   //
-  // `updatedAt` is a server-emitted read-only timestamp that GET /config
-  // includes in its response. Clients (CLI `agent config patch`, settings
-  // UIs) round-trip the GET body back into PATCH, so strip it here instead
-  // of letting the strict field-ownership parser reject the round-trip with
-  // `unknown_configuration_field`. Dropping it is safe: it was never a
-  // writable field — the store stamps its own timestamp on every write.
+  // `updatedAt` and `mcpInstallNotified` are server-emitted fields that
+  // GET /config includes in its response. Clients (CLI `agent config patch`,
+  // settings UIs) round-trip the GET body back into PATCH, so strip them here
+  // instead of letting the strict field-ownership parser reject the
+  // round-trip (`unknown_configuration_field` for the read-only updatedAt
+  // stamp, `runtime_field_requires_runtime_api` for the runtime-owned MCP
+  // acknowledgement marker — which every agent that has used an MCP carries).
+  // Dropping them is safe and matches the legacy path's tolerance: the store
+  // stamps its own timestamp, and callers that want to change
+  // mcpInstallNotified must go through the runtime API — the Authority still
+  // rejects it when addressed directly.
   const {
     authProfiles,
     updatedAt: _readOnlyUpdatedAt,
+    mcpInstallNotified: _runtimeOwnedMcpInstallNotified,
     ...settingsUpdates
   } = updates as {
     authProfiles?: AuthProfile[];
     updatedAt?: unknown;
+    mcpInstallNotified?: unknown;
   } & Record<string, unknown>;
 
   if (authProfiles !== undefined && Object.keys(settingsUpdates).length > 0) {

@@ -663,7 +663,7 @@ describe('PATCH /:agentId/config — native configuration authority', () => {
     expect(rows).toEqual([{ user_md: 'second write' }]);
   });
 
-  test('accepts a GET /config round-trip body (server-emitted updatedAt is ignored)', async () => {
+  test('accepts a GET /config round-trip body (server-emitted updatedAt and mcpInstallNotified are ignored)', async () => {
     // Contract exercised by `lobu agent config patch` in scripts/cli-smoke.sh:
     // GET /config, drop authProfiles, PATCH the rest back verbatim. The GET
     // response includes the read-only `updatedAt` stamp, which must not trip
@@ -681,8 +681,11 @@ describe('PATCH /:agentId/config — native configuration authority', () => {
     // returns for a just-created agent (the agents-table column DEFAULTs via
     // rowToSettings, plus the server-stamped updatedAt) so this test fails
     // whenever PATCH stops accepting a real fresh-agent GET body — the
-    // cli-smoke round-trip contract.
+    // cli-smoke round-trip contract. `mcpInstallNotified` covers the used
+    // agent: it is runtime-owned and appears in GET once the agent has used
+    // an MCP, so the round-trip must tolerate it too.
     Object.assign(config, {
+      mcpInstallNotified: { 'mcp-notion': Date.now() },
       modelSelection: {},
       providerModelPreferences: {},
       networkConfig: {},
