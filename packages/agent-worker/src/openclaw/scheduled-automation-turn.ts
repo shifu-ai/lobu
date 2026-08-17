@@ -9,6 +9,10 @@ const SCHEDULED_AUTOMATION_SUPPRESSED_TOOL_NAMES = new Set([
   "create_automation",
 ]);
 
+const SCHEDULED_AUTOMATION_RUNNER_TOOL_NAMES = new Set([
+  "run_heartbeat_automation",
+]);
+
 const SCHEDULED_AUTOMATION_DENIED_SCHEDULE_ACTIONS = new Set([
   "create",
   "activate",
@@ -61,9 +65,14 @@ export function isScheduledAutomationToolAllowed(params: {
   mcpId: string;
   toolName: string;
 }): boolean {
+  if (params.mcpId !== SHIFU_TOOLBOX_MCP_ID) return true;
+
+  if (SCHEDULED_AUTOMATION_RUNNER_TOOL_NAMES.has(params.toolName)) {
+    return params.scheduledAutomation;
+  }
+
   return (
     !params.scheduledAutomation ||
-    params.mcpId !== SHIFU_TOOLBOX_MCP_ID ||
     !SCHEDULED_AUTOMATION_SUPPRESSED_TOOL_NAMES.has(params.toolName)
   );
 }

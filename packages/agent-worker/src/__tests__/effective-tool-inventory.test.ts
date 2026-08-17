@@ -53,7 +53,7 @@ function active(capabilityIds: string[]): ReleaseCapabilityState {
 }
 
 describe("effective tool inventory", () => {
-  test("human turns can keep automation creation tools when policy and capability allow them", () => {
+  test("human turns can keep automation creation tools but not the scheduled runner", () => {
     const scopedTools = {
       "shifu-toolbox": [
         tool("plan_automation"),
@@ -83,7 +83,12 @@ describe("effective tool inventory", () => {
     expect(inventory.allowedToolKeys).toEqual([
       "shifu-toolbox/create_automation",
       "shifu-toolbox/plan_automation",
-      "shifu-toolbox/run_heartbeat_automation",
+    ]);
+    expect(inventory.blocked).toEqual([
+      {
+        toolKey: "shifu-toolbox/run_heartbeat_automation",
+        reason: "policy_denied",
+      },
     ]);
   });
 
