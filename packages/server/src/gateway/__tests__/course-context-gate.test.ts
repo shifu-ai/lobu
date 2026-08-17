@@ -401,6 +401,12 @@ describe("course context gate", () => {
 		["課程文件", true],
 		["戰報", true],
 		["招生 Offer", true],
+		[
+			"ShiFu 課程訂單，資料在 ShiFu Toolbox，監控新訂單、訂單狀態改變、訂單金額變動。確認建立：每 10 分鐘查一次，到今晚 10 點，有變化推送給我",
+			false,
+		],
+		["每 30 分鐘查訂單，到晚上 10 點，有變化通知我", false],
+		["查技術分析全攻略訂單數", false],
 		["提醒我明天繳電話費", false],
 	])("%s => %s", (text, want) =>
 		expect(requiresCourseContext(payload(text))).toBe(want));
@@ -662,6 +668,25 @@ describe("course context gate", () => {
 				sessionManager: manager as never,
 				sessionKey: "s",
 			}),
+		).resolves.toEqual({ status: "not_required" });
+		expect(manager.getSession).not.toHaveBeenCalled();
+	});
+	test("order monitoring bypasses a failed session store read even when message says course order", async () => {
+		const manager = {
+			getSession: vi.fn().mockRejectedValue(new Error("down")),
+		};
+		await expect(
+			attachCourseContextForReviewedScope(
+				payload(
+					"ShiFu 課程訂單，資料在 ShiFu Toolbox，監控新訂單、訂單狀態改變、訂單金額變動。確認建立：每 10 分鐘查一次，到今晚 10 點，有變化推送給我",
+				),
+				{
+					baseUrl: "https://t",
+					secret: "s",
+					sessionManager: manager as never,
+					sessionKey: "s",
+				},
+			),
 		).resolves.toEqual({ status: "not_required" });
 		expect(manager.getSession).not.toHaveBeenCalled();
 	});

@@ -81,6 +81,9 @@ const COURSE_INTENT =
 	/(?:銷講|三個秘密|課綱|課程|大課|老師|錄課|會議待辦|戰報|招生|offer)/iu;
 const PERSONAL_REMINDER =
 	/提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話費|水費|電費)/u;
+const ORDER_DATA_INTENT = /(?:訂單|成交|報名)/u;
+const ORDER_AUTOMATION_OR_QUERY =
+	/(?:監控|追蹤|查詢|查|看|統計|推送|通知|回報|建立|設定|每\s*\d+\s*分鐘|每\s*(?:半小時|小時)|到(?:今晚|晚上|明天)|變化|變動|狀態|金額|新訂單|訂單數)/u;
 
 function normalizeCourseIntentText(message: string): string {
 	return message.normalize("NFKC").replaceAll("課成", "課程");
@@ -261,6 +264,8 @@ export function decideCourseTurn(
 	options: { hasActiveCourse?: boolean } = {},
 ): CourseTurnDecision {
 	const message = data.messageText?.trim() ?? "";
+	if (ORDER_DATA_INTENT.test(message) && ORDER_AUTOMATION_OR_QUERY.test(message))
+		return { courseContextRequired: false };
 	if (PERSONAL_REMINDER.test(message) && !COURSE_INTENT.test(message))
 		return { courseContextRequired: false };
 	return {
@@ -283,6 +288,11 @@ export function requiresCourseContext(
 export function isExplicitPersonalBypass(data: MessagePayload): boolean {
 	const message = data.messageText?.trim() ?? "";
 	return PERSONAL_REMINDER.test(message) && !COURSE_INTENT.test(message);
+}
+
+function isExplicitOrderDataBypass(data: MessagePayload): boolean {
+	const message = data.messageText?.trim() ?? "";
+	return ORDER_DATA_INTENT.test(message) && ORDER_AUTOMATION_OR_QUERY.test(message);
 }
 
 function validScheduledCourseContext(
@@ -322,6 +332,8 @@ export async function attachCourseContextForReviewedScope(
 			status: "context_unavailable",
 			reasonCode: "invalid_scheduled_course_context",
 		};
+	if (!scheduled && isExplicitOrderDataBypass(data))
+		return { status: "not_required" };
 	if (!scheduled && isExplicitPersonalBypass(data))
 		return { status: "not_required" };
 	const gateNow = options?.scheduler?.now ?? options?.now ?? Date.now;
