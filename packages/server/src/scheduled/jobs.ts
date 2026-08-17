@@ -37,6 +37,11 @@ import {
 	resolveScheduledPersonalReminder,
 	type ScheduledPersonalReminderV1,
 } from "./personal-reminder.js";
+import {
+	renderScheduledHeartbeatAutomationBlock,
+	resolveScheduledHeartbeatAutomation,
+	type ScheduledHeartbeatAutomationV1,
+} from "./heartbeat-automation.js";
 import { salesBattleReportObserverLogFields } from "./sales-battle-report-observer-log.js";
 import {
 	registerScheduledJobsTicker,
@@ -293,6 +298,7 @@ export interface WakeAgentTaskPayload {
 	reason?: string | null;
 	trustedCourseWake?: unknown;
 	personalReminder?: unknown;
+	automation?: unknown;
 }
 
 export interface WakeAgentTaskDeps {
@@ -361,6 +367,7 @@ export async function handleWakeAgentTask(
 	p.agent_id = resolvedAgentId;
 	const hasTrustedWake = p.trustedCourseWake !== undefined;
 	const hasPersonalReminderMarker = p.personalReminder !== undefined;
+	const hasAutomationMarker = p.automation !== undefined;
 	const scheduledMessageId =
 		p.__scheduled_job_id && p.__scheduled_task_run_id
 			? `scheduled-${p.__scheduled_job_id}-run-${p.__scheduled_task_run_id}`.replace(
@@ -375,6 +382,24 @@ export async function handleWakeAgentTask(
 	let resolvedCourseContext: ResolvedCourseExecutionContext | undefined;
 	let trustedEligibility: TrustedCourseFireEligibility | null = null;
 	let scheduledPersonalReminder: ScheduledPersonalReminderV1 | null = null;
+	let scheduledAutomation: ScheduledHeartbeatAutomationV1 | null = null;
+	if (hasAutomationMarker) {
+		scheduledAutomation = resolveScheduledHeartbeatAutomation({
+			raw: p.automation,
+			scheduledTick: p.__scheduled_job_tick,
+		});
+		if (!scheduledAutomation) {
+			logger.warn(
+				{
+					category: "heartbeat_automation_fire_gate",
+					scheduledJobId: p.__scheduled_job_id,
+					scheduledTaskRunId: p.__scheduled_task_run_id,
+				},
+				"[task] heartbeat automation wake rejected deterministically",
+			);
+			return;
+		}
+	}
 	if (hasPersonalReminderMarker) {
 		scheduledPersonalReminder = resolveScheduledPersonalReminder({
 			raw: p.personalReminder,
@@ -512,23 +537,45 @@ export async function handleWakeAgentTask(
 			threadId,
 			messageText: reuseConversation
 				? buildScheduledWakeMessage(
-						renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick),
+						renderWakeAgentScheduledMessage(
+							p.prompt,
+							p.__scheduled_job_tick,
+							scheduledAutomation,
+						),
 						{
-							mechanicalDelivery: hasTrustedWake || Boolean(scheduledPersonalReminder),
+							mechanicalDelivery:
+								hasTrustedWake ||
+								Boolean(scheduledPersonalReminder) ||
+								Boolean(scheduledAutomation),
 						},
 					)
-				: renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick),
+				: renderWakeAgentScheduledMessage(
+						p.prompt,
+						p.__scheduled_job_tick,
+						scheduledAutomation,
+					),
 			source: "scheduled-job",
 			messageId: scheduledMessageId,
 			queueSingletonKey: scheduledMessageId,
 			durableQueueSingleton: Boolean(
-				(hasTrustedWake || scheduledPersonalReminder) && scheduledMessageId,
+				(hasTrustedWake || scheduledPersonalReminder || scheduledAutomation) &&
+					scheduledMessageId,
 			),
 			scheduledCourseContext,
 			resolvedCourseContext,
 			scheduledPersonalReminder: scheduledPersonalReminder ?? undefined,
 		},
 	);
+}
+
+function renderWakeAgentScheduledMessage(
+	prompt: string,
+	scheduledJobTick: string | undefined,
+	automation: ScheduledHeartbeatAutomationV1 | null,
+): string {
+	const renderedPrompt = renderScheduledWakePrompt(prompt, scheduledJobTick);
+	if (!automation) return renderedPrompt;
+	return `${renderedPrompt}\n\n${renderScheduledHeartbeatAutomationBlock(automation)}`;
 }
 
 function renderScheduledWakePrompt(

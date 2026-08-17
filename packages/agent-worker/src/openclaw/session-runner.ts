@@ -133,6 +133,10 @@ import {
   getOpenClawSessionContext,
   removeLegacyToolboxActiveContext,
 } from "./session-context";
+import {
+  isScheduledAutomationToolAllowed,
+  isScheduledAutomationTurn,
+} from "./scheduled-automation-turn";
 import { resolveTrustedShifuToolboxOrigins } from "./tool-catalog";
 import { qualifiedToolKey, toolIdentityKey } from "./tool-descriptor";
 import {
@@ -1445,6 +1449,10 @@ export async function runAISession(
     runAISessionDependencies,
   } = params;
   const turnExecutionIntent = deriveTurnExecutionIntent(rawUserPrompt);
+  const scheduledAutomation = isScheduledAutomationTurn({
+    platformMetadata,
+    userPrompt: rawUserPrompt,
+  });
   const automationModificationTurn =
     buildTrustedAutomationModificationTurnContext({
       userPrompt: rawUserPrompt,
@@ -1825,8 +1833,13 @@ export async function runAISession(
       ...snapshot,
       mcpTools: filterMcpToolsForCliExposure({
         toolsByMcp: applyCapabilityLimitNotes(snapshot.mcpTools),
-        isToolAllowed: (toolName) =>
-          isToolAllowedByPolicy(toolName, toolsPolicy),
+        isToolAllowed: (toolName, mcpId) =>
+          isToolAllowedByPolicy(toolName, toolsPolicy) &&
+          isScheduledAutomationToolAllowed({
+            scheduledAutomation,
+            mcpId,
+            toolName,
+          }),
         mcpProvenanceById,
         trustedShifuToolboxOrigins,
       }),
@@ -1841,7 +1854,15 @@ export async function runAISession(
     for (const [mcpId, toolsForMcp] of Object.entries(toolsByMcp)) {
       for (const tool of toolsForMcp) {
         const toolName = tool.name?.trim();
-        if (!toolName || !isToolAllowedByPolicy(toolName, toolsPolicy))
+        if (
+          !toolName ||
+          !isToolAllowedByPolicy(toolName, toolsPolicy) ||
+          !isScheduledAutomationToolAllowed({
+            scheduledAutomation,
+            mcpId,
+            toolName,
+          })
+        )
           continue;
         names.push(toolName, qualifiedToolKey(mcpId, toolName));
         keys.push(toolIdentityKey(mcpId, toolName));
@@ -1892,8 +1913,13 @@ export async function runAISession(
     connectedMcpIds,
     untrustedProvenanceToolKeys,
     releaseCapabilityByToolKey: releaseGatedMcpToolCapabilities,
-    isPolicyAllowed: (_toolKey, toolName) =>
-      isToolAllowedByPolicy(toolName, toolsPolicy),
+    isPolicyAllowed: (_toolKey, toolName, mcpId) =>
+      isToolAllowedByPolicy(toolName, toolsPolicy) &&
+      isScheduledAutomationToolAllowed({
+        scheduledAutomation,
+        mcpId,
+        toolName,
+      }),
   });
   const personalReminderDeliveryBlockedReason = effectiveTools.behaviors
     .personalReminderDelivery.executable
@@ -1952,7 +1978,13 @@ export async function runAISession(
       budget: dynamicToolBudget,
       allowedToolNames: catalogAllowedToolNames,
       routerMode: toolRouterMode,
-      isToolAllowed: (toolName) => isToolAllowedByPolicy(toolName, toolsPolicy),
+      isToolAllowed: (toolName, mcpId) =>
+        isToolAllowedByPolicy(toolName, toolsPolicy) &&
+        isScheduledAutomationToolAllowed({
+          scheduledAutomation,
+          mcpId,
+          toolName,
+        }),
       mcpProvenanceById,
       trustedShifuToolboxOrigins,
       personalReminderDeliveryBlockedReason,
@@ -2037,6 +2069,7 @@ export async function runAISession(
       turnEligibleToolKeys,
       clarificationBlockedToolKeys: selection.trace.blockedToolIdentityKeys,
       turnExecutionIntent,
+      scheduledAutomation,
       personalReminderDeliveryBlockedReason,
     },
     isToolInvocationAllowed: (
@@ -2052,7 +2085,12 @@ export async function runAISession(
         tool,
         mcpId,
         isToolAllowed: (toolName) =>
-          isToolAllowedByPolicy(toolName, toolsPolicy),
+          isToolAllowedByPolicy(toolName, toolsPolicy) &&
+          isScheduledAutomationToolAllowed({
+            scheduledAutomation,
+            mcpId,
+            toolName,
+          }),
         mcpProvenanceById: provenanceFromStatuses(state.mcpStatus),
         trustedShifuToolboxOrigins,
       }),
@@ -2074,8 +2112,13 @@ export async function runAISession(
             },
             connectedMcpIds: collectConnectedMcpIds(fresh),
             releaseCapabilityByToolKey: releaseGatedMcpToolCapabilities,
-            isPolicyAllowed: (_toolKey, toolName) =>
-              isToolAllowedByPolicy(toolName, toolsPolicy),
+            isPolicyAllowed: (_toolKey, toolName, mcpId) =>
+              isToolAllowedByPolicy(toolName, toolsPolicy) &&
+              isScheduledAutomationToolAllowed({
+                scheduledAutomation,
+                mcpId,
+                toolName,
+              }),
           });
           const refreshedAllowedMcpTools = collectAllowedMcpTools(
             freshEffectiveTools.toolsByMcp
@@ -2089,6 +2132,7 @@ export async function runAISession(
             allowedToolKeys: Object.freeze([...refreshedAllowedMcpTools.keys]),
             clarificationBlockedToolKeys:
               selection.trace.blockedToolIdentityKeys,
+            scheduledAutomation,
           };
         } catch (err) {
           logger.warn(
@@ -2356,6 +2400,7 @@ Use it when the user references past discussions or you need context.`);
       ),
     toolboxPersonalAgentTools: context.toolboxPersonalAgentTools,
     turnExecutionIntent,
+    scheduledAutomation,
     personalReminderDeliveryExecutable:
       effectiveTools.behaviors.personalReminderDelivery.executable,
     personalReminderDeliveryBlockedReason,
@@ -2392,6 +2437,7 @@ Use it when the user references past discussions or you need context.`);
         runtimeToolCatalog,
         effectiveAllowedToolKeys: effectiveTools.allowedToolKeys,
         turnExecutionIntent,
+        scheduledAutomation,
         personalReminderDeliveryExecutable:
           effectiveTools.behaviors.personalReminderDelivery.executable,
         personalReminderDeliveryBlockedReason,
@@ -2433,6 +2479,7 @@ Use it when the user references past discussions or you need context.`);
         runtimeToolCatalog,
         effectiveAllowedToolKeys: effectiveTools.allowedToolKeys,
         turnExecutionIntent,
+        scheduledAutomation,
         personalReminderDeliveryExecutable:
           effectiveTools.behaviors.personalReminderDelivery.executable,
         personalReminderDeliveryBlockedReason,
@@ -2481,6 +2528,7 @@ Use it when the user references past discussions or you need context.`);
         shifuTrace,
         mcpProvenanceById,
         turnExecutionIntent,
+        scheduledAutomation,
         personalReminderDeliveryExecutable:
           effectiveTools.behaviors.personalReminderDelivery.executable,
         personalReminderDeliveryBlockedReason,
@@ -2506,6 +2554,11 @@ Use it when the user references past discussions or you need context.`);
     trustedShifuToolboxOrigins,
     isToolAllowed: (toolName, mcpId) =>
       isToolAllowedByPolicy(toolName, toolsPolicy) &&
+      isScheduledAutomationToolAllowed({
+        scheduledAutomation,
+        mcpId,
+        toolName,
+      }) &&
       effectiveTools.allowedToolKeys.includes(
         qualifiedToolKey(mcpId, toolName)
       ),

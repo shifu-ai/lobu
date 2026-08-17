@@ -283,6 +283,7 @@ const PINNED_DIRECT_TOOL_NAMES = new Set([
 const PINNED_TOOLBOX_AUTOMATION_TOOL_NAMES = new Set([
   "plan_automation",
   "create_automation",
+  "run_heartbeat_automation",
 ]);
 
 function isPinnedDirectTool(

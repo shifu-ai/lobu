@@ -1,4 +1,5 @@
 import type { ToolContentResult } from "../shared/tool-implementations";
+import { isScheduledAutomationScheduleWriteDenied } from "./scheduled-automation-turn";
 import type { TurnExecutionIntent } from "./turn-execution-intent";
 
 export const PERSONAL_REMINDER_DELIVERY_CONTRACT =
@@ -39,6 +40,7 @@ export interface ExecuteMcpToolForTurnParams {
     | "capability_inactive"
     | "snapshot_missing"
     | "snapshot_expired";
+  scheduledAutomation?: boolean;
   onTrace?: (trace: McpExecutionTrace) => void;
 }
 
@@ -168,6 +170,31 @@ export async function executeMcpToolForTurn(
   params: ExecuteMcpToolForTurnParams
 ): Promise<ToolContentResult> {
   const requested = requestedActionType(params.args);
+  if (
+    isScheduledAutomationScheduleWriteDenied({
+      scheduledAutomation: params.scheduledAutomation === true,
+      mcpId: params.mcpId,
+      toolName: params.toolName,
+      args: params.args,
+    })
+  ) {
+    params.onTrace?.({
+      ...(requested
+        ? { requestedActionType: requestedActionTypeBucket(requested) }
+        : {}),
+      canonicalized: false,
+    });
+    return {
+      isError: true,
+      errorCode: "scheduled_automation_tool_denied",
+      content: [
+        {
+          type: "text",
+          text: "scheduled_automation_tool_denied",
+        },
+      ],
+    };
+  }
   if (
     params.personalReminderDeliveryExecutable === false &&
     isExplicitPersonalReminderAttempt(params)

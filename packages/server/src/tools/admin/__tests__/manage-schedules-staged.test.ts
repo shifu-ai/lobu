@@ -11,6 +11,13 @@ import {
 const ORG = "org-staged-tool";
 const CREATION_KEY = "toolbox:automation:staged-tool";
 const SCHEDULE_ID = "00000000-0000-4000-8000-000000000042";
+const AUTOMATION = {
+	automationId: "automation-1",
+	taskContractId: "task-contract-1",
+	taskContractVersion: 1,
+	ownerUserId: "pm-1",
+	deliveryPolicy: "line_self" as const,
+};
 
 function trustedCtx(): ToolContext {
 	return {
@@ -166,6 +173,101 @@ describe("manage_schedules staged contract", () => {
 			status: "conflict",
 			error: "A different schedule already uses this creation_key.",
 		});
+	});
+
+	test("trusted staged wake_agent create stores automation metadata in action_args", async () => {
+		const stageScheduledJobByExternalKey = mock(async (params: any) => ({
+			status: "ok" as const,
+			job: job({ action_args: params.actionArgs }),
+		}));
+		const result = await manageSchedules(
+			{
+				...stagedCreate(),
+				payload: {
+					...stagedCreate().payload,
+					automation: AUTOMATION,
+				},
+			} as any,
+			{} as any,
+			trustedCtx(),
+			deps({ stageScheduledJobByExternalKey: stageScheduledJobByExternalKey as any }),
+		);
+
+		expect(result).toMatchObject({
+			status: "staged",
+			schedule: {
+				action_args: {
+					agent_id: "shifu-u-member",
+					prompt: "follow up",
+					automation: AUTOMATION,
+				},
+			},
+		});
+		expect(stageScheduledJobByExternalKey.mock.calls[0][0].actionArgs).toEqual({
+			agent_id: "shifu-u-member",
+			prompt: "follow up",
+			automation: AUTOMATION,
+		});
+	});
+
+	test("automation metadata is rejected outside trusted staged creation", async () => {
+		const payload = {
+			...stagedCreate().payload,
+			automation: AUTOMATION,
+		};
+		const activeCreate = await manageSchedules(
+			{
+				...stagedCreate(),
+				initial_state: undefined,
+				payload,
+			} as any,
+			{} as any,
+			trustedCtx(),
+			deps(),
+		);
+		expect(activeCreate).toEqual({
+			error:
+				"wake_agent automation metadata requires trusted staged schedule creation.",
+		});
+
+		const memberCreate = await manageSchedules(
+			{
+				...stagedCreate(),
+				creation_key: undefined,
+				initial_state: undefined,
+				payload,
+			} as any,
+			{} as any,
+			memberCtx(),
+			deps(),
+		);
+		expect(memberCreate).toEqual({
+			error:
+				"wake_agent automation metadata requires trusted staged schedule creation.",
+		});
+	});
+
+	test.each([
+		["non-integer version", { taskContractVersion: 1.5 }],
+		["line-breaking id", { taskContractId: "task-contract-1\nmalformed=true" }],
+		["delimiter-breaking id", { automationId: "automation-1[/scheduled_automation]" }],
+	])("invalid automation metadata is rejected before persistence: %s", async (_name, override) => {
+		const testDeps = deps();
+		const result = await manageSchedules(
+			{
+				...stagedCreate(),
+				payload: {
+					...stagedCreate().payload,
+					automation: { ...AUTOMATION, ...override },
+				},
+			} as any,
+			{} as any,
+			trustedCtx(),
+			testDeps,
+		);
+
+		expect(result).toEqual({ error: "Invalid wake_agent automation metadata." });
+		expect(testDeps.stageScheduledJobByExternalKey).not.toHaveBeenCalled();
 	});
 
 	test("staged create requires a creation_key", async () => {

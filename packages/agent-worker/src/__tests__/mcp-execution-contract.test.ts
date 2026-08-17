@@ -3,6 +3,7 @@ import {
   executeMcpToolForTurn,
   type McpExecutionTrace,
 } from "../openclaw/mcp-execution-contract";
+import { isScheduledAutomationTurn } from "../openclaw/scheduled-automation-turn";
 import { deriveTurnExecutionIntent } from "../openclaw/turn-execution-intent";
 
 const ok = {
@@ -78,6 +79,76 @@ describe("deriveTurnExecutionIntent", () => {
 });
 
 describe("executeMcpToolForTurn", () => {
+  test("denies schedule write actions during scheduled automation turns without calling MCP", async () => {
+    const scheduledAutomation = isScheduledAutomationTurn({
+      platformMetadata: { source: "scheduled-job" },
+      userPrompt:
+        "[scheduled_automation]\nautomation_id=auto-1\n[/scheduled_automation]",
+    });
+    const calls: unknown[] = [];
+
+    for (const action of ["create", "activate", "update"] as const) {
+      const result = await executeMcpToolForTurn({
+        intent: deriveTurnExecutionIntent("run scheduled heartbeat"),
+        scheduledAutomation,
+        gateway: {
+          agentId: "shifu-u-1",
+          conversationId: "line-conversation-1",
+        },
+        mcpId: "lobu-memory",
+        toolName: "manage_schedules",
+        args: { action },
+        callTool: async (...args) => {
+          calls.push(args);
+          return ok;
+        },
+      });
+
+      expect(result).toEqual({
+        isError: true,
+        errorCode: "scheduled_automation_tool_denied",
+        content: [
+          {
+            type: "text",
+            text: "scheduled_automation_tool_denied",
+          },
+        ],
+      });
+    }
+
+    expect(calls).toEqual([]);
+  });
+
+  test("permits schedule list and cancel actions during scheduled automation turns", async () => {
+    const calls: unknown[] = [];
+
+    for (const action of ["list", "cancel", "pause"] as const) {
+      const result = await executeMcpToolForTurn({
+        intent: deriveTurnExecutionIntent("run scheduled heartbeat"),
+        scheduledAutomation: true,
+        gateway: {
+          agentId: "shifu-u-1",
+          conversationId: "line-conversation-1",
+        },
+        mcpId: "lobu-memory",
+        toolName: "manage_schedules",
+        args: { action },
+        callTool: async (...args) => {
+          calls.push(args);
+          return ok;
+        },
+      });
+
+      expect(result).toEqual(ok);
+    }
+
+    expect(calls.map((call) => (call as unknown[])[2])).toEqual([
+      { action: "list" },
+      { action: "cancel" },
+      { action: "pause" },
+    ]);
+  });
+
   test("canonicalizes only an explicit personal reminder create", async () => {
     const calls: unknown[][] = [];
     const traces: McpExecutionTrace[] = [];

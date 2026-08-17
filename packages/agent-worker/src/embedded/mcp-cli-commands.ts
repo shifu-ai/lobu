@@ -28,6 +28,7 @@ import {
 import { isDirectPackageInstallCommand } from "../openclaw/tool-policy";
 import { toolIdentityKey } from "../openclaw/tool-descriptor";
 import { isExplicitPersonalReminderAttempt } from "../openclaw/mcp-execution-contract";
+import { isScheduledAutomationScheduleWriteDenied } from "../openclaw/scheduled-automation-turn";
 import type { TurnExecutionIntent } from "../openclaw/turn-execution-intent";
 
 const logger = createLogger("mcp-cli");
@@ -68,6 +69,8 @@ export interface McpRuntimeState {
   clarificationBlockedToolKeys?: readonly string[];
   /** Immutable intent derived from the external message at turn start. */
   turnExecutionIntent?: TurnExecutionIntent;
+  /** True when this turn was fired by a scheduled automation job. */
+  scheduledAutomation?: boolean;
   /** Immutable release behavior state for personal reminder creation. */
   personalReminderDeliveryBlockedReason?:
     | "capability_inactive"
@@ -227,7 +230,8 @@ function blockedToolResult(
     | "clarification_required"
     | "capability_inactive"
     | "snapshot_missing"
-    | "snapshot_expired",
+    | "snapshot_expired"
+    | "scheduled_automation_tool_denied",
   mcpId: string,
   toolName: string
 ): { stdout: string; stderr: string; exitCode: number } {
@@ -345,6 +349,20 @@ export function buildMcpServerHandler(
         subcommand
       );
     }
+    if (
+      isScheduledAutomationScheduleWriteDenied({
+        scheduledAutomation: state.scheduledAutomation === true,
+        mcpId,
+        toolName: subcommand,
+        args: parsed.payload,
+      })
+    ) {
+      return blockedToolResult(
+        "scheduled_automation_tool_denied",
+        mcpId,
+        subcommand
+      );
+    }
 
     try {
       const expectedMcpIdentity = expectedMcpIdentityFor(mcpId, state);
@@ -403,6 +421,7 @@ async function refreshRef(
           fresh.clarificationBlockedToolKeys ??
           ref.current.clarificationBlockedToolKeys,
         turnExecutionIntent: ref.current.turnExecutionIntent,
+        scheduledAutomation: ref.current.scheduledAutomation,
         personalReminderDeliveryBlockedReason:
           ref.current.personalReminderDeliveryBlockedReason,
       };

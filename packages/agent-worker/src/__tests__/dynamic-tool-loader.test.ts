@@ -645,6 +645,35 @@ describe("selectMcpToolsForTurn", () => {
     ]);
   });
 
+  test("scheduled automation selection can directly expose the heartbeat runner after creation tools are removed", () => {
+    const automationMetadata = {
+      _meta: {
+        shifuTool: { domain: "automation", priority: "P1" },
+      },
+    };
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [
+          tool("run_heartbeat_automation", automationMetadata),
+        ],
+      },
+      message:
+        "[scheduled_automation]\ntask_contract_id=heartbeat.v1\nautomation_id=auto-1\n[/scheduled_automation]\nCall the ShiFu Toolbox MCP tool run_heartbeat_automation.",
+      budget: 1,
+      routerMode: "semantic",
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(result.trace.primaryIntent).toBe("automation");
+    expect(result.trace.selectedToolNames).toEqual([
+      "shifu-toolbox/run_heartbeat_automation",
+    ]);
+    expect(
+      result.selectedTools["shifu-toolbox"]?.map((entry) => entry.name)
+    ).toEqual(["run_heartbeat_automation"]);
+  });
+
   test("does not directly select pinned automation tools denied by policy", () => {
     const result = selectMcpToolsByMcpForTurn({
       toolsByMcp: {

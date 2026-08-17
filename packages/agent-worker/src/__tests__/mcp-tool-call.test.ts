@@ -41,6 +41,10 @@ import {
   runAISession,
 } from "../openclaw/session-runner";
 import { deriveTurnExecutionIntent } from "../openclaw/turn-execution-intent";
+import {
+  buildRuntimeToolCatalog,
+  dispatchRuntimeToolCall,
+} from "../openclaw/tool-catalog-dispatcher";
 import type { GatewayParams } from "../shared/tool-implementations";
 import {
   askUserQuestion,
@@ -1283,6 +1287,43 @@ describe("external-turn tool router lifecycle", () => {
     expect(emitted[0]?.fields?.selected_tools).toEqual([
       "lobu-memory/manage_schedules",
     ]);
+  });
+
+  test("runtime catalog calls deny manage_schedules write actions during scheduled automation", async () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        "lobu-memory": [
+          {
+            name: "manage_schedules",
+            description: "Manage scheduled jobs",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      selectedTools: {},
+      allowedToolNames: ["lobu-memory/manage_schedules"],
+    });
+    const calls: unknown[] = [];
+
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      allowedToolKeys: ["lobu-memory/manage_schedules"],
+      turnExecutionIntent: deriveTurnExecutionIntent("run scheduled heartbeat"),
+      scheduledAutomation: true,
+      toolName: "manage_schedules",
+      mcpId: "lobu-memory",
+      args: { action: "create" },
+      callTool: async (...args) => {
+        calls.push(args);
+        return { content: [{ type: "text", text: "created" }] };
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "scheduled_automation_tool_denied",
+    });
+    expect(calls).toEqual([]);
   });
 
   for (const mcpExposure of ["cli", "tools"] as const) {
