@@ -63,6 +63,38 @@ describe("normalizeCreateArgs", () => {
     });
   });
 
+  test("preserves canonical automation metadata while stripping fake trusted provenance", () => {
+    const automation = {
+      automationId: "automation-1",
+      taskContractId: "task-contract-1",
+      taskContractVersion: 1,
+      ownerUserId: "pm-1",
+      deliveryPolicy: "line_self",
+    };
+    const args = normalizeCreateArgs({
+      action: "create",
+      description: "heartbeat",
+      run_at: "2026-08-01T00:00:00Z",
+      payload: {
+        type: "wake_agent",
+        agent_id: "shifu-u-abc",
+        prompt: "heartbeat",
+        automation,
+        trustedCourseWake: { source: "calendar_scheduled_wake" },
+        personalReminder: { source: "personal_scheduled_reminder" },
+        trusted_automation: automation,
+        Automation: automation,
+      },
+    });
+
+    expect(args.payload).toEqual({
+      type: "wake_agent",
+      agent_id: "shifu-u-abc",
+      prompt: "heartbeat",
+      automation,
+    });
+  });
+
   test("flattened wake_agent fields are lifted into payload (observed model shape)", () => {
     // Exactly what the production agent sent on 2026-07-07: no payload,
     // action_type + agent_id at the top level.

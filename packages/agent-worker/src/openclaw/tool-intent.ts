@@ -80,7 +80,7 @@ function hasAutomationIntent(text: string): boolean {
     /\bremind(?:\s+(?:me|us|him|her|them))?\b/.test(text);
 
   if (
-    /\b(?:plan_automation|create_automation|wake[ -]agent|automations?|automate|automatically)\b/.test(
+    /\b(?:plan_automation|create_automation|run_heartbeat_automation|wake[ -]agent|automations?|automate|automatically)\b/.test(
       text
     ) ||
     /(?:自動化|自動工作)/.test(text) ||

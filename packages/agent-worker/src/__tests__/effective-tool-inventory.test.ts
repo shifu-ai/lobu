@@ -13,6 +13,10 @@ import {
 import { createMcpToolDefinitions } from "../openclaw/custom-tools";
 import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
 import { buildMcpToolInventoryInstructions } from "../openclaw/session-context";
+import {
+  isScheduledAutomationTurn,
+  isScheduledAutomationToolAllowed,
+} from "../openclaw/scheduled-automation-turn";
 import { qualifiedToolKey } from "../openclaw/tool-descriptor";
 import { deriveTurnExecutionIntent } from "../openclaw/turn-execution-intent";
 import {
@@ -49,6 +53,90 @@ function active(capabilityIds: string[]): ReleaseCapabilityState {
 }
 
 describe("effective tool inventory", () => {
+  test("human turns can keep automation creation tools but not the scheduled runner", () => {
+    const scopedTools = {
+      "shifu-toolbox": [
+        tool("plan_automation"),
+        tool("create_automation"),
+        tool("run_heartbeat_automation"),
+      ],
+    };
+    const scheduledAutomation = isScheduledAutomationTurn({
+      platformMetadata: { source: "line" },
+      userPrompt:
+        "[scheduled_automation]\nautomation_id=auto-1\n[/scheduled_automation]",
+    });
+
+    const inventory = buildEffectiveToolInventory({
+      scopedTools,
+      releaseState: { status: "legacy_unenrolled" },
+      connectedMcpIds: ["shifu-toolbox"],
+      isPolicyAllowed: (_toolKey, toolName, mcpId) =>
+        isScheduledAutomationToolAllowed({
+          scheduledAutomation,
+          mcpId,
+          toolName,
+        }),
+    });
+
+    expect(scheduledAutomation).toBe(false);
+    expect(inventory.allowedToolKeys).toEqual([
+      "shifu-toolbox/create_automation",
+      "shifu-toolbox/plan_automation",
+    ]);
+    expect(inventory.blocked).toEqual([
+      {
+        toolKey: "shifu-toolbox/run_heartbeat_automation",
+        reason: "policy_denied",
+      },
+    ]);
+  });
+
+  test("scheduled automation turns hide planning and creation tools but keep the runner", () => {
+    const scopedTools = {
+      "shifu-toolbox": [
+        tool("plan_automation"),
+        tool("create_automation"),
+        tool("run_heartbeat_automation"),
+      ],
+      "third-party": [tool("plan_automation"), tool("create_automation")],
+    };
+    const scheduledAutomation = isScheduledAutomationTurn({
+      platformMetadata: { source: "scheduled-job" },
+      userPrompt:
+        "[scheduled_automation]\nautomation_id=auto-1\n[/scheduled_automation]",
+    });
+
+    const inventory = buildEffectiveToolInventory({
+      scopedTools,
+      releaseState: { status: "legacy_unenrolled" },
+      connectedMcpIds: ["shifu-toolbox", "third-party"],
+      isPolicyAllowed: (_toolKey, toolName, mcpId) =>
+        isScheduledAutomationToolAllowed({
+          scheduledAutomation,
+          mcpId,
+          toolName,
+        }),
+    });
+
+    expect(scheduledAutomation).toBe(true);
+    expect(inventory.allowedToolKeys).toEqual([
+      "shifu-toolbox/run_heartbeat_automation",
+      "third-party/create_automation",
+      "third-party/plan_automation",
+    ]);
+    expect(inventory.blocked).toEqual([
+      {
+        toolKey: "shifu-toolbox/create_automation",
+        reason: "policy_denied",
+      },
+      {
+        toolKey: "shifu-toolbox/plan_automation",
+        reason: "policy_denied",
+      },
+    ]);
+  });
+
   test("is the immutable intersection of discovery, connection, grant, policy, release and turn constraints", () => {
     const scopedTools = {
       connected: [tool("allowed"), tool("policy_denied"), tool("approval")],

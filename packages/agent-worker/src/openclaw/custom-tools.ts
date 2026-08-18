@@ -263,6 +263,7 @@ function createToolCallDefinition(params: {
   runtimeToolCaller: RuntimeToolCaller;
   effectiveAllowedToolKeys?: Iterable<string>;
   turnExecutionIntent?: TurnExecutionIntent;
+  scheduledAutomation?: boolean;
 }): ToolDefinition {
   return defineTool({
     name: "tool_call",
@@ -289,6 +290,7 @@ function createToolCallDefinition(params: {
         catalog: params.runtimeToolCatalog,
         allowedToolKeys: params.effectiveAllowedToolKeys,
         turnExecutionIntent: params.turnExecutionIntent,
+        scheduledAutomation: params.scheduledAutomation,
         toolName: args.tool_name,
         mcpId: args.mcp_id,
         args: (args.args || {}) as Record<string, unknown>,
@@ -387,6 +389,7 @@ export function createOpenClawCustomTools(params: {
   runtimeToolCaller?: RuntimeToolCaller;
   effectiveAllowedToolKeys?: Iterable<string>;
   turnExecutionIntent?: TurnExecutionIntent;
+  scheduledAutomation?: boolean;
   personalReminderDeliveryExecutable?: boolean;
   personalReminderDeliveryBlockedReason?:
     | "capability_inactive"
@@ -686,6 +689,7 @@ export function createOpenClawCustomTools(params: {
           params.personalReminderDeliveryExecutable,
         personalReminderDeliveryBlockedReason:
           params.personalReminderDeliveryBlockedReason,
+        scheduledAutomation: params.scheduledAutomation,
         onTrace: (decision) =>
           emitMcpExecutionContractTrace(
             params.shifuTrace,
@@ -701,6 +705,7 @@ export function createOpenClawCustomTools(params: {
         runtimeToolCaller,
         effectiveAllowedToolKeys: params.effectiveAllowedToolKeys,
         turnExecutionIntent: params.turnExecutionIntent,
+        scheduledAutomation: params.scheduledAutomation,
       }),
       createToolStatusDefinition(
         params.runtimeToolCatalog,
@@ -750,6 +755,7 @@ export function createMcpToolDefinitions(
     shifuTrace?: WorkerShifuTraceContext;
     mcpProvenanceById?: McpCatalogProvenanceById;
     turnExecutionIntent?: TurnExecutionIntent;
+    scheduledAutomation?: boolean;
     personalReminderDeliveryExecutable?: boolean;
     personalReminderDeliveryBlockedReason?:
       | "capability_inactive"
@@ -841,6 +847,7 @@ export function createMcpToolDefinitions(
               options?.personalReminderDeliveryExecutable,
             personalReminderDeliveryBlockedReason:
               options?.personalReminderDeliveryBlockedReason,
+            scheduledAutomation: options?.scheduledAutomation,
             onTrace: (decision) =>
               emitMcpExecutionContractTrace(
                 options?.shifuTrace,

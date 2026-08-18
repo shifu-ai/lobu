@@ -14,14 +14,47 @@
  * `ManageSchedulesDeps`: no `mock.module` needed, so no process-global
  * pollution risk for other test files in the same `bun test` run.
  */
-import { describe, expect, mock, test } from "bun:test";
+import { beforeAll, describe, expect, mock, test } from "bun:test";
 import type { ResolvedCourseExecutionContext } from "@lobu/core";
-import { handleWakeAgentTask, type WakeAgentTaskDeps } from "../jobs";
+import type { WakeAgentTaskDeps } from "../jobs";
 import type { SqlLike } from "../scheduled-jobs-service";
 
 const ORG = "org-1";
 const BARE_AGENT_ID = "shifu-u-302b8bcc3af1";
 const CONVERSATION_ID = `${BARE_AGENT_ID}_beaac6ef-917b-4bfd-b024-67555d19f0c1_org_peRVYvsqsWk`;
+const AUTOMATION = {
+	automationId: "automation-1",
+	taskContractId: "task-contract-1",
+	taskContractVersion: 1,
+	ownerUserId: "pm-1",
+	deliveryPolicy: "line_self" as const,
+};
+
+let handleWakeAgentTask: typeof import("../jobs").handleWakeAgentTask;
+
+beforeAll(async () => {
+	const core = await import("../../../../core/src/index.ts");
+	mock.module("@lobu/core", () => core);
+	const connectorSdk = await import("../../../../connector-sdk/src/index.ts");
+	mock.module("@lobu/connector-sdk", () => connectorSdk);
+	mock.module("@lobu/connector-worker/compile", () => ({
+		EXTERNAL_RUNTIME_DEPS: [],
+		createConnectorCompiler: () => ({
+			compile: mock(async () => ({
+				code: "",
+				warnings: [],
+			})),
+		}),
+		findBundledConnectorFile: () => null,
+	}));
+	mock.module("@lobu/connector-worker/executor/runtime", () => ({
+		executeCompiledConnector: mock(async () => ({
+			events: [],
+			checkpoint: null,
+		})),
+	}));
+	({ handleWakeAgentTask } = await import("../jobs"));
+});
 
 interface FakeAgentRow {
 	id: string;
@@ -62,25 +95,32 @@ function makeDeps(
 	deps: WakeAgentTaskDeps;
 	enqueueMessage: ReturnType<typeof mock>;
 	getSession: ReturnType<typeof mock>;
+	setSession: ReturnType<typeof mock>;
 	touchSession: ReturnType<typeof mock>;
 } {
+	const sessions = new Map<string, any>();
 	const enqueueMessage = mock(async () => "job-1");
-	const getSession = mock(async (key: string) => ({
-		conversationId: key,
-		channelId: `api_user-1`,
-		userId: "user-1",
-		agentId: BARE_AGENT_ID,
-		organizationId: ORG,
-	}));
+	const getSession = mock(async (key: string) =>
+		sessions.get(key) ?? {
+			conversationId: key,
+			channelId: `api_user-1`,
+			userId: "user-1",
+			agentId: BARE_AGENT_ID,
+			organizationId: ORG,
+		},
+	);
+	const setSession = mock(async (session: any) => {
+		sessions.set(session.conversationId, session);
+	});
 	const touchSession = mock(async () => {});
-	const sessionManager = { getSession, touchSession } as any;
+	const sessionManager = { getSession, setSession, touchSession } as any;
 	const queueProducer = { enqueueMessage } as any;
 	const deps: WakeAgentTaskDeps = {
 		sql: makeSql(agents, pauseCalls) as any,
 		sessionManager,
 		queueProducer,
 	};
-	return { deps, enqueueMessage, getSession, touchSession };
+	return { deps, enqueueMessage, getSession, setSession, touchSession };
 }
 
 describe("handleWakeAgentTask — agent_id normalization (defense in depth)", () => {
@@ -129,6 +169,7 @@ describe("handleWakeAgentTask — agent_id normalization (defense in depth)", ()
 		);
 		const message = (enqueueMessage.mock.calls[0][0] as any).messageText;
 		expect(message).not.toContain("send_daily_digest");
+		expect(message).not.toContain("[scheduled_automation]");
 	});
 
 	test("rejects forged personal reminder ownership before touching a conversation", async () => {
@@ -245,6 +286,115 @@ describe("handleWakeAgentTask — agent_id normalization (defense in depth)", ()
 
 		expect(enqueueMessage).not.toHaveBeenCalled();
 		expect(pauseCalls).toHaveLength(0);
+	});
+});
+
+describe("handleWakeAgentTask — heartbeat automation metadata", () => {
+	test("creates the scheduled automation thread as the Toolbox owner, not the internal scheduler PAT user", async () => {
+		const { deps, enqueueMessage, setSession } = makeDeps([
+			{ id: BARE_AGENT_ID, organization_id: ORG },
+		]);
+
+		await handleWakeAgentTask(deps, {
+			__organization_id: ORG,
+			__created_by_user: "internal-pat-user",
+			__created_by_agent: BARE_AGENT_ID,
+			__scheduled_job_id: "job-heartbeat-owner",
+			__scheduled_job_tick: "2026-08-01T00:00:00.000Z",
+			__scheduled_task_run_id: 92,
+			agent_id: BARE_AGENT_ID,
+			prompt: "Run the heartbeat.",
+			automation: AUTOMATION,
+		});
+
+		expect(setSession).toHaveBeenCalledTimes(1);
+		expect(setSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				userId: AUTOMATION.ownerUserId,
+				threadCreator: AUTOMATION.ownerUserId,
+				channelId: `api_${AUTOMATION.ownerUserId}`,
+			}),
+		);
+		expect(enqueueMessage).toHaveBeenCalledTimes(1);
+		expect(enqueueMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				userId: AUTOMATION.ownerUserId,
+				channelId: `api_${AUTOMATION.ownerUserId}`,
+			}),
+			expect.any(Object),
+		);
+	});
+
+	test("injects scheduled automation block and direct Toolbox runner instruction", async () => {
+		const { deps, enqueueMessage } = makeDeps([
+			{ id: BARE_AGENT_ID, organization_id: ORG },
+		]);
+
+		await handleWakeAgentTask(deps, {
+			__organization_id: ORG,
+			__created_by_user: "pm-1",
+			__created_by_agent: BARE_AGENT_ID,
+			__scheduled_job_id: "job-heartbeat-1",
+			__scheduled_job_tick: "2026-08-01T00:00:00.000Z",
+			__scheduled_task_run_id: 91,
+			agent_id: BARE_AGENT_ID,
+			prompt: "Run the heartbeat.",
+			thread_id: "existing-thread-automation",
+			automation: AUTOMATION,
+		});
+
+		expect(enqueueMessage).toHaveBeenCalledTimes(1);
+		expect(enqueueMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				messageId: "scheduled-job-heartbeat-1-run-91",
+			}),
+			{
+				singletonKey: "scheduled-job-heartbeat-1-run-91",
+				durableSingleton: true,
+			},
+		);
+		const message = (enqueueMessage.mock.calls[0][0] as any).messageText;
+		expect(message).toContain("[scheduled_automation]");
+		expect(message).toContain("automation_id=automation-1");
+		expect(message).toContain("task_contract_id=task-contract-1");
+		expect(message).toContain("task_contract_version=1");
+		expect(message).toContain("delivery_policy=line_self");
+		expect(message).toContain("schedule_tick=2026-08-01T00:00:00.000Z");
+		expect(message).toContain("[/scheduled_automation]");
+		expect(message).toContain(
+			"Call the ShiFu Toolbox MCP tool run_heartbeat_automation",
+		);
+		expect(message).not.toContain("send_daily_digest");
+	});
+
+	test.each([
+		["bad version", { automation: { ...AUTOMATION, taskContractVersion: 0 } }],
+		["non-integer version", { automation: { ...AUTOMATION, taskContractVersion: 1.5 } }],
+		["line-breaking id", { automation: { ...AUTOMATION, automationId: "automation-1\nmalformed=true" } }],
+		["bad delivery policy", { automation: { ...AUTOMATION, deliveryPolicy: "line" } }],
+		["missing scheduled tick", { __scheduled_job_tick: undefined }],
+	])("%s is rejected before enqueue", async (_name, override) => {
+		const { deps, enqueueMessage, getSession, touchSession } = makeDeps([
+			{ id: BARE_AGENT_ID, organization_id: ORG },
+		]);
+
+		await handleWakeAgentTask(deps, {
+			__organization_id: ORG,
+			__created_by_user: "pm-1",
+			__created_by_agent: BARE_AGENT_ID,
+			__scheduled_job_id: "job-heartbeat-1",
+			__scheduled_job_tick: "2026-08-01T00:00:00.000Z",
+			__scheduled_task_run_id: 91,
+			agent_id: BARE_AGENT_ID,
+			prompt: "Run the heartbeat.",
+			thread_id: "existing-thread-automation",
+			automation: AUTOMATION,
+			...override,
+		} as any);
+
+		expect(enqueueMessage).not.toHaveBeenCalled();
+		expect(getSession).not.toHaveBeenCalled();
+		expect(touchSession).not.toHaveBeenCalled();
 	});
 });
 

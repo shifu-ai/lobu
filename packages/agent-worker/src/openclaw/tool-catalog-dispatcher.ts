@@ -16,6 +16,7 @@ import {
   toolIdentityKey,
 } from "./tool-descriptor";
 import { isExplicitPersonalReminderAttempt } from "./mcp-execution-contract";
+import { isScheduledAutomationScheduleWriteDenied } from "./scheduled-automation-turn";
 import type { TurnExecutionIntent } from "./turn-execution-intent";
 import { snapshotToolsByMcp } from "./tool-inventory-snapshot";
 import {
@@ -48,6 +49,7 @@ export type RuntimeToolCallErrorCode =
   | RuntimeToolCallBlockedReason
   | "ambiguous_tool"
   | "schema_invalid"
+  | "scheduled_automation_tool_denied"
   | "tool_error"
   | "server_unavailable";
 
@@ -162,6 +164,7 @@ export interface DispatchRuntimeToolCallParams {
   /** Final turn-local authorization boundary; checked even for stale catalog entries. */
   allowedToolKeys?: Iterable<string>;
   turnExecutionIntent?: TurnExecutionIntent;
+  scheduledAutomation?: boolean;
   toolName: string;
   mcpId?: string;
   args: Record<string, unknown>;
@@ -532,6 +535,7 @@ function isStableErrorCode(value: unknown): value is RuntimeToolCallErrorCode {
     value === "auth_required" ||
     value === "approval_required" ||
     value === "schema_invalid" ||
+    value === "scheduled_automation_tool_denied" ||
     value === "tool_error" ||
     value === "server_unavailable"
   );
@@ -632,6 +636,22 @@ export async function dispatchRuntimeToolCall(
       ok: false,
       code: behaviorBlockedReason,
       message: `Tool ${externalToolKey(entry.mcpId, entry.name)} is blocked for personal reminder creation in this turn.`,
+      entry,
+    };
+  }
+
+  if (
+    isScheduledAutomationScheduleWriteDenied({
+      scheduledAutomation: params.scheduledAutomation === true,
+      mcpId: entry.mcpId,
+      toolName: entry.name,
+      args: params.args,
+    })
+  ) {
+    return {
+      ok: false,
+      code: "scheduled_automation_tool_denied",
+      message: `Tool ${externalToolKey(entry.mcpId, entry.name)} cannot create or update schedules during a scheduled automation turn.`,
       entry,
     };
   }

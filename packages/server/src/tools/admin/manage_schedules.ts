@@ -46,6 +46,7 @@ import type { ToolContext } from "../registry";
 import logger from "../../utils/logger";
 import { nextRunAt as nextCronTickAt } from "../../utils/cron";
 import { buildTrustedPersonalReminder } from "../../scheduled/personal-reminder";
+import { readTrustedHeartbeatAutomation } from "../../scheduled/heartbeat-automation";
 
 // SHIFU FORK: member-scope-internal-tools plan, Task 3. Member-owned
 // direct-auth sessions (see 1c52bc33) can reach this tool, but must be
@@ -77,6 +78,18 @@ const WakeAgentArgs = Type.Object({
   prompt: Type.String({ minLength: 1, maxLength: 4000 }),
   thread_id: Type.Optional(Type.String()),
   reason: Type.Optional(Type.String({ maxLength: 200 })),
+	automation: Type.Optional(
+		Type.Object({
+			automationId: Type.String({ minLength: 1, maxLength: 256 }),
+			taskContractId: Type.String({ minLength: 1, maxLength: 256 }),
+			taskContractVersion: Type.Number({ minimum: 1 }),
+			ownerUserId: Type.String({ minLength: 1, maxLength: 256 }),
+			deliveryPolicy: Type.Union([
+				Type.Literal("line_self"),
+				Type.Literal("chat_only"),
+			]),
+		}),
+	),
 });
 
 const ActionUnion = Type.Union([SendNotificationArgs, WakeAgentArgs]);
@@ -416,8 +429,10 @@ const RESERVED_WAKE_TRUST_KEYS = new Set([
 	"personalreminderdelivery",
 	"personalreminderprovenance",
 	"trustedpersonalreminder",
+	"trustedautomation",
 	"deliveryintent",
 ]);
+const WAKE_AUTOMATION_FIELD = "automation";
 const NOTIFICATION_FIELDS = [
 	"title",
 	"body",
@@ -463,7 +478,10 @@ export function normalizeCreateArgs(
 	if (payload.type === "wake_agent") {
     for (const key of Object.keys(payload)) {
 			const normalizedKey = key.toLowerCase().replace(/[^a-z]/g, "");
-      if (RESERVED_WAKE_TRUST_KEYS.has(normalizedKey)) {
+			if (
+				RESERVED_WAKE_TRUST_KEYS.has(normalizedKey) ||
+				(normalizedKey === WAKE_AUTOMATION_FIELD && key !== WAKE_AUTOMATION_FIELD)
+			) {
         delete payload[key];
       }
     }
@@ -619,6 +637,26 @@ async function handleCreate(
 		(args.payload as Record<string, unknown>).personalReminder =
 			trustedPersonalReminder;
   }
+	if (
+		args.payload.type === "wake_agent" &&
+		args.payload.automation !== undefined
+	) {
+		const automation = readTrustedHeartbeatAutomation(args.payload.automation);
+		if (!automation) {
+			return { error: "Invalid wake_agent automation metadata." };
+		}
+		if (
+			!isPrivilegedToolContext(ctx) ||
+			args.initial_state !== "staged" ||
+			!args.creation_key
+		) {
+			return {
+				error:
+					"wake_agent automation metadata requires trusted staged schedule creation.",
+			};
+		}
+		args.payload.automation = automation;
+	}
   // SHIFU FORK: member self-scoping (member-scope-internal-tools plan, Task
   // 3). Members reach this tool only via a member-owned direct-auth session
   // (see 1c52bc33) — confine them to their own agent, their own
