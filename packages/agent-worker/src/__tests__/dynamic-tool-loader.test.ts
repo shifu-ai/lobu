@@ -653,9 +653,7 @@ describe("selectMcpToolsForTurn", () => {
     };
     const result = selectMcpToolsByMcpForTurn({
       toolsByMcp: {
-        "shifu-toolbox": [
-          tool("run_heartbeat_automation", automationMetadata),
-        ],
+        "shifu-toolbox": [tool("run_heartbeat_automation", automationMetadata)],
       },
       message:
         "[scheduled_automation]\ntask_contract_id=heartbeat.v1\nautomation_id=auto-1\n[/scheduled_automation]\nCall the ShiFu Toolbox MCP tool run_heartbeat_automation.",
