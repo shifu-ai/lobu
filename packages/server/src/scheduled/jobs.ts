@@ -375,7 +375,6 @@ export async function handleWakeAgentTask(
 					"-",
 				)
 			: undefined;
-	const scheduledUserId = p.__created_by_user ?? "";
 	const scheduledAgentId = p.agent_id;
 	const scheduledPrompt = p.prompt;
 	let scheduledCourseContext: ScheduledCourseContext | undefined;
@@ -400,6 +399,7 @@ export async function handleWakeAgentTask(
 			return;
 		}
 	}
+	const scheduledUserId = scheduledAutomation?.ownerUserId ?? p.__created_by_user ?? "";
 	if (hasPersonalReminderMarker) {
 		scheduledPersonalReminder = resolveScheduledPersonalReminder({
 			raw: p.personalReminder,
@@ -464,7 +464,7 @@ export async function handleWakeAgentTask(
 			{
 				organizationId: orgId,
 				agentId: p.agent_id,
-				userId: p.__created_by_user ?? null,
+				userId: scheduledUserId || null,
 			},
 		);
 		if (threadId) {
@@ -480,13 +480,10 @@ export async function handleWakeAgentTask(
 			{
 				agentId: p.agent_id,
 				organizationId: orgId,
-				// The ticker injects the scheduling user under the `__` prefix
-				// so handler payloads can mix scheduler-controlled metadata with
-				// user-supplied action_args without collision. Reading from
-				// p.__created_by_user keeps the wake-up's thread / message
-				// attribution pointing at whoever scheduled it (not the agent
-				// itself, which would obscure the audit trail).
-				createdByUserId: p.__created_by_user ?? undefined,
+				// Heartbeat automations must run as their Toolbox owner, even if
+				// the schedule was created by an internal PAT. Other wakeups keep
+				// the scheduler-controlled `__created_by_user` attribution.
+				createdByUserId: scheduledUserId || undefined,
 				reason: p.reason ?? "scheduled-wake",
 			},
 		);

@@ -95,25 +95,32 @@ function makeDeps(
 	deps: WakeAgentTaskDeps;
 	enqueueMessage: ReturnType<typeof mock>;
 	getSession: ReturnType<typeof mock>;
+	setSession: ReturnType<typeof mock>;
 	touchSession: ReturnType<typeof mock>;
 } {
+	const sessions = new Map<string, any>();
 	const enqueueMessage = mock(async () => "job-1");
-	const getSession = mock(async (key: string) => ({
-		conversationId: key,
-		channelId: `api_user-1`,
-		userId: "user-1",
-		agentId: BARE_AGENT_ID,
-		organizationId: ORG,
-	}));
+	const getSession = mock(async (key: string) =>
+		sessions.get(key) ?? {
+			conversationId: key,
+			channelId: `api_user-1`,
+			userId: "user-1",
+			agentId: BARE_AGENT_ID,
+			organizationId: ORG,
+		},
+	);
+	const setSession = mock(async (session: any) => {
+		sessions.set(session.conversationId, session);
+	});
 	const touchSession = mock(async () => {});
-	const sessionManager = { getSession, touchSession } as any;
+	const sessionManager = { getSession, setSession, touchSession } as any;
 	const queueProducer = { enqueueMessage } as any;
 	const deps: WakeAgentTaskDeps = {
 		sql: makeSql(agents, pauseCalls) as any,
 		sessionManager,
 		queueProducer,
 	};
-	return { deps, enqueueMessage, getSession, touchSession };
+	return { deps, enqueueMessage, getSession, setSession, touchSession };
 }
 
 describe("handleWakeAgentTask — agent_id normalization (defense in depth)", () => {
@@ -283,6 +290,41 @@ describe("handleWakeAgentTask — agent_id normalization (defense in depth)", ()
 });
 
 describe("handleWakeAgentTask — heartbeat automation metadata", () => {
+	test("creates the scheduled automation thread as the Toolbox owner, not the internal scheduler PAT user", async () => {
+		const { deps, enqueueMessage, setSession } = makeDeps([
+			{ id: BARE_AGENT_ID, organization_id: ORG },
+		]);
+
+		await handleWakeAgentTask(deps, {
+			__organization_id: ORG,
+			__created_by_user: "internal-pat-user",
+			__created_by_agent: BARE_AGENT_ID,
+			__scheduled_job_id: "job-heartbeat-owner",
+			__scheduled_job_tick: "2026-08-01T00:00:00.000Z",
+			__scheduled_task_run_id: 92,
+			agent_id: BARE_AGENT_ID,
+			prompt: "Run the heartbeat.",
+			automation: AUTOMATION,
+		});
+
+		expect(setSession).toHaveBeenCalledTimes(1);
+		expect(setSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				userId: AUTOMATION.ownerUserId,
+				threadCreator: AUTOMATION.ownerUserId,
+				channelId: `api_${AUTOMATION.ownerUserId}`,
+			}),
+		);
+		expect(enqueueMessage).toHaveBeenCalledTimes(1);
+		expect(enqueueMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				userId: AUTOMATION.ownerUserId,
+				channelId: `api_${AUTOMATION.ownerUserId}`,
+			}),
+			expect.any(Object),
+		);
+	});
+
 	test("injects scheduled automation block and direct Toolbox runner instruction", async () => {
 		const { deps, enqueueMessage } = makeDeps([
 			{ id: BARE_AGENT_ID, organization_id: ORG },
