@@ -303,21 +303,145 @@ export async function deleteCredential(
   return deleted;
 }
 
-export async function refreshCredential(
+/**
+ * Why a refresh attempt did not yield a usable credential.
+ *
+ * `permanent` separates "the user really must re-authorize" (refresh token
+ * revoked/expired) from "this attempt was unlucky" (lock contention, upstream
+ * 5xx, network blip). Callers surface this so observability can distinguish
+ * the two instead of labelling everything `needs_reauth`.
+ */
+export type CredentialRefreshFailure = {
+  reason:
+    | "no_refresh_token"
+    | "lock_contended_stale"
+    | "lock_contended_missing"
+    | "upstream_rejected"
+    | "upstream_error"
+    | "network_error"
+    | "malformed_response";
+  permanent: boolean;
+  /** HTTP status from the token endpoint, when the request completed. */
+  status?: number;
+  /** RFC 6749 `error` code, e.g. `invalid_grant`. Never a token value. */
+  upstreamError?: string;
+  /** Truncated RFC 6749 `error_description`, for operator diagnosis. */
+  upstreamErrorDescription?: string;
+};
+
+export type CredentialRefreshResult = {
+  credential: StoredCredential | null;
+  failure?: CredentialRefreshFailure;
+  /** True when this call waited on another in-flight refresh instead of doing one. */
+  contended?: boolean;
+};
+
+/** Matches the freshness buffer callers apply before deciding to refresh. */
+const REFRESH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
+
+/**
+ * RFC 6749 error codes that mean the grant itself is dead. Anything else
+ * (server_error, temporarily_unavailable, slow_down, ...) is retryable.
+ */
+const PERMANENT_OAUTH_ERRORS = new Set([
+  "invalid_grant",
+  "invalid_client",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "invalid_scope",
+]);
+
+/** Read the RFC 6749 error fields without ever logging the response body. */
+function parseOAuthError(text: string): {
+  error?: string;
+  description?: string;
+} {
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    return {
+      error: typeof parsed.error === "string" ? parsed.error : undefined,
+      description:
+        typeof parsed.error_description === "string"
+          ? parsed.error_description.slice(0, 200)
+          : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Refresh an MCP credential, reporting *why* it failed.
+ *
+ * Prefer this over {@link refreshCredential} on paths that emit observability
+ * events — the failure reason is what tells a revoked grant apart from a
+ * transient contention loss.
+ */
+export async function refreshCredentialDetailed(
   secretStore: WritableSecretStore,
   agentId: string,
   userId: string,
   mcpId: string,
   credential: StoredCredential,
-): Promise<StoredCredential | null> {
-  if (!credential.refreshToken) return null;
+): Promise<CredentialRefreshResult> {
+  if (!credential.refreshToken) {
+    return {
+      credential: null,
+      failure: { reason: "no_refresh_token", permanent: true },
+    };
+  }
 
   const acquired = tryAcquireRefreshLock(agentId, userId, mcpId);
 
   if (!acquired) {
-    // Another request is refreshing — wait briefly and re-read
+    // Another request is refreshing — wait briefly and re-read.
+    //
+    // The wait is far shorter than a token-endpoint round trip, so the re-read
+    // can still return the same expired credential we were called to replace.
+    // Report that explicitly instead of handing back a credential the caller
+    // will send upstream and get a 401 for.
     await new Promise((r) => setTimeout(r, 150));
-    return getStoredCredential(secretStore, agentId, userId, mcpId);
+    const reread = await getStoredCredential(
+      secretStore,
+      agentId,
+      userId,
+      mcpId,
+    );
+
+    if (!reread) {
+      logger.warn("Token refresh contended, credential missing on re-read", {
+        agentId,
+        userId,
+        mcpId,
+      });
+      return {
+        credential: null,
+        contended: true,
+        failure: { reason: "lock_contended_missing", permanent: false },
+      };
+    }
+
+    const stillStale =
+      reread.expiresAt <= Date.now() + REFRESH_EXPIRY_BUFFER_MS;
+
+    if (stillStale) {
+      logger.warn("Token refresh contended, re-read credential still stale", {
+        agentId,
+        userId,
+        mcpId,
+        expiresInMs: reread.expiresAt - Date.now(),
+      });
+      // Deliberately still hand back the stale credential: this change is
+      // diagnostic only, and withholding it here would alter the failure mix
+      // we are trying to measure. `failure` records that we knowingly did so.
+      return {
+        credential: reread,
+        contended: true,
+        failure: { reason: "lock_contended_stale", permanent: false },
+      };
+    }
+
+    return { credential: reread, contended: true };
   }
 
   try {
@@ -364,17 +488,49 @@ export async function refreshCredential(
     });
 
     if (!response.ok) {
+      const { error: upstreamError, description } = parseOAuthError(
+        await response.text().catch(() => ""),
+      );
+      // 4xx with a grant-killing error code is the only case that genuinely
+      // requires the user to re-authorize. 5xx/429 are the upstream's problem.
+      const permanent =
+        response.status >= 400 &&
+        response.status < 500 &&
+        (upstreamError === undefined ||
+          PERMANENT_OAUTH_ERRORS.has(upstreamError));
       logger.error("Token refresh failed", {
         status: response.status,
+        upstreamError,
+        upstreamErrorDescription: description,
+        permanent,
         agentId,
         userId,
         mcpId,
       });
-      return null;
+      return {
+        credential: null,
+        failure: {
+          reason: permanent ? "upstream_rejected" : "upstream_error",
+          permanent,
+          status: response.status,
+          upstreamError,
+          upstreamErrorDescription: description,
+        },
+      };
     }
 
     const data = (await response.json()) as Record<string, unknown>;
-    if (typeof data.access_token !== "string") return null;
+    if (typeof data.access_token !== "string") {
+      logger.error("Token refresh returned no access_token", {
+        agentId,
+        userId,
+        mcpId,
+      });
+      return {
+        credential: null,
+        failure: { reason: "malformed_response", permanent: false },
+      };
+    }
 
     const refreshed: StoredCredential = {
       bindingId: getStableCredentialBindingId(credential),
@@ -396,13 +552,38 @@ export async function refreshCredential(
 
     await storeCredential(secretStore, agentId, userId, mcpId, refreshed);
     logger.info("Token refreshed", { agentId, userId, mcpId });
-    return refreshed;
+    return { credential: refreshed };
   } catch (error) {
     logger.error("Token refresh error", { error, agentId, userId, mcpId });
-    return null;
+    return {
+      credential: null,
+      failure: { reason: "network_error", permanent: false },
+    };
   } finally {
     releaseRefreshLock(agentId, userId, mcpId);
   }
+}
+
+/**
+ * Back-compatible wrapper. Callers that only need the credential keep working;
+ * anything emitting observability should call
+ * {@link refreshCredentialDetailed} so the failure reason survives.
+ */
+export async function refreshCredential(
+  secretStore: WritableSecretStore,
+  agentId: string,
+  userId: string,
+  mcpId: string,
+  credential: StoredCredential,
+): Promise<StoredCredential | null> {
+  const { credential: refreshed } = await refreshCredentialDetailed(
+    secretStore,
+    agentId,
+    userId,
+    mcpId,
+    credential,
+  );
+  return refreshed;
 }
 
 /**

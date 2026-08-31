@@ -25,9 +25,11 @@ import { requiresToolApproval } from "../../permissions/approval-policy.js";
 import type { GrantStore } from "../../permissions/grant-store.js";
 import { isInternalUrl } from "../../proxy/ssrf-guard.js";
 import {
+  type CredentialRefreshFailure,
   getStableCredentialBindingId,
   getStoredCredential,
   refreshCredential,
+  refreshCredentialDetailed,
   startDeviceAuth,
   tryCompletePendingDeviceAuth,
 } from "../../routes/internal/device-auth.js";
@@ -1599,6 +1601,14 @@ export class McpProxy {
       toolsListObsCompleted = true;
       const errorClass =
         status === "failed" ? classifyMcpObsError(error) : undefined;
+      // `error_class` is inferred from the error string, so it reports
+      // `needs_reauth` for any 401. When a refresh actually ran, attach what
+      // the token endpoint said — that is what separates a revoked grant from
+      // a lost refresh race.
+      const refreshFailure =
+        status === "failed"
+          ? this.takeRefreshFailure(agentId, userId, mcpId)
+          : undefined;
       emitMcpObsEvent({
         trace,
         eventName: "mcp.tools_list.completed",
@@ -1614,6 +1624,24 @@ export class McpProxy {
             ? {
                 error_class: errorClass,
                 next_debug_hint: nextMcpDebugHint(errorClass),
+              }
+            : {}),
+          ...(refreshFailure
+            ? {
+                refresh_failure_reason: refreshFailure.reason,
+                refresh_failure_permanent: refreshFailure.permanent,
+                ...(refreshFailure.status !== undefined
+                  ? { refresh_upstream_status: refreshFailure.status }
+                  : {}),
+                ...(refreshFailure.upstreamError
+                  ? { refresh_upstream_error: refreshFailure.upstreamError }
+                  : {}),
+                ...(refreshFailure.upstreamErrorDescription
+                  ? {
+                      refresh_upstream_error_description:
+                        refreshFailure.upstreamErrorDescription,
+                    }
+                  : {}),
               }
             : {}),
         },
@@ -3518,6 +3546,46 @@ export class McpProxy {
     return headers;
   }
 
+  /**
+   * Most recent credential-refresh failure per (agent, user, mcp).
+   *
+   * `classifyMcpObsError` can only pattern-match the error string, so every
+   * 401 becomes `needs_reauth` whether the grant was revoked or we merely lost
+   * a refresh race. This carries the real reason across to the discovery event.
+   * Diagnostic only, best-effort: entries are consumed once and expire.
+   */
+  private readonly recentRefreshFailures = new Map<
+    string,
+    { failure: CredentialRefreshFailure; at: number }
+  >();
+
+  private static readonly REFRESH_FAILURE_TTL_MS = 60_000;
+
+  private refreshFailureKey(
+    agentId: string,
+    userId: string,
+    mcpId: string,
+  ): string {
+    return `${agentId}:${userId}:${mcpId}`;
+  }
+
+  /** Consume the recorded reason, if it is recent enough to belong to this attempt. */
+  private takeRefreshFailure(
+    agentId: string | undefined,
+    userId: string | undefined,
+    mcpId: string,
+  ): CredentialRefreshFailure | undefined {
+    if (!agentId || !userId) return undefined;
+    const key = this.refreshFailureKey(agentId, userId, mcpId);
+    const entry = this.recentRefreshFailures.get(key);
+    if (!entry) return undefined;
+    this.recentRefreshFailures.delete(key);
+    if (Date.now() - entry.at > McpProxy.REFRESH_FAILURE_TTL_MS) {
+      return undefined;
+    }
+    return entry.failure;
+  }
+
   private async resolveCredentialToken(
     agentId: string,
     userId: string,
@@ -3545,13 +3613,19 @@ export class McpProxy {
     }
 
     // Token expired or expiring soon — refresh
-    const refreshed = await refreshCredential(
+    const { credential: refreshed, failure } = await refreshCredentialDetailed(
       this.secretStore,
       agentId,
       userId,
       mcpId,
       credential,
     );
+    if (failure) {
+      this.recentRefreshFailures.set(
+        this.refreshFailureKey(agentId, userId, mcpId),
+        { failure, at: Date.now() },
+      );
+    }
     return refreshed?.accessToken ?? null;
   }
 
