@@ -151,20 +151,12 @@ mock.module("../../gateway/routes/internal/device-auth.js", () => {
 		);
 	}
 
-	return {
-		createDeviceAuthRoutes: () => new Hono(),
-		getStableCredentialBindingId,
-		deleteCredential: async (
-			secretStore: ReturnType<typeof createMemorySecretStore>,
-			agentId: string,
-			userId: string,
-			mcpId: string,
-		) => {
-			await secretStore.delete(credentialName(agentId, userId, mcpId));
-			return true;
-		},
-		getStoredCredential: getSecretCredential,
-		refreshCredential: async (
+	// Named so the mock can expose both `refreshCredential` and the
+	// diagnostic-carrying `refreshCredentialDetailed` without duplicating it.
+	// This mock replaces the whole module and bun module mocks are
+	// process-global, so every export the real module has must appear here or
+	// unrelated importers fail to link.
+	const refreshCredentialImpl = async (
 			secretStore: ReturnType<typeof createMemorySecretStore>,
 			agentId: string,
 			userId: string,
@@ -202,6 +194,32 @@ mock.module("../../gateway/routes/internal/device-auth.js", () => {
 			};
 			await putSecretCredential(secretStore, agentId, userId, mcpId, refreshed);
 			return refreshed;
+		};
+
+	return {
+		createDeviceAuthRoutes: () => new Hono(),
+		getStableCredentialBindingId,
+		deleteCredential: async (
+			secretStore: ReturnType<typeof createMemorySecretStore>,
+			agentId: string,
+			userId: string,
+			mcpId: string,
+		) => {
+			await secretStore.delete(credentialName(agentId, userId, mcpId));
+			return true;
+		},
+		getStoredCredential: getSecretCredential,
+		refreshCredential: refreshCredentialImpl,
+		refreshCredentialDetailed: async (
+			...args: Parameters<typeof refreshCredentialImpl>
+		) => {
+			const credential = await refreshCredentialImpl(...args);
+			return credential
+				? { credential }
+				: {
+						credential: null,
+						failure: { reason: "upstream_rejected", permanent: true },
+					};
 		},
 		startDeviceAuth: async () => null,
 		storeCredentialForScope: async (
