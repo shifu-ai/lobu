@@ -33,6 +33,12 @@ import {
   startDeviceAuth,
   tryCompletePendingDeviceAuth,
 } from "../../routes/internal/device-auth.js";
+import { classifyToolCallFailure } from "../../../lobu/tool-call-classifier.js";
+import { buildMcpConnectUrl } from "./connect-link-url.js";
+
+/** Where a user reconnects when no signed connect link can be minted. */
+const WORKBENCH_CONNECTIONS_HINT =
+  "the ShiFu Agent Workbench tool connections panel";
 import type { WritableSecretStore } from "../../secrets/index.js";
 import { emitJourneyEvent as emitJourneyObsEvent } from "../../services/journey-observability.js";
 import {
@@ -1448,15 +1454,25 @@ export class McpProxy {
             "direct tool execution",
           );
         }
+        const httpReauth = this.describeReauthFailure({
+          error: new McpHttpStatusError(response.status, text),
+          httpStatus: response.status,
+          agentId,
+          userId,
+          mcpId,
+          organizationId: options?.organizationId,
+        });
         const result = {
           content: [
             {
               type: "text",
-              text: `Tool call failed: HTTP ${response.status}`,
+              text: httpReauth?.text ?? `Tool call failed: HTTP ${response.status}`,
             },
           ],
           isError: true,
-          diagnosticCode: diagnosticCodeForHttpStatus(response.status),
+          diagnosticCode:
+            httpReauth?.diagnosticCode ??
+            diagnosticCodeForHttpStatus(response.status),
         };
         emitToolCallCompleted(
           "failed",
@@ -1470,22 +1486,49 @@ export class McpProxy {
           content: [
             {
               type: "text",
-              text: `Tool call failed: ${response.status} ${text}`,
+              text:
+                httpReauth?.text ??
+                `Tool call failed: ${response.status} ${text}`,
             },
           ],
           isError: true,
-          diagnosticCode: diagnosticCodeForHttpStatus(response.status),
+          diagnosticCode:
+            httpReauth?.diagnosticCode ??
+            diagnosticCodeForHttpStatus(response.status),
         };
       }
 
       const json = (await parseJsonRpcResponse(response)) as any;
       if (json?.error) {
+        const jsonRpcError = new McpJsonRpcError(
+          json.error.code,
+          json.error.message,
+        );
+        // Some upstreams report an expired grant as a JSON-RPC error over HTTP
+        // 200, so this exit needs the same check as the HTTP one.
+        const rpcReauth = this.describeReauthFailure({
+          error: jsonRpcError,
+          httpStatus: lastResponseStatus,
+          agentId,
+          userId,
+          mcpId,
+          organizationId: options?.organizationId,
+        });
         const result = {
-          content: [],
+          // Previously `[]` — the agent saw an error with no content at all and
+          // could not tell the user anything about what went wrong.
+          content: [
+            {
+              type: "text",
+              text:
+                rpcReauth?.text ??
+                `Tool call failed: ${json.error.message ?? `JSON-RPC error ${json.error.code}`}`,
+            },
+          ],
           isError: true,
-          diagnosticCode: diagnosticCodeForHttpStatus(
-            lastResponseStatus ?? 502,
-          ),
+          diagnosticCode:
+            rpcReauth?.diagnosticCode ??
+            diagnosticCodeForHttpStatus(lastResponseStatus ?? 502),
         };
         emitToolCallCompleted(
           "failed",
@@ -1493,15 +1536,9 @@ export class McpProxy {
             jsonrpc_error_code: json.error.code,
             result_preview: resultPreviewFromValue(result),
           },
-          new McpJsonRpcError(json.error.code, json.error.message),
+          jsonRpcError,
         );
-        return {
-          content: [],
-          isError: true,
-          diagnosticCode: diagnosticCodeForHttpStatus(
-            lastResponseStatus ?? 502,
-          ),
-        };
+        return result;
       }
       const result = json.result || json;
       await commitReplayGrantAfterExecution();
@@ -1521,22 +1558,31 @@ export class McpProxy {
         diagnosticCode: diagnosticCodeFromToolResult(result),
       };
     } catch (error) {
+      const httpStatus = this.statusFromError(error);
       this.recordServerFailure(
         healthKey,
         mcpId,
         error,
-        this.statusFromError(error),
+        httpStatus,
         "direct tool execution",
       );
+      const reauth = this.describeReauthFailure({
+        error,
+        httpStatus,
+        agentId,
+        userId,
+        mcpId,
+        organizationId: options?.organizationId,
+      });
       const result = {
         content: [
           {
             type: "text",
-            text: `Tool execution error: ${String(error)}`,
+            text: reauth?.text ?? `Tool execution error: ${String(error)}`,
           },
         ],
         isError: true,
-        diagnosticCode: "connector_unavailable",
+        diagnosticCode: reauth?.diagnosticCode ?? "connector_unavailable",
       };
       emitToolCallCompleted(
         "failed",
@@ -1661,6 +1707,25 @@ export class McpProxy {
         },
         new McpDiscoveryAuthError(diagnosticCode),
       );
+      // Returning a bare empty tool list is indistinguishable from "this user
+      // never connected this service", so the agent has no reason to mention
+      // it and the user is never prompted to reconnect. Carry the reason in
+      // `instructions`, which reaches the agent's session context.
+      //
+      // Deliberately no connect link here: those tokens live 15 minutes
+      // (CONNECT_LINK_TOKEN_TTL_MS) while a session's instructions outlive
+      // that, and an expired link is worse than none. The live link is minted
+      // on the tools/call path instead, at the moment it is needed.
+      return bindDiscoveryProvenance({
+        tools: [],
+        instructions:
+          `The "${mcpId}" connector is configured for this user but its authorization is ` +
+          `currently ${diagnosticCode === "upstream_forbidden" ? "insufficient" : "expired"}, ` +
+          `so none of its tools are available right now. This is NOT the same as the user ` +
+          `not having the service — do not claim the capability is missing. If the user asks ` +
+          `for something this connector would handle, tell them it needs reconnecting at ` +
+          `${WORKBENCH_CONNECTIONS_HINT}.`,
+      });
     };
 
     emitMcpObsEvent({
@@ -1855,11 +1920,10 @@ export class McpProxy {
           if (options?.surfaceErrors) {
             throw new McpDiscoveryAuthError("upstream_unauthorized");
           }
-          emitDiscoveryAuthFailure(
+          return emitDiscoveryAuthFailure(
             "upstream_unauthorized",
             safeHost(httpServer.upstreamUrl),
           );
-          return bindDiscoveryProvenance({ tools: [] });
         }
 
         if (initResponse.status === 403) {
@@ -1869,11 +1933,10 @@ export class McpProxy {
           if (options?.surfaceErrors) {
             throw new McpDiscoveryAuthError("upstream_forbidden");
           }
-          emitDiscoveryAuthFailure(
+          return emitDiscoveryAuthFailure(
             "upstream_forbidden",
             safeHost(httpServer.upstreamUrl),
           );
-          return bindDiscoveryProvenance({ tools: [] });
         }
 
         const initData = (await parseJsonRpcResponse(initResponse)) as {
@@ -1945,11 +2008,10 @@ export class McpProxy {
         if (options?.surfaceErrors) {
           throw new McpDiscoveryAuthError("upstream_unauthorized");
         }
-        emitDiscoveryAuthFailure(
+        return emitDiscoveryAuthFailure(
           "upstream_unauthorized",
           safeHost(httpServer.upstreamUrl),
         );
-        return bindDiscoveryProvenance({ tools: [] });
       }
 
       if (!response.ok) {
@@ -1960,11 +2022,10 @@ export class McpProxy {
           if (options?.surfaceErrors) {
             throw new McpDiscoveryAuthError("upstream_forbidden");
           }
-          emitDiscoveryAuthFailure(
+          return emitDiscoveryAuthFailure(
             "upstream_forbidden",
             safeHost(httpServer.upstreamUrl),
           );
-          return bindDiscoveryProvenance({ tools: [] });
         }
         throw new McpHttpStatusError(response.status);
       }
@@ -1980,11 +2041,10 @@ export class McpProxy {
               errorMsg,
             );
           }
-          emitDiscoveryAuthFailure(
+          return emitDiscoveryAuthFailure(
             this.authDiagnosticCodeFromMessage(errorMsg),
             safeHost(httpServer.upstreamUrl),
           );
-          return bindDiscoveryProvenance({ tools: [] });
         }
         throw new McpJsonRpcError(data.error.code, errorMsg);
       }
@@ -2062,11 +2122,10 @@ export class McpProxy {
           if (options?.surfaceErrors) {
             throw new McpDiscoveryAuthError("upstream_unauthorized");
           }
-          emitDiscoveryAuthFailure(
+          return emitDiscoveryAuthFailure(
             "upstream_unauthorized",
             safeHost(httpServer.upstreamUrl),
           );
-          return bindDiscoveryProvenance({ tools: [] });
         }
         if (retryResponse.status === 403) {
           await retryResponse.body?.cancel().catch(() => {
@@ -2075,11 +2134,10 @@ export class McpProxy {
           if (options?.surfaceErrors) {
             throw new McpDiscoveryAuthError("upstream_forbidden");
           }
-          emitDiscoveryAuthFailure(
+          return emitDiscoveryAuthFailure(
             "upstream_forbidden",
             safeHost(httpServer.upstreamUrl),
           );
-          return bindDiscoveryProvenance({ tools: [] });
         }
         if (!retryResponse.ok) {
           throw new McpHttpStatusError(retryResponse.status);
@@ -2098,11 +2156,10 @@ export class McpProxy {
                 errorMsg,
               );
             }
-            emitDiscoveryAuthFailure(
+            return emitDiscoveryAuthFailure(
               this.authDiagnosticCodeFromMessage(errorMsg),
               safeHost(httpServer.upstreamUrl),
             );
-            return bindDiscoveryProvenance({ tools: [] });
           }
           throw new McpJsonRpcError(retryData.error.code, errorMsg);
         }
@@ -3586,6 +3643,60 @@ export class McpProxy {
     return entry.failure;
   }
 
+  /**
+   * Describe a tool failure in terms the agent can act on.
+   *
+   * `classifyToolCallFailure` and `buildMcpConnectUrl` both already existed and
+   * were tested, but nothing wired either of them to this path. An expired
+   * grant therefore reached the agent as a bare `Tool execution error: ...`
+   * with `connector_unavailable` — indistinguishable from a connector that is
+   * simply down, so the agent had no reason to tell anyone to reconnect.
+   * Colleagues went up to 25 days without being told (18 failed calls in one
+   * case), because nothing in the chain ever said "this is an authorization
+   * problem, here is the link".
+   *
+   * Returns null when the failure is not an authorization problem, so callers
+   * keep their existing message.
+   */
+  private describeReauthFailure(params: {
+    error: unknown;
+    httpStatus?: number;
+    agentId: string;
+    userId: string;
+    mcpId: string;
+    organizationId?: string;
+  }): { text: string; diagnosticCode: string } | null {
+    const errorMessage =
+      params.error instanceof Error
+        ? params.error.message
+        : String(params.error ?? "");
+    const classification = classifyToolCallFailure({
+      httpStatus: params.httpStatus,
+      errorMessage,
+    });
+    if (classification !== "needs_reauth") return null;
+
+    const connectUrl = buildMcpConnectUrl({
+      publicGatewayUrl: this.publicGatewayUrl,
+      agentId: params.agentId,
+      mcpId: params.mcpId,
+      userId: params.userId,
+      organizationId: params.organizationId,
+      logContext: "tools/call",
+    });
+
+    // The link is best-effort (needs publicGatewayUrl + a signing key). Say the
+    // authorization expired either way — "reconnect in the workbench" is still
+    // actionable, and silence is what caused this to go unnoticed for weeks.
+    const text = connectUrl
+      ? `Authorization for the "${params.mcpId}" connector has expired, so this tool cannot run. ` +
+        `Tell the user to reconnect by opening this link, then wait for them to confirm before retrying: ${connectUrl}`
+      : `Authorization for the "${params.mcpId}" connector has expired, so this tool cannot run. ` +
+        `Tell the user to reconnect it at ${WORKBENCH_CONNECTIONS_HINT}, then wait for them to confirm before retrying.`;
+
+    return { text, diagnosticCode: "needs_reauth" };
+  }
+
   private async resolveCredentialToken(
     agentId: string,
     userId: string,
@@ -3714,6 +3825,24 @@ export class McpProxy {
         }
         return retryResponse;
       }
+
+      // Refresh failed. The original body was already cancelled above, so
+      // falling through would hand callers a 401 whose body throws
+      // `TypeError: Body is unusable` the moment they read it — which the
+      // catch-all then reports as `connector_unavailable`, destroying the fact
+      // that this was an authorization failure. Return a fresh, readable 401
+      // instead so callers can act on the status.
+      return new Response(
+        JSON.stringify({
+          error: "unauthorized",
+          error_description:
+            "Upstream returned 401 and the stored credential could not be refreshed.",
+        }),
+        {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
     }
 
     // Track session
