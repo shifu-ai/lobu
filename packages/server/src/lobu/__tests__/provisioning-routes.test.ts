@@ -3,19 +3,6 @@ import { createHash } from "node:crypto";
 import { Type } from "@sinclair/typebox";
 import { Hono } from "hono";
 import { canonicalize } from "json-canonicalize";
-import {
-	ensureDbForGatewayTests,
-	resetTestDatabase,
-} from "../../gateway/__tests__/helpers/db-setup.js";
-import { orgContext } from "../stores/org-context.js";
-import {
-	installRouteAuthTestMock,
-	useRealRouteStores,
-} from "./helpers/route-test-mocks.js";
-
-// Workspace initialization reaches agent-routes through auth notifications.
-installRouteAuthTestMock();
-useRealRouteStores();
 
 const ORG_ID = "org-provisioning";
 
@@ -24,6 +11,13 @@ const startAuthCodeFlowMock = mock(async () => ({
 	state: "test-state",
 }));
 
+const coreModule = await import("../../../../core/src/index.ts");
+mock.module("@lobu/core", () => coreModule);
+mock.module(
+	new URL("../../../../core/src/index.ts", import.meta.url).pathname,
+	() => coreModule,
+);
+
 mock.module("../../gateway/auth/mcp/oauth-flow.js", () => ({
 	completeAuthCodeFlow: async () => ({
 		ok: true,
@@ -31,6 +25,10 @@ mock.module("../../gateway/auth/mcp/oauth-flow.js", () => ({
 	}),
 	getOAuthCallbackCookie: () => null,
 	startAuthCodeFlow: startAuthCodeFlowMock,
+}));
+
+mock.module("../../gateway/routes/internal/work-state.js", () => ({
+	createWorkStateRoutes: () => new Hono(),
 }));
 
 mock.module("../../index", () => ({}));
@@ -267,6 +265,20 @@ mock.module("../../operations/catalog", () => ({
 	getOperationsSummaryBatch: async () => new Map(),
 	listOperations: async () => ({ operations: [], total: 0 }),
 }));
+
+const {
+	ensureDbForGatewayTests,
+	resetTestDatabase,
+} = await import("../../gateway/__tests__/helpers/db-setup.js");
+const { orgContext } = await import("../stores/org-context.js");
+const {
+	installRouteAuthTestMock,
+	useRealRouteStores,
+} = await import("./helpers/route-test-mocks.js");
+
+// Workspace initialization reaches agent-routes through auth notifications.
+installRouteAuthTestMock();
+useRealRouteStores();
 
 beforeAll(async () => {
 	await ensureDbForGatewayTests();
@@ -1250,6 +1262,60 @@ describe("POST /api/provisioning/agents", () => {
 		});
 		expect(settings).toMatchObject({
 			userMd: "Updated onboarding copy.",
+		});
+	});
+
+	test("accepts Toolbox v2 projected personal agent settings", async () => {
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-toolbox-v2-settings",
+				name: "Toolbox V2 Settings Agent",
+				settings: {
+					identityMd: "# Identity",
+					soulMd: "# Soul",
+					userMd: "# User",
+					mcpServers: {},
+					preApprovedTools: ["/mcp/shifu-toolbox/tools/*"],
+				},
+			}),
+		});
+
+		expect(response.status).toBe(201);
+		await expect(response.json()).resolves.toMatchObject({
+			ok: true,
+			agentId: "shifu-u-toolbox-v2-settings",
+			created: true,
+			revisionRef: "lobu:shifu-u-toolbox-v2-settings",
+		});
+	});
+
+	test("rejects Toolbox release metadata as agent settings", async () => {
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-toolbox-metadata-rejected",
+				name: "Toolbox Metadata Rejected Agent",
+				settings: {
+					templateKey: "pm-marketing-user-agent",
+					scope: "user",
+					baselinePrompt: "Toolbox-only compile input",
+					identityMd: "# Identity",
+				},
+			}),
+		});
+
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toEqual({
+			error: expect.stringMatching(
+				/unknown_configuration_field|unknown|invalid/,
+			),
 		});
 	});
 
