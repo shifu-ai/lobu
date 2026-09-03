@@ -273,20 +273,23 @@ describe("signed managed agent release apply", () => {
 		});
 		const releasePromise = putApply(app, latestSignedApplyRequest());
 		await within(releaseLocked.promise);
-		const fencedPromise = app.request(`/api/provisioning/agents/${AGENT_ID}/fenced-settings`, {
-			method: "PUT",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				name: "fenced loser",
-				ownerUserId: "fenced-loser-owner",
-				settings: { userMd: "fenced loser" },
-				targetId: "00000000-0000-4000-8000-000000000001",
-				claimGeneration: 1,
-				claimToken: "00000000-0000-4000-8000-000000000002",
-				baselineVersionId: `personal-agent-baseline-v1-${"a".repeat(64)}`,
-				effectiveSettingsDigest: `sha256:${"b".repeat(64)}`,
-			}),
-		});
+		const fencedPromise = app.request(
+			`/api/provisioning/agents/${AGENT_ID}/fenced-settings`,
+			{
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					name: "fenced loser",
+					ownerUserId: "fenced-loser-owner",
+					settings: { userMd: "fenced loser" },
+					targetId: "00000000-0000-4000-8000-000000000001",
+					claimGeneration: 1,
+					claimToken: "00000000-0000-4000-8000-000000000002",
+					baselineVersionId: `personal-agent-baseline-v1-${"a".repeat(64)}`,
+					effectiveSettingsDigest: `sha256:${"b".repeat(64)}`,
+				}),
+			},
+		);
 		try {
 			await waitForBlockedAgentLock();
 		} finally {
@@ -309,11 +312,13 @@ describe("signed managed agent release apply", () => {
 			  ON c.organization_id = a.organization_id AND c.agent_id = a.id
 			WHERE a.organization_id = ${ORG_ID} AND a.id = ${AGENT_ID}
 		`;
-		expect(rows).toEqual([{
-			user_md: "release user",
-			fence_count: 0,
-			configuration_revision: "1",
-		}]);
+		expect(rows).toEqual([
+			{
+				user_md: "release user",
+				fence_count: 0,
+				configuration_revision: "1",
+			},
+		]);
 	});
 
 	test("requires release retry when apply observes an absent agent before legacy create", async () => {
@@ -549,7 +554,9 @@ describe("signed managed agent release apply", () => {
 				configuration_revision: "1",
 				management_mode: "native",
 				mutation_kind: "managed_release",
-				resulting_settings_digest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+				resulting_settings_digest: expect.stringMatching(
+					/^sha256:[0-9a-f]{64}$/,
+				),
 			},
 		]);
 		expect(rows[0]?.resulting_settings_digest).not.toBe(
@@ -692,6 +699,29 @@ describe("signed managed agent release apply", () => {
 		});
 	});
 
+	test("accepts materialized personal baseline v2 contracts", async () => {
+		const app = await buildApp();
+		const request = personalBaselineApplyRequest();
+		const baselineVersionId = `personal-agent-baseline-v2-${"a".repeat(64)}`;
+		const policy = request.signedManifest.controlPlanePolicy as Record<
+			string,
+			unknown
+		>;
+		const baseline = policy.personalAgentBaseline as Record<string, unknown>;
+		baseline.baselineVersionId = baselineVersionId;
+		baseline.materializationVersion = 2;
+		request.baselineVersionId = baselineVersionId;
+		resignLatestRequest(request);
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toMatchObject({
+			baselineVersionId,
+			effectiveSettingsDigest: request.effectiveSettingsDigest,
+			drifted: false,
+		});
+	});
+
 	test("rejects a malformed post-canary machine policy gate", async () => {
 		const app = await buildApp();
 		const request = personalBaselineApplyRequest();
@@ -806,8 +836,9 @@ describe("signed managed agent release apply", () => {
 			drifted: false,
 		});
 		expect(evidence).not.toHaveProperty("baselineOverride");
-		expect(await sql`SELECT model, verbose_logging FROM agents
-			WHERE organization_id=${ORG_ID} AND id=${AGENT_ID}`
+		expect(
+			await sql`SELECT model, verbose_logging FROM agents
+			WHERE organization_id=${ORG_ID} AND id=${AGENT_ID}`,
 		).toEqual([{ model: "operator-owned-model", verbose_logging: true }]);
 
 		const settings = await app.request(
@@ -1295,13 +1326,15 @@ describe("signed managed agent release apply", () => {
 			postApplySmoke: { passed: true },
 			configurationRevision: "2",
 		});
-		expect(await sql`
+		expect(
+			await sql`
 			SELECT configuration_revision::text AS configuration_revision,
 			       (SELECT count(*)::int FROM agent_configuration_commands
 			        WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}) AS command_count
 			FROM agent_configuration_controls
 			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}
-		`).toEqual([{ configuration_revision: "2", command_count: 2 }]);
+		`,
+		).toEqual([{ configuration_revision: "2", command_count: 2 }]);
 		const commands = await sql`
 			SELECT command_id
 			FROM agent_configuration_commands
@@ -1324,11 +1357,13 @@ describe("signed managed agent release apply", () => {
 			configurationRevision: "2",
 			claimToken: replay.claimToken,
 		});
-		expect(await sql`
+		expect(
+			await sql`
 			SELECT count(*)::int AS command_count
 			FROM agent_configuration_commands
 			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}
-		`).toEqual([{ command_count: 2 }]);
+		`,
+		).toEqual([{ command_count: 2 }]);
 	});
 
 	test("returns fresh exact attempt evidence for an idempotent same-sequence no-drift retry", async () => {
@@ -1388,7 +1423,9 @@ describe("signed managed agent release apply", () => {
 			SELECT command_id FROM agent_configuration_commands
 			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}
 		`;
-		expect(commands[0]?.command_id).toMatch(/^managed-release:sha256:[0-9a-f]{64}$/);
+		expect(commands[0]?.command_id).toMatch(
+			/^managed-release:sha256:[0-9a-f]{64}$/,
+		);
 	});
 
 	test("requires revision presence for an exact retry after Toolbox enrollment", async () => {
@@ -1444,11 +1481,13 @@ describe("signed managed agent release apply", () => {
 			currentRevision: "1",
 		});
 		expect(await currentIdentity()).toBe("stale replay drift");
-		expect(await sql`
+		expect(
+			await sql`
 			SELECT configuration_revision::text AS configuration_revision
 			FROM agent_configuration_controls
 			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}
-		`).toEqual([{ configuration_revision: "1" }]);
+		`,
+		).toEqual([{ configuration_revision: "1" }]);
 	});
 
 	test("allows a stale revision only for a proven no-drift exact replay", async () => {
@@ -1477,13 +1516,15 @@ describe("signed managed agent release apply", () => {
 			configurationRevision: "1",
 			managementMode: "toolbox_managed",
 		});
-		expect(await sql`
+		expect(
+			await sql`
 			SELECT configuration_revision::text AS configuration_revision,
 			       (SELECT count(*)::int FROM agent_configuration_commands
 			        WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}) AS command_count
 			FROM agent_configuration_controls
 			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}
-		`).toEqual([{ configuration_revision: "1", command_count: 1 }]);
+		`,
+		).toEqual([{ configuration_revision: "1", command_count: 1 }]);
 	});
 
 	test("repairs managed replay drift only at the current revision and increments once", async () => {
@@ -1513,13 +1554,15 @@ describe("signed managed agent release apply", () => {
 			managementMode: "toolbox_managed",
 		});
 		expect(await currentIdentity()).toBe("release identity");
-		expect(await sql`
+		expect(
+			await sql`
 			SELECT configuration_revision::text AS configuration_revision,
 			       (SELECT count(*)::int FROM agent_configuration_commands
 			        WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}) AS command_count
 			FROM agent_configuration_controls
 			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}
-		`).toEqual([{ configuration_revision: "2", command_count: 2 }]);
+		`,
+		).toEqual([{ configuration_revision: "2", command_count: 2 }]);
 	});
 
 	test("does not let rollback then base-command reapply bypass revision CAS", async () => {
@@ -1598,7 +1641,8 @@ describe("signed managed agent release apply", () => {
 		next.expectedConfigurationRevision = "1";
 		next.commandDigest = commandDigest(next);
 		expect((await putApply(app, next)).status).toBe(200);
-		const rows = await (await db())`SELECT command_id FROM agent_configuration_commands
+		const rows =
+			await (await db())`SELECT command_id FROM agent_configuration_commands
 			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID} ORDER BY resulting_revision`;
 		expect(rows).toHaveLength(2);
 		expect(rows[0]?.command_id).not.toBe(rows[1]?.command_id);
@@ -1606,7 +1650,9 @@ describe("signed managed agent release apply", () => {
 
 	test("reads release evidence and configuration control from one coherent snapshot", async () => {
 		const initialApp = await buildApp();
-		expect((await putApply(initialApp, latestSignedApplyRequest())).status).toBe(200);
+		expect(
+			(await putApply(initialApp, latestSignedApplyRequest())).status,
+		).toBe(200);
 
 		const evidenceRead = deferred<void>();
 		const finishRead = deferred<void>();
@@ -1756,7 +1802,8 @@ describe("signed managed agent release apply", () => {
 			const response = await putApply(await buildApp(), request);
 			expect(response.status).toBe(409);
 			await expect(response.json()).resolves.toMatchObject({
-				error: "agent_configuration_revision_mismatch", currentRevision: "0",
+				error: "agent_configuration_revision_mismatch",
+				currentRevision: "0",
 			});
 		} finally {
 			await sql.unsafe(
@@ -2561,11 +2608,13 @@ describe("signed managed agent release apply", () => {
 			idempotent: false,
 		});
 		await expect(currentIdentity()).resolves.toBe("signed rollback");
-		expect(await (await db())`
+		expect(
+			await (await db())`
 			SELECT configuration_revision::text AS configuration_revision
 			FROM agent_configuration_controls
 			WHERE organization_id=${ORG_ID} AND agent_id=${AGENT_ID}
-		`).toEqual([{ configuration_revision: "2" }]);
+		`,
+		).toEqual([{ configuration_revision: "2" }]);
 	});
 
 	test("requires every signed rollback field and rejects expired rollback events", async () => {
@@ -2941,8 +2990,7 @@ async function buildApp(
 	app.route(
 		"/api/provisioning",
 		createProvisioningRoutes({
-			agentConfigurationAuthority:
-				options.agentConfigurationAuthority as never,
+			agentConfigurationAuthority: options.agentConfigurationAuthority as never,
 			agentReleaseTrustedPublicKeysJson:
 				options.trustedPublicKeysJson ?? trustedPublicKeysJson(),
 			agentReleaseEvidenceSigningPrivateKeysJson:

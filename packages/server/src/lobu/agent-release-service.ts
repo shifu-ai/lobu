@@ -9,23 +9,24 @@ import {
 import type { AgentSettings, ReleaseCapabilityClaim } from "@lobu/core";
 import { canonicalize } from "json-canonicalize";
 import { type DbClient, getDb } from "../db/client.js";
-import type { RuntimeCapabilitySnapshot } from "./runtime-capability-snapshot-contract.js";
+import {
+	LEGACY_MANAGED_RELEASE_SETTING_KEYS,
+	PERSONAL_BASELINE_RELEASE_SETTING_KEYS,
+} from "./agent-configuration/field-ownership.js";
 import {
 	applyLegacyManagedSettingsInTransaction,
 	replaceReleaseOwnedAgentConfigurationSettingsInTransaction,
 	syncProvisioningGrantsInTransaction,
 } from "./agent-configuration/postgres-repository.js";
-import {
-	LEGACY_MANAGED_RELEASE_SETTING_KEYS,
-	PERSONAL_BASELINE_RELEASE_SETTING_KEYS,
-} from "./agent-configuration/field-ownership.js";
+import type { RuntimeCapabilitySnapshot } from "./runtime-capability-snapshot-contract.js";
 import { parseStrictJsonBytes } from "./strict-json-parser.js";
 
 const MANAGED_SETTING_KEYS = LEGACY_MANAGED_RELEASE_SETTING_KEYS;
 // Lobu persists and reads these fields from live agent state. The remaining
 // personal baseline fields are signed, immutable source metadata only; they
 // may seed live digest reconstruction but can never mask a mutable field.
-const PERSONAL_BASELINE_LOBU_OWNED_KEYS = PERSONAL_BASELINE_RELEASE_SETTING_KEYS;
+const PERSONAL_BASELINE_LOBU_OWNED_KEYS =
+	PERSONAL_BASELINE_RELEASE_SETTING_KEYS;
 const PERSONAL_BASELINE_IMMUTABLE_METADATA_KEYS = [
 	"templateKey",
 	"scope",
@@ -39,7 +40,7 @@ const PERSONAL_BASELINE_SETTING_KEYS = [
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const DECIMAL_REVISION_PATTERN = /^(0|[1-9][0-9]*)$/;
 const PERSONAL_BASELINE_VERSION_PATTERN =
-	/^personal-agent-baseline-v1-[0-9a-f]{64}$/;
+	/^personal-agent-baseline-v[12]-[0-9a-f]{64}$/;
 const BASE64_PATTERN =
 	/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const MAX_KEYRING_BYTES = 64 * 1024;
@@ -84,7 +85,7 @@ interface PersonalAgentBaselineContract {
 	baselineVersionId: string;
 	baselineVersion: number;
 	templateKey: "pm-marketing-user-agent";
-	materializationVersion: 1;
+	materializationVersion: 1 | 2;
 	sourceRepository: "shifu-tw/shifu-toolbox";
 	sourceRevision: string;
 	sourcePath: string;
@@ -2107,7 +2108,7 @@ function parsePersonalAgentBaselineContract(value: unknown): void {
 		!PERSONAL_BASELINE_VERSION_PATTERN.test(baseline.baselineVersionId) ||
 		!isPositiveSafeInteger(baseline.baselineVersion) ||
 		baseline.templateKey !== "pm-marketing-user-agent" ||
-		baseline.materializationVersion !== 1 ||
+		![1, 2].includes(Number(baseline.materializationVersion)) ||
 		baseline.sourceRepository !== "shifu-tw/shifu-toolbox" ||
 		typeof baseline.sourceRevision !== "string" ||
 		!/^[0-9a-f]{40}$/.test(baseline.sourceRevision) ||
