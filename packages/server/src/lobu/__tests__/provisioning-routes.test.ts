@@ -15,6 +15,7 @@ import {
 
 // Workspace initialization reaches agent-routes through auth notifications.
 installRouteAuthTestMock();
+// biome-ignore lint/correctness/useHookAtTopLevel: Route tests use a store helper, not a React hook.
 useRealRouteStores();
 
 const ORG_ID = "org-provisioning";
@@ -143,8 +144,7 @@ mock.module("../../gateway/routes/internal/device-auth.js", () => {
 						clientId: credential.clientId,
 						tokenUrl: credential.tokenUrl,
 						resource: credential.resource ?? null,
-						tokenEndpointAuthMethod:
-							credential.tokenEndpointAuthMethod ?? null,
+						tokenEndpointAuthMethod: credential.tokenEndpointAuthMethod ?? null,
 					}),
 				)
 				.digest("hex")
@@ -157,44 +157,44 @@ mock.module("../../gateway/routes/internal/device-auth.js", () => {
 	// process-global, so every export the real module has must appear here or
 	// unrelated importers fail to link.
 	const refreshCredentialImpl = async (
-			secretStore: ReturnType<typeof createMemorySecretStore>,
-			agentId: string,
-			userId: string,
-			mcpId: string,
-			credential: {
-				refreshToken?: string;
-				clientId: string;
-				clientSecret?: string;
-				tokenUrl: string;
-				resource?: string;
-			},
-		) => {
-			if (!credential.refreshToken) return null;
-			const response = await fetch(credential.tokenUrl, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					grant_type: "refresh_token",
-					client_id: credential.clientId,
-					client_secret: credential.clientSecret,
-					refresh_token: credential.refreshToken,
-					resource: credential.resource,
-				}),
-			});
-			if (!response.ok) return null;
-			const token = await response.json();
-			const refreshed = {
-				...credential,
-				bindingId: getStableCredentialBindingId(credential),
-				accessToken: String(token.access_token ?? ""),
-				refreshToken: token.refresh_token
-					? String(token.refresh_token)
-					: credential.refreshToken,
-				expiresAt: Date.now() + Number(token.expires_in ?? 3600) * 1000,
-			};
-			await putSecretCredential(secretStore, agentId, userId, mcpId, refreshed);
-			return refreshed;
+		secretStore: ReturnType<typeof createMemorySecretStore>,
+		agentId: string,
+		userId: string,
+		mcpId: string,
+		credential: {
+			refreshToken?: string;
+			clientId: string;
+			clientSecret?: string;
+			tokenUrl: string;
+			resource?: string;
+		},
+	) => {
+		if (!credential.refreshToken) return null;
+		const response = await fetch(credential.tokenUrl, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				grant_type: "refresh_token",
+				client_id: credential.clientId,
+				client_secret: credential.clientSecret,
+				refresh_token: credential.refreshToken,
+				resource: credential.resource,
+			}),
+		});
+		if (!response.ok) return null;
+		const token = await response.json();
+		const refreshed = {
+			...credential,
+			bindingId: getStableCredentialBindingId(credential),
+			accessToken: String(token.access_token ?? ""),
+			refreshToken: token.refresh_token
+				? String(token.refresh_token)
+				: credential.refreshToken,
+			expiresAt: Date.now() + Number(token.expires_in ?? 3600) * 1000,
 		};
+		await putSecretCredential(secretStore, agentId, userId, mcpId, refreshed);
+		return refreshed;
+	};
 
 	return {
 		createDeviceAuthRoutes: () => new Hono(),
@@ -459,7 +459,8 @@ function requestManagedEnrollment(
 			headers: {
 				"content-type": "application/json",
 				"if-match": `"agent-config:${input.revision ?? "0"}"`,
-				"idempotency-key": input.commandId ?? "managed-enrollment-route-command-1",
+				"idempotency-key":
+					input.commandId ?? "managed-enrollment-route-command-1",
 			},
 			body: JSON.stringify({
 				toolboxUserId: input.toolboxUserId ?? ENROLLMENT_ROUTE_USER_ID,
@@ -551,12 +552,24 @@ describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll
 
 	test.each([
 		["missing If-Match", {}, "agent_configuration_revision_required"],
-		["invalid If-Match", { "if-match": "agent-config:0" }, "invalid_revision_precondition"],
-		["missing Idempotency-Key", { "if-match": '"agent-config:0"' }, "missing_idempotency_key"],
-		["invalid Idempotency-Key", {
-			"if-match": '"agent-config:0"',
-			"idempotency-key": "contains spaces",
-		}, "invalid_idempotency_key"],
+		[
+			"invalid If-Match",
+			{ "if-match": "agent-config:0" },
+			"invalid_revision_precondition",
+		],
+		[
+			"missing Idempotency-Key",
+			{ "if-match": '"agent-config:0"' },
+			"missing_idempotency_key",
+		],
+		[
+			"invalid Idempotency-Key",
+			{
+				"if-match": '"agent-config:0"',
+				"idempotency-key": "contains spaces",
+			},
+			"invalid_idempotency_key",
+		],
 	])("rejects %s before resolving a snapshot", async (_name, headers, error) => {
 		const resolver = mock(async () => {
 			throw new Error("must not be called");
@@ -604,7 +617,11 @@ describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll
 			{},
 			{ toolboxUserId: "", environment: "production" },
 			{ toolboxUserId: "toolbox-user-enrollment", environment: "local" },
-			{ toolboxUserId: "toolbox-user-enrollment", environment: "production", extra: true },
+			{
+				toolboxUserId: "toolbox-user-enrollment",
+				environment: "production",
+				extra: true,
+			},
 		]) {
 			const response = await app.request(
 				"/api/provisioning/agents/shifu-u-enrollment-route/configuration-management/enroll",
@@ -705,21 +722,22 @@ describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll
 				applyManagedRelease: async () => ({ evidence: {}, state: {} }),
 			},
 		});
-		const request = (key: string) => app.request(
-			"/api/provisioning/agents/shifu-u-enrollment-route/configuration-management/enroll",
-			{
-				method: "POST",
-				headers: {
-					"content-type": "application/json",
-					"if-match": '"agent-config:0"',
-					"idempotency-key": key,
+		const request = (key: string) =>
+			app.request(
+				"/api/provisioning/agents/shifu-u-enrollment-route/configuration-management/enroll",
+				{
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						"if-match": '"agent-config:0"',
+						"idempotency-key": key,
+					},
+					body: JSON.stringify({
+						toolboxUserId: "toolbox-user-enrollment",
+						environment: "production",
+					}),
 				},
-				body: JSON.stringify({
-					toolboxUserId: "toolbox-user-enrollment",
-					environment: "production",
-				}),
-			},
-		);
+			);
 		const replay = await request("managed-enrollment-replay");
 		expect(replay.status).toBe(200);
 		await expect(replay.json()).resolves.toMatchObject({
@@ -805,7 +823,9 @@ describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll
 		const resolver = mock(async () => {
 			snapshotGeneration += 1;
 			const snapshot = enrollmentRouteSnapshot({
-				expiresAt: new Date(Date.now() + 20_000 + snapshotGeneration * 5_000).toISOString(),
+				expiresAt: new Date(
+					Date.now() + 20_000 + snapshotGeneration * 5_000,
+				).toISOString(),
 			});
 			resolvedSnapshotDigests.push(snapshot.snapshotDigest);
 			return snapshot;
@@ -820,10 +840,11 @@ describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll
 		const { createAgentConfigurationAuthority } = await import(
 			"../agent-configuration/index.js"
 		);
-		const appliedState = await createAgentConfigurationAuthority().readAppliedState({
-			organizationId: ORG_ID,
-			agentId: "shifu-u-enrollment-route",
-		});
+		const appliedState =
+			await createAgentConfigurationAuthority().readAppliedState({
+				organizationId: ORG_ID,
+				agentId: "shifu-u-enrollment-route",
+			});
 		if (!appliedState) throw new Error("Expected canonical applied state");
 		expect(appliedState.settingsDigest).not.toBe(settingsHash);
 		await expect(applied.json()).resolves.toEqual({
@@ -861,11 +882,13 @@ describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll
 			FROM agent_configuration_controls c
 			WHERE c.organization_id = ${ORG_ID} AND c.agent_id = ${ENROLLMENT_ROUTE_AGENT_ID}
 		`;
-		expect(rows).toEqual([{
-			management_mode: "toolbox_managed",
-			configuration_revision: 1,
-			command_count: 1,
-		}]);
+		expect(rows).toEqual([
+			{
+				management_mode: "toolbox_managed",
+				configuration_revision: 1,
+				command_count: 1,
+			},
+		]);
 	});
 
 	test("seals broad and fenced bootstrap before any side effect after durable enrollment", async () => {
@@ -881,7 +904,8 @@ describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll
 				SELECT name, description, owner_platform, owner_user_id, user_md
 				FROM agents WHERE organization_id = ${ORG_ID} AND id = ${ENROLLMENT_ROUTE_AGENT_ID}
 			`,
-			users: await sql`SELECT id FROM "user" WHERE id IN ('sealed-broad-owner', 'toolbox-user-fenced')`,
+			users:
+				await sql`SELECT id FROM "user" WHERE id IN ('sealed-broad-owner', 'toolbox-user-fenced')`,
 			members: await sql`
 				SELECT "userId", role FROM "member"
 				WHERE "organizationId" = ${ORG_ID}
@@ -935,14 +959,56 @@ describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll
 	});
 
 	test.each([
-		["capability absent", enrollmentRouteSnapshot({ capabilities: ["other.v1"] }), undefined, "agent_configuration_capability_inactive"],
-		["release id mismatch", enrollmentRouteSnapshot({ appliedReleaseId: "agent-release-enrollment-route-5" }), undefined, "agent_configuration_stale_release"],
-		["release sequence mismatch", enrollmentRouteSnapshot({ appliedReleaseSequence: 5 }), undefined, "agent_configuration_stale_release"],
-		["Toolbox user mismatch", enrollmentRouteSnapshot({ toolboxUserId: "another-user" }), undefined, "agent_configuration_invalid_release"],
-		["agent mismatch", enrollmentRouteSnapshot({ agentId: "shifu-u-another-route-agent" }), undefined, "agent_configuration_invalid_release"],
-		["environment mismatch", enrollmentRouteSnapshot({ environment: "staging" }), undefined, "agent_configuration_environment_mismatch"],
-		["durable owner mismatch", enrollmentRouteSnapshot({ toolboxUserId: "another-user" }), "another-user", "agent_configuration_invalid_release"],
-		["stale snapshot", enrollmentRouteSnapshot({ expiresAt: "2000-01-01T00:00:00.000Z" }), undefined, "agent_configuration_stale_release"],
+		[
+			"capability absent",
+			enrollmentRouteSnapshot({ capabilities: ["other.v1"] }),
+			undefined,
+			"agent_configuration_capability_inactive",
+		],
+		[
+			"release id mismatch",
+			enrollmentRouteSnapshot({
+				appliedReleaseId: "agent-release-enrollment-route-5",
+			}),
+			undefined,
+			"agent_configuration_stale_release",
+		],
+		[
+			"release sequence mismatch",
+			enrollmentRouteSnapshot({ appliedReleaseSequence: 5 }),
+			undefined,
+			"agent_configuration_stale_release",
+		],
+		[
+			"Toolbox user mismatch",
+			enrollmentRouteSnapshot({ toolboxUserId: "another-user" }),
+			undefined,
+			"agent_configuration_invalid_release",
+		],
+		[
+			"agent mismatch",
+			enrollmentRouteSnapshot({ agentId: "shifu-u-another-route-agent" }),
+			undefined,
+			"agent_configuration_invalid_release",
+		],
+		[
+			"environment mismatch",
+			enrollmentRouteSnapshot({ environment: "staging" }),
+			undefined,
+			"agent_configuration_environment_mismatch",
+		],
+		[
+			"durable owner mismatch",
+			enrollmentRouteSnapshot({ toolboxUserId: "another-user" }),
+			"another-user",
+			"agent_configuration_invalid_release",
+		],
+		[
+			"stale snapshot",
+			enrollmentRouteSnapshot({ expiresAt: "2000-01-01T00:00:00.000Z" }),
+			undefined,
+			"agent_configuration_stale_release",
+		],
 	])("fails closed for %s through the real authority", async (_name, snapshot, toolboxUserId, error) => {
 		await seedEnrollmentRouteTruth();
 		const app = await buildApp(["mcp:admin"], {
@@ -952,12 +1018,17 @@ describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll
 		const response = await requestManagedEnrollment(app, { toolboxUserId });
 		expect(response.status).toBe(409);
 		await expect(response.json()).resolves.toEqual({ error });
-		const control = (await (await import("../../db/client.js")).getDb()`
+		const control = (
+			await (await import("../../db/client.js")).getDb()`
 			SELECT management_mode, configuration_revision
 			FROM agent_configuration_controls
 			WHERE organization_id = ${ORG_ID} AND agent_id = ${ENROLLMENT_ROUTE_AGENT_ID}
-		`)[0];
-		expect(control).toEqual({ management_mode: "native", configuration_revision: 0 });
+		`
+		)[0];
+		expect(control).toEqual({
+			management_mode: "native",
+			configuration_revision: 0,
+		});
 	});
 
 	test("detects live settings drift through the release truth classifier", async () => {
@@ -984,16 +1055,16 @@ describe("POST /api/provisioning/agents/:agentId/configuration-management/enroll
 		const app = await buildApp(["mcp:admin"], {
 			agentReleaseEnvironment: "production",
 			runtimeCapabilitySnapshotResolver: async () => {
-			order.push("snapshot-start");
-			await Promise.resolve();
-			order.push("snapshot-complete");
-			return enrollmentRouteSnapshot();
-		},
-			agentConfigurationTransactionHooks: {
-			beforeAgentLock: async () => {
-				order.push("transaction-before-agent-lock");
+				order.push("snapshot-start");
+				await Promise.resolve();
+				order.push("snapshot-complete");
+				return enrollmentRouteSnapshot();
 			},
-		},
+			agentConfigurationTransactionHooks: {
+				beforeAgentLock: async () => {
+					order.push("transaction-before-agent-lock");
+				},
+			},
 		});
 		const response = await requestManagedEnrollment(app);
 		expect(response.status).toBe(200);
@@ -1192,12 +1263,14 @@ describe("POST /api/provisioning/agents", () => {
 			WHERE c.organization_id = ${ORG_ID}
 			  AND c.agent_id = ${"shifu-u-abc123"}
 		`;
-		expect(initialControl).toEqual([{
-			management_mode: "native",
-			configuration_revision: "1",
-			mutation_kind: "bootstrap",
-			resulting_revision: "1",
-		}]);
+		expect(initialControl).toEqual([
+			{
+				management_mode: "native",
+				configuration_revision: "1",
+				mutation_kind: "bootstrap",
+				resulting_revision: "1",
+			},
+		]);
 		const grants = await sql`
 			SELECT kind, pattern, denied
 			FROM grants
@@ -1331,10 +1404,17 @@ describe("POST /api/provisioning/agents", () => {
 			},
 		]);
 
-		const { UserAgentsStore } = await import("../../gateway/auth/user-agents-store.js");
+		const { UserAgentsStore } = await import(
+			"../../gateway/auth/user-agents-store.js"
+		);
 		const store = new UserAgentsStore();
 		await expect(
-			store.ownsAgent("external", "gateway-user", "shifu-u-agent-users", ORG_ID),
+			store.ownsAgent(
+				"external",
+				"gateway-user",
+				"shifu-u-agent-users",
+				ORG_ID,
+			),
 		).resolves.toBe(true);
 	});
 
@@ -1546,7 +1626,9 @@ describe("POST /api/provisioning/agents", () => {
 	});
 
 	test("maps a broad bootstrap revision conflict to a stable 409", async () => {
-		const { AgentConfigurationError } = await import("../agent-configuration/index.js");
+		const { AgentConfigurationError } = await import(
+			"../agent-configuration/index.js"
+		);
 		const app = await buildApp(["mcp:admin"], {
 			agentConfigurationAuthority: {
 				bootstrap: async () => {
@@ -1733,6 +1815,7 @@ describe("POST /api/provisioning/agents", () => {
 			ownerUserId,
 		);
 		expect(ownerMemberRole).toBe("member");
+		if (!ownerMemberRole) throw new Error("Expected owner member role");
 
 		const { writeContextPackMemory } = await import(
 			"../context-pack-memory-service.js"
@@ -1740,7 +1823,7 @@ describe("POST /api/provisioning/agents", () => {
 		const body = await orgContext.run({ organizationId: ORG_ID }, () =>
 			writeContextPackMemory({
 				organizationId: ORG_ID,
-				ownerMemberRole: ownerMemberRole!,
+				ownerMemberRole,
 				authSource: "pat",
 				scopes: ["mcp:admin"],
 				body: contextPackBody(agentId, ownerUserId),
@@ -1881,6 +1964,24 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 		expect(rows).toEqual([{ configuration_revision: "1", command_count: 1 }]);
 	});
 
+	test("accepts a materialized personal baseline v2 fence", async () => {
+		const app = await buildApp();
+		const agentId = "shifu-u-fenced-v2";
+		const baselineVersionId = `personal-agent-baseline-v2-${"c".repeat(64)}`;
+
+		const response = await putFencedAgent(app, agentId, {
+			...fencedProvisioningBody(),
+			baselineVersionId,
+		});
+
+		expect(response.status).toBe(201);
+		await expect(response.json()).resolves.toMatchObject({
+			ok: true,
+			agentId,
+			provisioningFence: { baselineVersionId },
+		});
+	});
+
 	test("maps changed admin PAT effects under the same fenced command to a stable 409", async () => {
 		const agentId = "shifu-u-fenced-command-conflict";
 		const body = fencedProvisioningBody();
@@ -1911,7 +2012,9 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 	});
 
 	test("maps a fenced bootstrap revision conflict to a stable 409", async () => {
-		const { AgentConfigurationError } = await import("../agent-configuration/index.js");
+		const { AgentConfigurationError } = await import(
+			"../agent-configuration/index.js"
+		);
 		const app = await buildApp(["mcp:admin"], {
 			agentConfigurationAuthority: {
 				bootstrap: async () => {
@@ -1967,7 +2070,9 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 				DROP TRIGGER IF EXISTS fail_bootstrap_control_update_for_test
 				ON agent_configuration_controls
 			`);
-			await sql.unsafe(`DROP FUNCTION IF EXISTS fail_bootstrap_control_update_for_test()`);
+			await sql.unsafe(
+				`DROP FUNCTION IF EXISTS fail_bootstrap_control_update_for_test()`,
+			);
 		}
 
 		const aggregate = await sql`
@@ -1988,16 +2093,18 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 			   WHERE "organizationId" = ${ORG_ID} AND "userId" = 'toolbox-user-fenced') AS members,
 			  (SELECT count(*)::int FROM "user" WHERE id = 'toolbox-user-fenced') AS users
 		`;
-		expect(aggregate).toEqual([{
-			agents: 0,
-			controls: 0,
-			commands: 0,
-			fences: 0,
-			grants: 0,
-			owners: 0,
-			members: 0,
-			users: 0,
-		}]);
+		expect(aggregate).toEqual([
+			{
+				agents: 0,
+				controls: 0,
+				commands: 0,
+				fences: 0,
+				grants: 0,
+				owners: 0,
+				members: 0,
+				users: 0,
+			},
+		]);
 	});
 
 	test("rejects same-generation conflicts without changing observable settings", async () => {
@@ -2081,9 +2188,9 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 				preApprovedTools: ["/mcp/google_workspace/tools/*"],
 			},
 		});
-		expect(
-			(await putFencedAgent(app, agentId, generationOne)).status,
-		).toBe(201);
+		expect((await putFencedAgent(app, agentId, generationOne)).status).toBe(
+			201,
+		);
 		const beforeTakeover = await app.request(
 			`/api/provisioning/agents/${agentId}/runtime-grants/verify`,
 			{
@@ -2123,7 +2230,9 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 			WHERE c.organization_id = ${ORG_ID} AND c.agent_id = ${agentId}
 			GROUP BY c.configuration_revision
 		`;
-		expect(control).toEqual([{ configuration_revision: "2", command_count: 2 }]);
+		expect(control).toEqual([
+			{ configuration_revision: "2", command_count: 2 },
+		]);
 
 		const late = await putFencedAgent(app, agentId, generationOne);
 		expect(late.status).toBe(409);
@@ -2180,7 +2289,9 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 			},
 		});
 
-		expect((await putFencedAgent(app, agentId, generationTwo)).status).toBe(201);
+		expect((await putFencedAgent(app, agentId, generationTwo)).status).toBe(
+			201,
+		);
 
 		const delayedLegacy = await app.request("/api/provisioning/agents", {
 			method: "POST",
@@ -2339,7 +2450,9 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 						}),
 					},
 				);
-			await expect((await verify("before-fenced-apply")).json()).resolves.toMatchObject({
+			await expect(
+				(await verify("before-fenced-apply")).json(),
+			).resolves.toMatchObject({
 				ok: false,
 				errorCode: "runtime_grants_missing",
 			});
@@ -2352,7 +2465,9 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 				}),
 			);
 			expect(apply.status).toBe(200);
-			await expect((await verify("after-fenced-apply")).json()).resolves.toMatchObject({
+			await expect(
+				(await verify("after-fenced-apply")).json(),
+			).resolves.toMatchObject({
 				ok: true,
 			});
 
@@ -2376,7 +2491,8 @@ describe("PUT /api/provisioning/agents/:agentId/fenced-settings", () => {
 		const app = await buildApp();
 		const invalidBodies = [
 			(() => {
-				const { settings: _settings, ...withoutSettings } = fencedProvisioningBody();
+				const { settings: _settings, ...withoutSettings } =
+					fencedProvisioningBody();
 				return withoutSettings;
 			})(),
 			{ ...fencedProvisioningBody(), targetId: "not-a-uuid" },
@@ -2898,8 +3014,11 @@ describe("GET /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/status", () => 
 
 	test("reports an expired credential with an invalid refresh token as unauthenticated", async () => {
 		await seedPersonalAgent();
-		const fetchMock = mock(async () =>
-			new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }),
+		const fetchMock = mock(
+			async () =>
+				new Response(JSON.stringify({ error: "invalid_grant" }), {
+					status: 400,
+				}),
 		);
 		const originalFetch = globalThis.fetch;
 		globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -3056,8 +3175,11 @@ describe("POST /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/materialize", 
 
 	test("does not create a connection ref when the Lobu OAuth credential cannot refresh", async () => {
 		await seedPersonalAgent();
-		const fetchMock = mock(async () =>
-			new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }),
+		const fetchMock = mock(
+			async () =>
+				new Response(JSON.stringify({ error: "invalid_grant" }), {
+					status: 400,
+				}),
 		);
 		const originalFetch = globalThis.fetch;
 		globalThis.fetch = fetchMock as unknown as typeof fetch;
