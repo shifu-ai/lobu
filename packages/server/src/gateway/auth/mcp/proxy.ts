@@ -128,6 +128,7 @@ export interface McpDiscoveryResult {
   status?: "degraded" | "needs_reauth";
   diagnosticCode?:
     | "auth_required_zero_tools"
+    | "oauth_refresh_failed"
     | "upstream_unauthorized"
     | "upstream_forbidden";
   provenance?: McpDiscoveryProvenance;
@@ -579,6 +580,15 @@ class McpDiscoveryAuthError extends Error {
   }
 }
 
+class McpDiscoveryRefreshError extends Error {
+  readonly diagnosticCode = "oauth_refresh_failed";
+
+  constructor() {
+    super("MCP credential refresh is temporarily unavailable");
+    this.name = "McpDiscoveryRefreshError";
+  }
+}
+
 const SAFE_MCP_TOOL_DIAGNOSTIC_CODES = new Set([
   "oauth_scope_denied",
   "oauth_refresh_failed",
@@ -595,6 +605,13 @@ function diagnosticCodeForHttpStatus(status: number): string {
   if (status === 403) return "upstream_forbidden";
   if (status === 429) return "upstream_rate_limited";
   return "connector_unavailable";
+}
+
+function diagnosticCodeForRefreshFailure(
+  failure: CredentialRefreshFailure | undefined,
+): "needs_reauth" | "oauth_refresh_failed" | undefined {
+  if (!failure) return undefined;
+  return failure.permanent ? "needs_reauth" : "oauth_refresh_failed";
 }
 
 function isMessageOnlyReauthSignal(message: string): boolean {
@@ -1467,6 +1484,7 @@ export class McpProxy {
             "direct tool execution",
           );
         }
+        const refreshFailure = this.refreshFailureForResponse(response);
         const httpReauth = this.describeReauthFailure({
           error: new McpHttpStatusError(response.status, text),
           httpStatus: response.status,
@@ -1474,7 +1492,7 @@ export class McpProxy {
           userId,
           mcpId,
           organizationId: options?.organizationId,
-          refreshFailure: this.refreshFailureForResponse(response),
+          refreshFailure,
         });
         const result = {
           content: [
@@ -1486,6 +1504,7 @@ export class McpProxy {
           isError: true,
           diagnosticCode:
             httpReauth?.diagnosticCode ??
+            diagnosticCodeForRefreshFailure(refreshFailure) ??
             diagnosticCodeForHttpStatus(response.status),
         };
         emitToolCallCompleted(
@@ -1508,6 +1527,7 @@ export class McpProxy {
           isError: true,
           diagnosticCode:
             httpReauth?.diagnosticCode ??
+            diagnosticCodeForRefreshFailure(refreshFailure) ??
             diagnosticCodeForHttpStatus(response.status),
         };
       }
@@ -1756,6 +1776,27 @@ export class McpProxy {
       });
     };
 
+    const emitDiscoveryTransientRefreshFailure = (upstreamHost?: string) => {
+      emitToolsListCompleted(
+        "failed",
+        {
+          cache_status: "miss",
+          tool_count: 0,
+          ...(upstreamHost ? { upstream_host: upstreamHost } : {}),
+          diagnostic_code: "oauth_refresh_failed",
+        },
+        new McpDiscoveryRefreshError(),
+      );
+      return bindDiscoveryProvenance({
+        tools: [],
+        status: "degraded",
+        diagnosticCode: "oauth_refresh_failed",
+        instructions:
+          `The "${mcpId}" connector is temporarily unavailable while its credentials are refreshed. ` +
+          "Try again later.",
+      });
+    };
+
     emitMcpObsEvent({
       trace,
       eventName: "mcp.tools_list.started",
@@ -1959,6 +2000,20 @@ export class McpProxy {
         // If the server demands OAuth, kick off the auth-code flow here so the
         // "Connect X" link reaches the user up-front.
         if (initResponse.status === 401) {
+          const refreshDiagnostic = diagnosticCodeForRefreshFailure(
+            this.refreshFailureForResponse(initResponse),
+          );
+          if (refreshDiagnostic === "oauth_refresh_failed") {
+            await initResponse.body?.cancel().catch(() => {
+              /* noop */
+            });
+            if (options?.surfaceErrors) {
+              throw new McpDiscoveryRefreshError();
+            }
+            return emitDiscoveryTransientRefreshFailure(
+              safeHost(httpServer.upstreamUrl),
+            );
+          }
           const wwwAuth = initResponse.headers.get("www-authenticate");
           await initResponse.body?.cancel().catch(() => {
             /* noop */
@@ -2047,6 +2102,20 @@ export class McpProxy {
       );
 
       if (response.status === 401) {
+        const refreshDiagnostic = diagnosticCodeForRefreshFailure(
+          this.refreshFailureForResponse(response),
+        );
+        if (refreshDiagnostic === "oauth_refresh_failed") {
+          await response.body?.cancel().catch(() => {
+            /* noop */
+          });
+          if (options?.surfaceErrors) {
+            throw new McpDiscoveryRefreshError();
+          }
+          return emitDiscoveryTransientRefreshFailure(
+            safeHost(httpServer.upstreamUrl),
+          );
+        }
         const wwwAuth = response.headers.get("www-authenticate");
         await response.body?.cancel().catch(() => {
           /* noop */
@@ -2168,6 +2237,20 @@ export class McpProxy {
           workerToken,
         );
         if (retryResponse.status === 401) {
+          const refreshDiagnostic = diagnosticCodeForRefreshFailure(
+            this.refreshFailureForResponse(retryResponse),
+          );
+          if (refreshDiagnostic === "oauth_refresh_failed") {
+            await retryResponse.body?.cancel().catch(() => {
+              /* noop */
+            });
+            if (options?.surfaceErrors) {
+              throw new McpDiscoveryRefreshError();
+            }
+            return emitDiscoveryTransientRefreshFailure(
+              safeHost(httpServer.upstreamUrl),
+            );
+          }
           const wwwAuth = retryResponse.headers.get("www-authenticate");
           await retryResponse.body?.cancel().catch(() => {
             /* noop */

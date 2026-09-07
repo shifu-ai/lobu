@@ -984,6 +984,45 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
+  test('POST /mcp/tools/call classifies transient refresh failures without a connectUrl', async () => {
+    coreServicesStash.services = {
+      ...coreServicesStash.services,
+      getPublicGatewayUrl: () => 'https://gateway.example.test/lobu',
+    };
+    executeToolDirectMock.mockResolvedValueOnce({
+      content: [{ type: 'text', text: 'Tool call failed: HTTP 401' }],
+      isError: true,
+      diagnosticCode: 'oauth_refresh_failed',
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'google_workspace_drive_search',
+        args: { query: 'test', limit: 1 },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: false,
+      content: null,
+      errorCode: 'lobu_mcp_tool_error',
+      errorMessage: 'MCP tool execution failed',
+      diagnosticCode: 'oauth_refresh_failed',
+      classification: 'transient_error',
+    });
+  });
+
   test('POST /mcp/tools/call omits non-whitelisted diagnostic codes', async () => {
     executeToolDirectMock.mockResolvedValueOnce({
       content: [{ type: 'text', text: 'sensitive provider details' }],
@@ -2031,6 +2070,29 @@ describe('Toolbox MCP execution routes', () => {
       status: 'needs_reauth',
       toolsDiscovered: [],
       errorCode: 'upstream_unauthorized',
+    });
+  });
+
+  test('GET /mcp/connections/status maps transient refresh failures to degraded', async () => {
+    listToolsDirectMock.mockRejectedValueOnce(
+      Object.assign(new Error('MCP credential refresh is temporarily unavailable'), {
+        diagnosticCode: 'oauth_refresh_failed',
+      })
+    );
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request(
+      `/lobu/api/v1/mcp/connections/status?agentId=${AGENT_ID}&ownerUserId=${OWNER_USER_ID}&connectorKey=google_workspace&connectionRef=${CONNECTION_REF}`,
+      {
+        headers: { Authorization: 'Bearer admin-token' },
+      }
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'degraded',
+      toolsDiscovered: [],
+      errorCode: 'oauth_refresh_failed',
     });
   });
 

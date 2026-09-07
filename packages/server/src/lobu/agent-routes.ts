@@ -865,9 +865,14 @@ function isMcpForbiddenDiagnosticCode(value: unknown): value is 'upstream_forbid
   return value === 'upstream_forbidden';
 }
 
+function isMcpTransientDiagnosticCode(value: unknown): value is 'oauth_refresh_failed' {
+  return value === 'oauth_refresh_failed';
+}
+
 function classifyMcpToolFailure(diagnosticCode: string | undefined, errorMessage: string) {
   if (isMcpForbiddenDiagnosticCode(diagnosticCode)) return 'upstream_forbidden';
   if (isMcpReauthDiagnosticCode(diagnosticCode)) return 'needs_reauth';
+  if (isMcpTransientDiagnosticCode(diagnosticCode)) return 'transient_error';
   return classifyToolCallFailure({ errorMessage });
 }
 
@@ -983,7 +988,8 @@ function discoveryFailureFromStructuredResult(
       status: 'degraded',
       errorCode:
         diagnosticCode === 'auth_required_zero_tools' ||
-        isMcpForbiddenDiagnosticCode(diagnosticCode)
+        isMcpForbiddenDiagnosticCode(diagnosticCode) ||
+        isMcpTransientDiagnosticCode(diagnosticCode)
           ? diagnosticCode
           : 'lobu_mcp_tools_discovery_failed',
     };
@@ -1050,6 +1056,13 @@ async function discoverMcpToolNames(params: {
       return {
         ok: false,
         status: 'needs_reauth',
+        errorCode: diagnosticCode,
+      };
+    }
+    if (isMcpTransientDiagnosticCode(diagnosticCode)) {
+      return {
+        ok: false,
+        status: 'degraded',
         errorCode: diagnosticCode,
       };
     }

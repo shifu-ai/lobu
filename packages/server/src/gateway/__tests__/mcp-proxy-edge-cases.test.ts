@@ -2590,6 +2590,138 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     expect(text).not.toContain("Tool execution error");
   });
 
+  test("classifies a transient refresh failure as unavailable instead of reauth", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-refresh-transient/credential",
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-refresh-transient": {
+          id: "toolbox-refresh-transient",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore, grantStore: new GrantStore() },
+    );
+
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("upstream says token expired", { status: 401 });
+    };
+
+    const result = await executeDirectInTestOrg(
+      proxy,
+      "agent1",
+      "user1",
+      "toolbox-refresh-transient",
+      "meeting_search",
+      {},
+      { organizationId: "test-org" },
+    );
+    const text = result.content.map((part) => part.text).join(" ").toLowerCase();
+
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(text).not.toContain("reconnect");
+    expect(text).not.toContain("login");
+  });
+
+  test("surfaces transient tools/list refresh failure as degraded without reconnect guidance", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-discovery-refresh-transient/credential",
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-discovery-refresh-transient": {
+          id: "toolbox-discovery-refresh-transient",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore, grantStore: new GrantStore() },
+    );
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            result: { protocolVersion: "2025-03-26" },
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response("", { status: 202 });
+      }
+      return new Response("upstream says token expired", { status: 401 });
+    };
+
+    const result = await inTestOrg(() =>
+      proxy.fetchToolsForMcp(
+        "toolbox-discovery-refresh-transient",
+        "agent1",
+        { userId: "user1", channelId: "ch1" },
+      ),
+    );
+    const instructions = result.instructions?.toLowerCase() ?? "";
+
+    expect(result.tools).toEqual([]);
+    expect(result.status).toBe("degraded");
+    expect(result.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(instructions).not.toContain("reconnect");
+    expect(instructions).not.toContain("login");
+  });
+
   test("surfaces zero discovered tools for an auth-required MCP as degraded", async () => {
     const configSource = createConfigSource({
       "empty-oauth-mcp": {
