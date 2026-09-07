@@ -4023,6 +4023,16 @@ export class McpProxy {
     return `${agentId}:${userId}:${mcpId}`;
   }
 
+  private clearRecentRefreshFailure(
+    agentId: string,
+    userId: string,
+    mcpId: string,
+  ): void {
+    this.recentRefreshFailures.delete(
+      this.refreshFailureKey(agentId, userId, mcpId),
+    );
+  }
+
   /** Consume the recorded reason, if it is recent enough to belong to this attempt. */
   private takeRefreshFailure(
     agentId: string | undefined,
@@ -4150,7 +4160,10 @@ export class McpProxy {
     agentId: string,
     userId: string,
     mcpId: string,
-  ): Promise<string | null> {
+  ): Promise<{
+    accessToken: string | null;
+    failure?: CredentialRefreshFailure;
+  }> {
     const credential = await getStoredCredential(
       this.secretStore,
       agentId,
@@ -4159,17 +4172,21 @@ export class McpProxy {
     );
     if (!credential) {
       // No stored credential — check if there's a pending device-auth to complete
-      return tryCompletePendingDeviceAuth(
+      const token = await tryCompletePendingDeviceAuth(
         this.secretStore,
         agentId,
         userId,
         mcpId,
       );
+      if (token) this.clearRecentRefreshFailure(agentId, userId, mcpId);
+      return { accessToken: token };
     }
 
     // Check if token is still valid (5 minute buffer)
     if (credential.expiresAt > Date.now() + 5 * 60 * 1000) {
-      return credential.accessToken;
+      const token = credential.accessToken;
+      if (token) this.clearRecentRefreshFailure(agentId, userId, mcpId);
+      return { accessToken: token };
     }
 
     // Token expired or expiring soon — refresh
@@ -4186,7 +4203,9 @@ export class McpProxy {
         { failure, at: Date.now() },
       );
     }
-    return refreshed?.accessToken ?? null;
+    const token = refreshed?.accessToken ?? null;
+    if (token) this.clearRecentRefreshFailure(agentId, userId, mcpId);
+    return { accessToken: token, failure };
   }
 
   /**
@@ -4211,11 +4230,21 @@ export class McpProxy {
     // the worker JWT directly; forcing a second OAuth login would block
     // unattended watcher runs. Non-internal MCPs use per-user credentials.
     let credentialToken: string | undefined;
+    let credentialResolutionFailure: CredentialRefreshFailure | undefined;
     if (httpServer.internal) {
       credentialToken = directAuthToken;
     } else if (scopeKey) {
-      const token = await this.resolveCredentialToken(agentId, scopeKey, mcpId);
-      if (token) credentialToken = token;
+      const resolution = await this.resolveCredentialToken(
+        agentId,
+        scopeKey,
+        mcpId,
+      );
+      if (resolution.accessToken) credentialToken = resolution.accessToken;
+      credentialResolutionFailure =
+        resolution.failure ??
+        (!resolution.accessToken
+          ? this.takeRefreshFailure(agentId, scopeKey, mcpId)
+          : undefined);
     }
 
     const ssrfBlock = await this.ssrfBlockResponse(httpServer, mcpId, agentId);
@@ -4239,6 +4268,12 @@ export class McpProxy {
       body: body || undefined,
       signal: upstreamTimeoutSignal(method),
     });
+    if (credentialResolutionFailure) {
+      this.refreshFailuresByResponse.set(
+        response,
+        credentialResolutionFailure,
+      );
+    }
 
     if (response.status === 401 && scopeKey && !httpServer.internal) {
       await response.body?.cancel().catch(() => {
@@ -4283,6 +4318,7 @@ export class McpProxy {
       // instead so callers can act on the status.
       const refreshFailure =
         refreshResult.failure ??
+        credentialResolutionFailure ??
         this.takeRefreshFailure(agentId, scopeKey, mcpId);
 
       const failureResponse = new Response(
@@ -4358,7 +4394,11 @@ export class McpProxy {
         { failure, at: Date.now() },
       );
     }
-    return { accessToken: refreshed?.accessToken ?? null, failure };
+    const accessToken = refreshed?.accessToken ?? null;
+    if (accessToken) {
+      this.clearRecentRefreshFailure(agentId, scopeKey, mcpId);
+    }
+    return { accessToken, failure };
   }
 
   /**
@@ -4472,11 +4512,21 @@ export class McpProxy {
     // second OAuth login would block unattended watcher runs. Non-internal
     // MCPs use per-user credentials.
     let credentialToken: string | undefined;
+    let credentialResolutionFailure: CredentialRefreshFailure | undefined;
     if (httpServer.internal) {
       credentialToken = authContext?.workerToken;
     } else if (scopeKey) {
-      const token = await this.resolveCredentialToken(agentId, scopeKey, mcpId);
-      if (token) credentialToken = token;
+      const resolution = await this.resolveCredentialToken(
+        agentId,
+        scopeKey,
+        mcpId,
+      );
+      if (resolution.accessToken) credentialToken = resolution.accessToken;
+      credentialResolutionFailure =
+        resolution.failure ??
+        (!resolution.accessToken
+          ? this.takeRefreshFailure(agentId, scopeKey, mcpId)
+          : undefined);
     }
 
     const pause = this.serverHealth.getPause(healthKey);
@@ -4548,6 +4598,12 @@ export class McpProxy {
         body: bodyText || undefined,
         signal: upstreamTimeoutSignal(c.req.method),
       });
+      if (credentialResolutionFailure) {
+        this.refreshFailuresByResponse.set(
+          response,
+          credentialResolutionFailure,
+        );
+      }
     } catch (error) {
       this.recordServerFailure(
         healthKey,
@@ -4685,6 +4741,12 @@ export class McpProxy {
             // Retry path is POST-only (guarded above) — always bounded.
             signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS),
           });
+          if (credentialResolutionFailure) {
+            this.refreshFailuresByResponse.set(
+              response,
+              credentialResolutionFailure,
+            );
+          }
         } catch (error) {
           this.recordServerFailure(
             healthKey,
@@ -5100,7 +5162,7 @@ export class McpProxy {
       }
     };
 
-    return body.pipeThrough(
+    const transformedBody = body.pipeThrough(
       new TransformStream<Uint8Array, Uint8Array>({
         transform: async (chunk, controller) => {
           await emit(decoder.decode(chunk, { stream: true }), controller);
@@ -5112,6 +5174,26 @@ export class McpProxy {
         },
       }),
     );
+    const reader = transformedBody.getReader();
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            controller.close();
+          } else {
+            controller.enqueue(value);
+          }
+        } catch (error) {
+          if (!matchedTerminal) onEndWithoutMatchingTerminal();
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        if (!matchedTerminal) onEndWithoutMatchingTerminal();
+        await reader.cancel(reason);
+      },
+    });
   }
 
   private wrapStreamableResponseBody(

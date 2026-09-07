@@ -1145,7 +1145,7 @@ describe("durable observability for tools/list", () => {
 
 describe("durable observability for forwarded JSON-RPC tools/call", () => {
   async function requestForwardedToolCall(
-    upstreamToolCallResult: object | string,
+    upstreamToolCallResult: object | string | ReadableStream<Uint8Array>,
     responseContentType: string | null = "application/json",
   ): Promise<{ response: Response; obsBodies: any[] }> {
     enableObsEnv();
@@ -1183,11 +1183,13 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
         }
         if (body.method === "tools/call") {
           const responseBody =
-            typeof upstreamToolCallResult === "string"
+            upstreamToolCallResult instanceof ReadableStream
+              ? upstreamToolCallResult
+              : typeof upstreamToolCallResult === "string"
               ? upstreamToolCallResult
               : JSON.stringify(upstreamToolCallResult);
           return new Response(
-            responseContentType === null
+            responseContentType === null && typeof responseBody === "string"
               ? new TextEncoder().encode(responseBody)
               : responseBody,
             {
@@ -1783,6 +1785,46 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       }),
     });
     expect(completedEvents.some((event) => event.status === "ok")).toBe(false);
+  });
+
+  test("preserves an upstream SSE error and emits one unverified failed completion", async () => {
+    const streamError = new Error("upstream SSE failed");
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const { response, obsBodies } = await requestForwardedToolCall(
+      new ReadableStream<Uint8Array>({
+        start(streamController) {
+          controller = streamController;
+        },
+      }),
+      "text/event-stream",
+    );
+    const reader = response.body?.getReader();
+    const readPromise = reader?.read();
+
+    controller?.error(streamError);
+
+    await expect(readPromise).rejects.toBe(streamError);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expectSingleUnverifiedCompletion(obsBodies);
+  });
+
+  test("propagates downstream SSE cancellation and emits one unverified failed completion", async () => {
+    const cancelReason = new Error("client canceled SSE response");
+    let upstreamCancelReason: unknown;
+    const { response, obsBodies } = await requestForwardedToolCall(
+      new ReadableStream<Uint8Array>({
+        cancel(reason) {
+          upstreamCancelReason = reason;
+        },
+      }),
+      "text/event-stream",
+    );
+
+    await response.body?.cancel(cancelReason);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(upstreamCancelReason).toBe(cancelReason);
+    expectSingleUnverifiedCompletion(obsBodies);
   });
 
   test("emits failed needs_reauth telemetry only after matching SSE auth error", async () => {
@@ -2896,6 +2938,134 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     expect(upstreamAuthorizations).toEqual(
       upstreamAuthorizations.map(() => "Bearer fresh-access-token"),
     );
+  });
+
+  test("keeps a concurrent refresh failure on its request after a later credential succeeds", async () => {
+    const secretStore = new InMemoryWritableStore();
+    const mcpId = "toolbox-refresh-runtime-truth";
+    const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    const firstToolCallStarted = createSignal();
+    const releaseFirstToolCall = createSignal();
+    let toolCallCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+
+      toolCallCount += 1;
+      const callNumber = toolCallCount;
+      if (callNumber === 1) {
+        firstToolCallStarted.resolve();
+        await releaseFirstToolCall.promise;
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            content: [{ type: "text", text: `success-${callNumber}` }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const callRequest = {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: {} },
+      }),
+    };
+    const failedRefreshRequest = proxy.getApp().request(`/${mcpId}`, callRequest);
+    await firstToolCallStarted.promise;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        accessToken: "valid-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+
+    const successfulResponse = await proxy
+      .getApp()
+      .request(`/${mcpId}`, callRequest);
+    const successfulBody = await successfulResponse.json();
+    releaseFirstToolCall.resolve();
+    const failedResponse = await failedRefreshRequest;
+    const failedBody = await failedResponse.json();
+    const successfulText = successfulBody.result.content
+      .map((part: { text: string }) => part.text)
+      .join(" ")
+      .toLowerCase();
+
+    expect(successfulResponse.status).toBe(200);
+    expect(successfulBody.result.isError).toBe(false);
+    expect(successfulBody.result.diagnosticCode).toBeUndefined();
+    expect(successfulText).toContain("success-2");
+    expect(successfulText).not.toContain("oauth_refresh_failed");
+    expect(successfulText).not.toContain("reconnect");
+    expect(failedResponse.status).toBe(200);
+    expect(failedBody.result.isError).toBe(true);
+    expect(failedBody.result.diagnosticCode).toBe("oauth_refresh_failed");
   });
 
   test("classifies a 401 after refresh failure without consuming the response body error", async () => {
