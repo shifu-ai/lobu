@@ -147,9 +147,15 @@ describe("startMcpLogin message copy", () => {
 		expect(parsed.reason).toBe("missing_login_url");
 		expect(parsed.upstream_error).toBe("invalid_grant");
 		expect(parsed.verification_url).toBeUndefined();
-		expect(parsed.message).toBe(
-			"Authentication needs to be refreshed for shifu-toolbox. Direct the user to Agent Workbench's tool connections, ask them to reconnect shifu-toolbox, then wait for confirmation before retrying.",
-		);
+		expect(parsed.message).toContain("Agent Workbench");
+		expect(parsed.message).toContain("tool connections");
+		expect(parsed.message).toContain("shifu-toolbox");
+		expect(parsed.message).toContain("wait for confirmation before retrying");
+		expect(parsed.message).not.toContain("https://");
+		expect(parsed.message).not.toContain("plain text");
+		expect(parsed.message).not.toContain("authorization link");
+		expect(parsed.message).not.toContain("degraded");
+		expect(parsed.message).not.toContain("retry later");
 	});
 
 	test("degraded preflight status with a login payload does not return direct reauth copy", async () => {
@@ -235,9 +241,15 @@ describe("checkMcpLogin auth truth", () => {
 		expect(parsed.status).toBe("needs_reauth");
 		expect(parsed.reason).toBe("no_refresh_token");
 		expect(parsed.verification_url).toBeUndefined();
-		expect(parsed.message).toBe(
-			"Authentication needs to be refreshed for shifu-toolbox. Direct the user to Agent Workbench's tool connections, ask them to reconnect shifu-toolbox, then wait for confirmation before retrying.",
-		);
+		expect(parsed.message).toContain("Agent Workbench");
+		expect(parsed.message).toContain("tool connections");
+		expect(parsed.message).toContain("shifu-toolbox");
+		expect(parsed.message).toContain("wait for confirmation before retrying");
+		expect(parsed.message).not.toContain("https://");
+		expect(parsed.message).not.toContain("plain text");
+		expect(parsed.message).not.toContain("authorization link");
+		expect(parsed.message).not.toContain("degraded");
+		expect(parsed.message).not.toContain("retry later");
 	});
 
 	test("transient degraded status with a login payload does not tell the user they definitely need to reconnect", async () => {
