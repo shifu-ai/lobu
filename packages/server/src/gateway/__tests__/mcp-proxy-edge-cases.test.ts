@@ -973,6 +973,221 @@ describe("durable observability for tools/list", () => {
     });
   });
 
+  test("keeps concurrent discovery refresh telemetry request-local", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const secretStore = new InMemoryWritableStore();
+    const mcpId = "discovery-refresh-attribution";
+    const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://discovery.example.test/mcp",
+          oauth: { resource: "https://discovery.example.test/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    const noFailureUpstreamStarted = createSignal();
+    const releaseNoFailureUpstream = createSignal();
+    const localFailureUpstreamStarted = createSignal();
+    const releaseLocalFailureUpstream = createSignal();
+    let upstreamCalls = 0;
+
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+        if (url === "https://auth.example.com/oauth/token") {
+          return new Response(JSON.stringify({ error: "server_error" }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        upstreamCalls += 1;
+        if (upstreamCalls === 1) {
+          noFailureUpstreamStarted.resolve();
+          await releaseNoFailureUpstream.promise;
+        } else {
+          localFailureUpstreamStarted.resolve();
+          await releaseLocalFailureUpstream.promise;
+        }
+        return new Response("forbidden", { status: 403 });
+      },
+    ) as unknown as typeof fetch;
+
+    const noFailureTrace = {
+      traceId: "tr_discovery_no_failure_123",
+      journeyId: "discovery_test",
+      actor: "worker",
+      traceSource: "incoming" as const,
+    };
+    const localFailureTrace = {
+      traceId: "tr_discovery_local_failure_123",
+      journeyId: "discovery_test",
+      actor: "worker",
+      traceSource: "incoming" as const,
+    };
+    const noFailureRequest = inTestOrg(() =>
+      proxy.fetchToolsForMcp(
+        mcpId,
+        "agent1",
+        { userId: "user1", channelId: "ch1" },
+        undefined,
+        { trace: noFailureTrace },
+      ),
+    );
+    await noFailureUpstreamStarted.promise;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://discovery.example.test/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+
+    const localFailureRequest = inTestOrg(() =>
+      proxy.fetchToolsForMcp(
+        mcpId,
+        "agent1",
+        { userId: "user1", channelId: "ch1" },
+        undefined,
+        { trace: localFailureTrace },
+      ),
+    );
+    await localFailureUpstreamStarted.promise;
+    releaseNoFailureUpstream.resolve();
+    await noFailureRequest;
+    releaseLocalFailureUpstream.resolve();
+    await localFailureRequest;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const completionFor = (traceId: string) =>
+      obsBodies.find(
+        (body) =>
+          body.traceId === traceId &&
+          body.eventName === "mcp.tools_list.completed" &&
+          body.status === "failed",
+      );
+    const noFailureCompletion = completionFor(noFailureTrace.traceId);
+    const localFailureCompletion = completionFor(localFailureTrace.traceId);
+
+    expect(noFailureCompletion?.metadata.refresh_failure_reason).toBeUndefined();
+    expect(localFailureCompletion?.metadata).toMatchObject({
+      refresh_failure_reason: "upstream_error",
+      refresh_failure_permanent: false,
+      refresh_upstream_status: 503,
+    });
+  });
+
+  test("does not retain response-local refresh telemetry for a later discovery", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const secretStore = new InMemoryWritableStore();
+    const mcpId = "discovery-refresh-retention";
+    const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://discovery.example.test/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://discovery.example.test/mcp",
+          oauth: { resource: "https://discovery.example.test/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    let discoveryPhase = false;
+
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+        if (url === "https://auth.example.com/oauth/token") {
+          return new Response(JSON.stringify({ error: "server_error" }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(discoveryPhase ? "forbidden" : "unauthorized", {
+          status: discoveryPhase ? 403 : 401,
+        });
+      },
+    ) as unknown as typeof fetch;
+
+    const toolResult = await executeDirectInTestOrg(
+      proxy,
+      "agent1",
+      "user1",
+      mcpId,
+      "meeting_search",
+      {},
+      { organizationId: "test-org" },
+    );
+    expect(toolResult.diagnosticCode).toBe("oauth_refresh_failed");
+
+    await secretStore.delete(credentialName);
+    discoveryPhase = true;
+    const trace = {
+      traceId: "tr_discovery_after_tool_123",
+      journeyId: "discovery_test",
+      actor: "worker",
+      traceSource: "incoming" as const,
+    };
+    await inTestOrg(() =>
+      proxy.fetchToolsForMcp(
+        mcpId,
+        "agent1",
+        { userId: "user1", channelId: "ch1" },
+        undefined,
+        { trace },
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const completed = obsBodies.find(
+      (body) =>
+        body.traceId === trace.traceId &&
+        body.eventName === "mcp.tools_list.completed" &&
+        body.status === "failed",
+    );
+    expect(completed?.metadata.refresh_failure_reason).toBeUndefined();
+  });
+
   test("emits upstream host without port in auth failure metadata", async () => {
     enableObsEnv();
     const obsBodies: any[] = [];

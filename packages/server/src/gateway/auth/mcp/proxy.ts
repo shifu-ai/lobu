@@ -1853,6 +1853,16 @@ export class McpProxy {
     const listStartedAt = Date.now();
     const userId = tokenData?.userId;
     let toolsListObsCompleted = false;
+    let discoveryRefreshFailure: CredentialRefreshFailure | undefined;
+    const captureDiscoveryRefreshFailure = (
+      responseOrError: unknown,
+    ): CredentialRefreshFailure | undefined => {
+      const resolution = this.credentialResolutionFor(responseOrError);
+      if (resolution.completed) {
+        discoveryRefreshFailure = resolution.failure;
+      }
+      return resolution.failure;
+    };
     const emitToolsListCompleted = (
       status: "ok" | "failed",
       metadata: Record<string, unknown>,
@@ -1867,9 +1877,7 @@ export class McpProxy {
       // the token endpoint said — that is what separates a revoked grant from
       // a lost refresh race.
       const refreshFailure =
-        status === "failed"
-          ? this.takeRefreshFailure(agentId, userId, mcpId)
-          : undefined;
+        status === "failed" ? discoveryRefreshFailure : undefined;
       emitMcpObsEvent({
         trace,
         eventName: "mcp.tools_list.completed",
@@ -2176,13 +2184,15 @@ export class McpProxy {
           scopeKey,
           workerToken,
         );
+        const initRefreshFailure =
+          captureDiscoveryRefreshFailure(initResponse);
 
         // Tool discovery runs before the agent has a chance to call anything.
         // If the server demands OAuth, kick off the auth-code flow here so the
         // "Connect X" link reaches the user up-front.
         if (initResponse.status === 401) {
           const refreshDiagnostic = diagnosticCodeForRefreshFailure(
-            this.refreshFailureForResponse(initResponse),
+            initRefreshFailure,
           );
           if (refreshDiagnostic === "oauth_refresh_failed") {
             await initResponse.body?.cancel().catch(() => {
@@ -2243,14 +2253,16 @@ export class McpProxy {
         }
 
         // Step 2: Send initialized notification (required by MCP spec)
-        await this.sendInitializedNotification(
+        const initializedResponse = await this.sendInitializedNotification(
           httpServer,
           agentId,
           mcpId,
           scopeKey,
           workerToken,
         );
+        captureDiscoveryRefreshFailure(initializedResponse);
       } catch (initError) {
+        captureDiscoveryRefreshFailure(initError);
         if (
           options?.surfaceErrors &&
           initError instanceof McpDiscoveryAuthError
@@ -2281,10 +2293,12 @@ export class McpProxy {
         scopeKey,
         workerToken,
       );
+      const responseRefreshFailure =
+        captureDiscoveryRefreshFailure(response);
 
       if (response.status === 401) {
         const refreshDiagnostic = diagnosticCodeForRefreshFailure(
-          this.refreshFailureForResponse(response),
+          responseRefreshFailure,
         );
         if (refreshDiagnostic === "oauth_refresh_failed") {
           await response.body?.cancel().catch(() => {
@@ -2393,6 +2407,7 @@ export class McpProxy {
 
       return bindDiscoveryProvenance(serverInfo);
     } catch (error) {
+      captureDiscoveryRefreshFailure(error);
       logger.warn("Failed to fetch tools for MCP, retrying once", {
         mcpId,
         error: error instanceof Error ? error.message : String(error),
@@ -2417,9 +2432,11 @@ export class McpProxy {
           scopeKey,
           workerToken,
         );
+        const retryRefreshFailure =
+          captureDiscoveryRefreshFailure(retryResponse);
         if (retryResponse.status === 401) {
           const refreshDiagnostic = diagnosticCodeForRefreshFailure(
-            this.refreshFailureForResponse(retryResponse),
+            retryRefreshFailure,
           );
           if (refreshDiagnostic === "oauth_refresh_failed") {
             await retryResponse.body?.cancel().catch(() => {
@@ -2535,6 +2552,7 @@ export class McpProxy {
         });
         return bindDiscoveryProvenance(serverInfo);
       } catch (retryError) {
+        captureDiscoveryRefreshFailure(retryError);
         logger.error("Retry also failed for MCP tool fetch", {
           mcpId,
           error:
@@ -3014,12 +3032,7 @@ export class McpProxy {
         },
       });
 
-      const refreshFailure = this.refreshFailureForResponseOrRecent(
-        response,
-        agentId,
-        scopeKey,
-        mcpId,
-      );
+      const refreshFailure = this.refreshFailureForResponse(response);
       const refreshDiagnostic = diagnosticCodeForRefreshFailure(refreshFailure);
       if (
         refreshDiagnostic === "oauth_refresh_failed" &&
@@ -3998,58 +4011,12 @@ export class McpProxy {
     return headers;
   }
 
-  /**
-   * Most recent credential-refresh failure per (agent, user, mcp).
-   *
-   * `classifyMcpObsError` can only pattern-match the error string, so every
-   * 401 becomes `needs_reauth` whether the grant was revoked or we merely lost
-   * a refresh race. This carries the real reason across to the discovery event.
-   * Diagnostic only, best-effort: entries are consumed once and expire.
-   */
-  private readonly recentRefreshFailures = new Map<
-    string,
-    { failure: CredentialRefreshFailure; at: number }
-  >();
   private readonly refreshFailuresByResponse =
     new WeakMap<Response, CredentialRefreshFailure>();
   private readonly responsesWithCredentialResolution = new WeakSet<Response>();
-
-  private static readonly REFRESH_FAILURE_TTL_MS = 60_000;
-
-  private refreshFailureKey(
-    agentId: string,
-    userId: string,
-    mcpId: string,
-  ): string {
-    return `${agentId}:${userId}:${mcpId}`;
-  }
-
-  private clearRecentRefreshFailure(
-    agentId: string,
-    userId: string,
-    mcpId: string,
-  ): void {
-    this.recentRefreshFailures.delete(
-      this.refreshFailureKey(agentId, userId, mcpId),
-    );
-  }
-
-  /** Consume the recorded reason, if it is recent enough to belong to this attempt. */
-  private takeRefreshFailure(
-    agentId: string | undefined,
-    userId: string | undefined,
-    mcpId: string,
-  ): CredentialRefreshFailure | undefined {
-    if (!agentId || !userId) return undefined;
-    const key = this.refreshFailureKey(agentId, userId, mcpId);
-    const entry = this.recentRefreshFailures.get(key);
-    if (!entry) return undefined;
-    this.recentRefreshFailures.delete(key);
-    if (Date.now() - entry.at > McpProxy.REFRESH_FAILURE_TTL_MS) {
-      return undefined;
-    }
-    return entry.failure;
-  }
+  private readonly refreshFailuresByError =
+    new WeakMap<object, CredentialRefreshFailure>();
+  private readonly errorsWithCredentialResolution = new WeakSet<object>();
 
   /**
    * Describe a tool failure in terms the agent can act on.
@@ -4145,16 +4112,23 @@ export class McpProxy {
     return this.refreshFailuresByResponse.get(response);
   }
 
-  private refreshFailureForResponseOrRecent(
-    response: Response,
-    agentId: string,
-    userId: string | undefined,
-    mcpId: string,
-  ): CredentialRefreshFailure | undefined {
-    const responseFailure = this.refreshFailureForResponse(response);
-    if (responseFailure) return responseFailure;
-    if (this.responsesWithCredentialResolution.has(response)) return undefined;
-    return this.takeRefreshFailure(agentId, userId, mcpId);
+  private credentialResolutionFor(value: unknown): {
+    completed: boolean;
+    failure?: CredentialRefreshFailure;
+  } {
+    if (value instanceof Response) {
+      return {
+        completed: this.responsesWithCredentialResolution.has(value),
+        failure: this.refreshFailuresByResponse.get(value),
+      };
+    }
+    if (typeof value === "object" && value !== null) {
+      return {
+        completed: this.errorsWithCredentialResolution.has(value),
+        failure: this.refreshFailuresByError.get(value),
+      };
+    }
+    return { completed: false };
   }
 
   private attributeCredentialResolution(
@@ -4163,6 +4137,16 @@ export class McpProxy {
   ): void {
     this.responsesWithCredentialResolution.add(response);
     if (failure) this.refreshFailuresByResponse.set(response, failure);
+  }
+
+  private attributeCredentialResolutionError(
+    error: unknown,
+    failure?: CredentialRefreshFailure,
+  ): void {
+    if (typeof error === "object" && error !== null) {
+      this.errorsWithCredentialResolution.add(error);
+      if (failure) this.refreshFailuresByError.set(error, failure);
+    }
   }
 
   private async resolveCredentialToken(
@@ -4187,15 +4171,12 @@ export class McpProxy {
         userId,
         mcpId,
       );
-      if (token) this.clearRecentRefreshFailure(agentId, userId, mcpId);
       return { accessToken: token };
     }
 
     // Check if token is still valid (5 minute buffer)
     if (credential.expiresAt > Date.now() + 5 * 60 * 1000) {
-      const token = credential.accessToken;
-      if (token) this.clearRecentRefreshFailure(agentId, userId, mcpId);
-      return { accessToken: token };
+      return { accessToken: credential.accessToken };
     }
 
     // Token expired or expiring soon — refresh
@@ -4206,14 +4187,7 @@ export class McpProxy {
       mcpId,
       credential,
     );
-    if (failure) {
-      this.recentRefreshFailures.set(
-        this.refreshFailureKey(agentId, userId, mcpId),
-        { failure, at: Date.now() },
-      );
-    }
     const token = refreshed?.accessToken ?? null;
-    if (token) this.clearRecentRefreshFailure(agentId, userId, mcpId);
     return { accessToken: token, failure };
   }
 
@@ -4253,7 +4227,15 @@ export class McpProxy {
     }
 
     const ssrfBlock = await this.ssrfBlockResponse(httpServer, mcpId, agentId);
-    if (ssrfBlock) return ssrfBlock;
+    if (ssrfBlock) {
+      if (scopeKey && !httpServer.internal) {
+        this.attributeCredentialResolution(
+          ssrfBlock,
+          credentialResolutionFailure,
+        );
+      }
+      return ssrfBlock;
+    }
 
     const headers = this.buildUpstreamHeaders(
       sessionId,
@@ -4267,12 +4249,21 @@ export class McpProxy {
       }
     }
 
-    const response = await fetch(httpServer.upstreamUrl, {
-      method,
-      headers,
-      body: body || undefined,
-      signal: upstreamTimeoutSignal(method),
-    });
+    let response: Response;
+    try {
+      response = await fetch(httpServer.upstreamUrl, {
+        method,
+        headers,
+        body: body || undefined,
+        signal: upstreamTimeoutSignal(method),
+      });
+    } catch (error) {
+      this.attributeCredentialResolutionError(
+        error,
+        credentialResolutionFailure,
+      );
+      throw error;
+    }
     if (scopeKey && !httpServer.internal) {
       this.attributeCredentialResolution(response, credentialResolutionFailure);
     }
@@ -4299,12 +4290,18 @@ export class McpProxy {
           }
         }
 
-        const retryResponse = await fetch(httpServer.upstreamUrl, {
-          method,
-          headers: retryHeaders,
-          body: body || undefined,
-          signal: upstreamTimeoutSignal(method),
-        });
+        let retryResponse: Response;
+        try {
+          retryResponse = await fetch(httpServer.upstreamUrl, {
+            method,
+            headers: retryHeaders,
+            body: body || undefined,
+            signal: upstreamTimeoutSignal(method),
+          });
+        } catch (error) {
+          this.attributeCredentialResolutionError(error);
+          throw error;
+        }
         this.attributeCredentialResolution(retryResponse);
         const retrySessionId = retryResponse.headers.get("Mcp-Session-Id");
         if (retrySessionId) {
@@ -4387,16 +4384,7 @@ export class McpProxy {
       mcpId,
       credential,
     );
-    if (failure) {
-      this.recentRefreshFailures.set(
-        this.refreshFailureKey(agentId, scopeKey, mcpId),
-        { failure, at: Date.now() },
-      );
-    }
     const accessToken = refreshed?.accessToken ?? null;
-    if (accessToken) {
-      this.clearRecentRefreshFailure(agentId, scopeKey, mcpId);
-    }
     return { accessToken, failure };
   }
 
@@ -4618,12 +4606,7 @@ export class McpProxy {
       throw error;
     }
 
-    const refreshFailure = this.refreshFailureForResponseOrRecent(
-      response,
-      agentId,
-      scopeKey,
-      mcpId,
-    );
+    const refreshFailure = this.refreshFailureForResponse(response);
     const refreshDiagnostic = diagnosticCodeForRefreshFailure(refreshFailure);
     if (
       refreshDiagnostic === "oauth_refresh_failed" &&
@@ -5326,8 +5309,8 @@ export class McpProxy {
     mcpId: string,
     scopeKey?: string,
     directAuthToken?: string,
-  ): Promise<void> {
-    await this.sendUpstreamRequest(
+  ): Promise<Response> {
+    return this.sendUpstreamRequest(
       httpServer,
       agentId,
       mcpId,
@@ -5335,9 +5318,7 @@ export class McpProxy {
       INITIALIZED_NOTIFICATION_BODY,
       scopeKey,
       directAuthToken,
-    ).catch(() => {
-      /* noop */
-    });
+    );
   }
 
   /**
@@ -5369,7 +5350,9 @@ export class McpProxy {
       mcpId,
       scopeKey,
       directAuthToken,
-    );
+    ).catch(() => {
+      /* best effort */
+    });
 
     logger.info("Re-initialized MCP session", { mcpId, agentId });
   }
