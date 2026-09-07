@@ -4249,11 +4249,7 @@ export class McpProxy {
         mcpId,
       );
       if (resolution.accessToken) credentialToken = resolution.accessToken;
-      credentialResolutionFailure =
-        resolution.failure ??
-        (!resolution.accessToken
-          ? this.takeRefreshFailure(agentId, scopeKey, mcpId)
-          : undefined);
+      credentialResolutionFailure = resolution.failure;
     }
 
     const ssrfBlock = await this.ssrfBlockResponse(httpServer, mcpId, agentId);
@@ -4357,9 +4353,7 @@ export class McpProxy {
           headers: { "Content-Type": "application/json" },
         },
       );
-      if (refreshFailure) {
-        this.refreshFailuresByResponse.set(failureResponse, refreshFailure);
-      }
+      this.attributeCredentialResolution(failureResponse, refreshFailure);
       return failureResponse;
     }
 
@@ -4529,11 +4523,7 @@ export class McpProxy {
         mcpId,
       );
       if (resolution.accessToken) credentialToken = resolution.accessToken;
-      credentialResolutionFailure =
-        resolution.failure ??
-        (!resolution.accessToken
-          ? this.takeRefreshFailure(agentId, scopeKey, mcpId)
-          : undefined);
+      credentialResolutionFailure = resolution.failure;
     }
 
     const pause = this.serverHealth.getPause(healthKey);

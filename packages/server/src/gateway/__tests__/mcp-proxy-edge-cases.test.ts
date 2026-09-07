@@ -3187,6 +3187,132 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     expect(JSON.stringify(successfulBody)).not.toContain("oauth_refresh_failed");
   });
 
+  test("does not attribute a concurrent refresh failure to a request with no local failure", async () => {
+    const pendingLookupStarted = createSignal();
+    const releasePendingLookup = createSignal();
+    let delayNextPendingLookup = true;
+    class DelayedPendingLookupStore extends InMemoryWritableStore {
+      override async get(ref: SecretRef): Promise<string | null> {
+        const name = decodeURIComponent(ref.slice("secret://".length));
+        if (delayNextPendingLookup && name.endsWith("/device-auth")) {
+          delayNextPendingLookup = false;
+          pendingLookupStarted.resolve();
+          await releasePendingLookup.promise;
+        }
+        return super.get(ref);
+      }
+    }
+
+    const secretStore = new DelayedPendingLookupStore();
+    const mcpId = "toolbox-refresh-no-local-failure";
+    const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    let toolCallCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+
+      toolCallCount += 1;
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [{ type: "text", text: `success-${toolCallCount}` }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const callRequest = {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: {} },
+      }),
+    };
+    const noLocalFailureRequest = proxy
+      .getApp()
+      .request(`/${mcpId}`, callRequest);
+    await pendingLookupStarted.promise;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+
+    const failedResponse = await proxy.getApp().request(`/${mcpId}`, callRequest);
+    const failedBody = await failedResponse.json();
+    await secretStore.delete(credentialName);
+    releasePendingLookup.resolve();
+    const noLocalFailureResponse = await noLocalFailureRequest;
+    const noLocalFailureBody = await noLocalFailureResponse.json();
+
+    expect(failedBody.result.isError).toBe(true);
+    expect(failedBody.result.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(noLocalFailureResponse.status).toBe(200);
+    expect(noLocalFailureBody).toMatchObject({
+      jsonrpc: "2.0",
+      id: 3,
+      result: {
+        content: [{ type: "text", text: "success-2" }],
+        isError: false,
+      },
+    });
+    expect(JSON.stringify(noLocalFailureBody)).not.toContain(
+      "oauth_refresh_failed",
+    );
+  });
+
   test("classifies a 401 after refresh failure without consuming the response body error", async () => {
     const secretStore = new InMemoryWritableStore();
     await secretStore.put(
