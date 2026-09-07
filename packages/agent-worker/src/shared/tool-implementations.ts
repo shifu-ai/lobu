@@ -797,6 +797,63 @@ export async function requestHumanDecision(
 // MCP auth tools
 // ============================================================================
 
+type McpAuthStatusResponse = {
+  authenticated: boolean;
+  status?: "authenticated" | "not_authenticated" | "needs_reauth" | "degraded";
+  reason?: string;
+  upstreamError?: string;
+  login?: {
+    flow?: "auth_code" | "device_code";
+    userCode?: string;
+    verificationUri?: string;
+    verificationUriComplete?: string;
+    expiresIn?: number;
+  };
+};
+
+function mcpAuthLoginUrl(status: McpAuthStatusResponse | undefined): string {
+  return (
+    status?.login?.verificationUriComplete ||
+    status?.login?.verificationUri ||
+    ""
+  );
+}
+
+function mcpAuthUsable(status: McpAuthStatusResponse | undefined): boolean {
+  return (
+    status?.authenticated === true &&
+    (status.status === undefined || status.status === "authenticated")
+  );
+}
+
+function mcpAuthReauthResult(
+  mcpId: string,
+  status: McpAuthStatusResponse
+): TextResult | null {
+  if (status.status !== "needs_reauth" && status.status !== "degraded") {
+    return null;
+  }
+
+  const verificationUrl = mcpAuthLoginUrl(status);
+  return textResult(
+    JSON.stringify({
+      status: status.status,
+      mcp_id: mcpId,
+      authenticated: false,
+      reason: status.reason,
+      upstream_error: status.upstreamError,
+      flow: status.login?.flow,
+      verification_url: verificationUrl || undefined,
+      verification_uri: status.login?.verificationUri,
+      user_code: status.login?.userCode || "",
+      expires_in_seconds: status.login?.expiresIn,
+      message: verificationUrl
+        ? `Authentication needs to be refreshed for ${mcpId}. Send this authorization link to the user as a plain text message: ${verificationUrl}`
+        : `Authentication needs to be refreshed for ${mcpId}. Ask the user to reconnect it before retrying.`,
+    })
+  );
+}
+
 export async function startMcpLogin(
   gw: GatewayParams,
   args: { mcpId: string }
@@ -807,7 +864,7 @@ export async function startMcpLogin(
     const statusPath = `/internal/device-auth/status?mcpId=${encodeURIComponent(
       args.mcpId
     )}`;
-    const statusResult = await gatewayFetch<{ authenticated: boolean }>(
+    const statusResult = await gatewayFetch<McpAuthStatusResponse>(
       gw,
       statusPath,
       {},
@@ -815,7 +872,7 @@ export async function startMcpLogin(
     );
     if (statusResult.error) return statusResult.error;
 
-    if (statusResult.data?.authenticated) {
+    if (mcpAuthUsable(statusResult.data)) {
       return textResult(
         JSON.stringify({
           status: "already_authenticated",
@@ -824,6 +881,11 @@ export async function startMcpLogin(
         })
       );
     }
+
+    const reauthResult = statusResult.data
+      ? mcpAuthReauthResult(args.mcpId, statusResult.data)
+      : null;
+    if (reauthResult) return reauthResult;
 
     const startResult = await gatewayFetch<{
       flow?: "auth_code";
@@ -890,7 +952,7 @@ export async function checkMcpLogin(
     const statusPath = `/internal/device-auth/status?mcpId=${encodeURIComponent(
       args.mcpId
     )}`;
-    const statusResult = await gatewayFetch<{ authenticated: boolean }>(
+    const statusResult = await gatewayFetch<McpAuthStatusResponse>(
       gw,
       statusPath,
       {},
@@ -898,7 +960,7 @@ export async function checkMcpLogin(
     );
     if (statusResult.error) return statusResult.error;
 
-    if (statusResult.data?.authenticated) {
+    if (mcpAuthUsable(statusResult.data)) {
       const { invalidateSessionContextCache } = await import(
         "../openclaw/session-context"
       );
@@ -913,6 +975,11 @@ export async function checkMcpLogin(
         })
       );
     }
+
+    const reauthResult = statusResult.data
+      ? mcpAuthReauthResult(args.mcpId, statusResult.data)
+      : null;
+    if (reauthResult) return reauthResult;
 
     const pollResult = await gatewayFetch<{
       status: "pending" | "complete" | "error";

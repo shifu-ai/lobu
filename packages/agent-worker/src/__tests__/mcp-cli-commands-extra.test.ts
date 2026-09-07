@@ -208,6 +208,30 @@ describe("summariseAuthCheck edge cases", () => {
       authenticated: false,
     });
   });
+
+  test("preserves degraded direct login fields", () => {
+    const out = summariseAuthCheck(
+      {
+        status: "degraded",
+        authenticated: false,
+        message: "Connector auth is temporarily degraded.",
+        verification_url: "https://gateway.example.com/connect/direct",
+        user_code: "ABCD-1234",
+      },
+      "lobu",
+      "raw"
+    );
+
+    expect(JSON.parse(out)).toEqual({
+      status: "degraded",
+      mcp_id: "lobu",
+      authenticated: false,
+      message: "Connector auth is temporarily degraded.",
+      verification_url: "https://gateway.example.com/connect/direct",
+      verification_uri: "https://gateway.example.com/connect/direct",
+      user_code: "ABCD-1234",
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

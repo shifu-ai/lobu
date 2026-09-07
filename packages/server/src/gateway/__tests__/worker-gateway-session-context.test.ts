@@ -164,7 +164,7 @@ describe("WorkerGateway session context", () => {
 				return JSON.stringify({
 					accessToken: "access-token",
 					refreshToken: "refresh-token",
-					expiresAt: Date.now() + 60_000,
+					expiresAt: Date.now() + 10 * 60_000,
 					clientId: "client-id",
 					tokenUrl: "https://auth.example.test/token",
 				});
@@ -236,17 +236,135 @@ describe("WorkerGateway session context", () => {
 			}>;
 		};
 
-		expect(body.mcpStatus).toContainEqual({
+		expect(body.mcpStatus[0]).toMatchObject({
 			id: "shifu-toolbox",
 			name: "ShiFu Toolbox",
 			requiresAuth: true,
 			requiresInput: false,
 			authenticated: true,
+			authStatus: "authenticated",
 			configured: true,
 			upstreamOrigin: "https://mcp.shifu-ai.org",
 			configSource: "agent",
 			configDigest: "initial-agent-digest",
 		});
+	});
+
+	test("marks expired MCP credentials as unauthenticated in session context when refresh is permanently rejected", async () => {
+		class ExpiredCredentialStore implements WritableSecretStore {
+			async get(ref: SecretRef): Promise<string | null> {
+				if (orgContext.getStore()?.organizationId !== "org-a") return null;
+				if (
+					ref !==
+					("secret://mcp-auth%2Fagent-1%2Fuser-1%2Fshifu-toolbox%2Fcredential" as SecretRef)
+				) {
+					return null;
+				}
+				return JSON.stringify({
+					accessToken: "expired-access-token",
+					refreshToken: "revoked-refresh-token",
+					expiresAt: Date.now() - 60_000,
+					clientId: "client-id",
+					tokenUrl: "https://auth.example.test/token",
+					tokenEndpointAuthMethod: "none",
+				});
+			}
+			async put(): Promise<SecretRef> {
+				throw new Error("refresh should not store rejected credentials");
+			}
+			async delete(): Promise<void> {
+				throw new Error("not used");
+			}
+			async list(): Promise<SecretListEntry[]> {
+				return [];
+			}
+		}
+
+		const realFetch = globalThis.fetch;
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url === "https://auth.example.test/token") {
+				return Response.json(
+					{
+						error: "invalid_grant",
+						error_description: "Token has been expired or revoked.",
+					},
+					{ status: 400 },
+				);
+			}
+			throw new Error(`unexpected fetch ${url}`);
+		}) as unknown as typeof fetch;
+
+		try {
+			const gateway = new WorkerGateway(
+				{ send: async () => undefined } as any,
+				"https://gateway.example.com",
+				{
+					getWorkerConfig: async () => ({ mcpServers: {} }),
+				} as any,
+				{
+					getSessionContext: async () => ({
+						agentInstructions: "",
+						platformInstructions: "",
+						networkInstructions: "",
+						skillsInstructions: "",
+						mcpStatus: [
+							{
+								id: "shifu-toolbox",
+								name: "ShiFu Toolbox",
+								requiresAuth: true,
+								requiresInput: false,
+								upstreamOrigin: "https://mcp.shifu-ai.org",
+								configSource: "agent",
+								configDigest: "initial-agent-digest",
+							},
+						],
+					}),
+				} as any,
+				undefined,
+				undefined,
+				undefined,
+				new ExpiredCredentialStore(),
+				createFakeConnectionStore(),
+			);
+
+			const token = generateWorkerToken("user-1", "conv-1", "worker-a", {
+				channelId: "channel-1",
+				agentId: "agent-1",
+				organizationId: "org-a",
+			});
+
+			const response = await gateway.getApp().request("/session-context", {
+				headers: {
+					authorization: `Bearer ${token}`,
+					host: "gateway.example.com",
+				},
+			});
+
+			expect(response.status).toBe(200);
+
+			const body = (await response.json()) as {
+				mcpStatus: Array<{
+					id: string;
+					authenticated: boolean;
+					authStatus?: string;
+					authFailureReason?: string;
+					authRefreshStatus?: number;
+					authRefreshUpstreamError?: string;
+				}>;
+			};
+
+			expect(body.mcpStatus[0]).toMatchObject({
+				id: "shifu-toolbox",
+				authenticated: false,
+				authStatus: "needs_reauth",
+				authFailureReason: "upstream_rejected",
+				authRefreshStatus: 400,
+				authRefreshUpstreamError: "invalid_grant",
+			});
+		} finally {
+			globalThis.fetch = realFetch;
+		}
 	});
 
 	test("binds MCP status provenance to the config used for tool discovery", async () => {

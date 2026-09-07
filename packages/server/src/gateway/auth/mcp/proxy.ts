@@ -1,8 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  applyMcpToolFilter,
 	createLogger,
-	emitAgentObsEvent,
 	generateWorkerToken,
 	type GuardrailRegistry,
 	type McpToolFilter,
@@ -10,6 +8,8 @@ import {
 	verifyWorkerToken,
 } from "@lobu/core";
 import { isReservedAutomationToolName } from "../../../../../core/src/constants";
+import { emitAgentObsEvent } from "../../../../../core/src/observability/shifu-agent-obs.js";
+import { applyMcpToolFilter } from "../../../../../core/src/utils/mcp-tool-filter.js";
 import type { Context } from "hono";
 import { Hono } from "hono";
 
@@ -28,7 +28,6 @@ import {
   type CredentialRefreshFailure,
   getStableCredentialBindingId,
   getStoredCredential,
-  refreshCredential,
   refreshCredentialDetailed,
   startDeviceAuth,
   tryCompletePendingDeviceAuth,
@@ -1780,6 +1779,30 @@ export class McpProxy {
     const bindDiscoveryProvenance = (
       result: Omit<McpDiscoveryResult, "provenance">,
     ): McpDiscoveryResult => ({ ...result, provenance: discoveryProvenance });
+    const emitAuthRequiredZeroTools = (
+      hasInstructions: boolean,
+      metadata?: Record<string, unknown>,
+    ) => {
+      emitToolsListCompleted(
+        "failed",
+        {
+          cache_status: "miss",
+          tool_count: 0,
+          has_instructions: hasInstructions,
+          upstream_host: safeHost(httpServer.upstreamUrl),
+          diagnostic_code: "auth_required_zero_tools",
+          ...metadata,
+        },
+        new Error("Auth-required MCP discovered zero tools"),
+      );
+      return bindDiscoveryProvenance({
+        tools: [],
+        instructions:
+          `The "${mcpId}" connector is configured and auth-required, but tool discovery ` +
+          `returned zero tools. Treat this connector as degraded and likely requiring ` +
+          `reauthorization before telling the user the capability is unavailable.`,
+      });
+    };
     emitMcpObsEvent({
       trace,
       eventName: "mcp.server.discovered",
@@ -2050,6 +2073,13 @@ export class McpProxy {
       }
       const tools: McpTool[] = data?.result?.tools || [];
       const filteredTools = applyMcpToolFilter(tools, httpServer.toolFilter);
+      if (
+        filteredTools.length === 0 &&
+        !httpServer.internal &&
+        httpServer.oauth
+      ) {
+        return emitAuthRequiredZeroTools(Boolean(instructions));
+      }
       this.serverHealth.recordSuccess(healthKey);
 
       const serverInfo: CachedMcpServer = {
@@ -2168,6 +2198,13 @@ export class McpProxy {
           retryTools,
           httpServer.toolFilter,
         );
+        if (
+          filteredRetryTools.length === 0 &&
+          !httpServer.internal &&
+          httpServer.oauth
+        ) {
+          return emitAuthRequiredZeroTools(false, { retry_succeeded: true });
+        }
         this.serverHealth.recordSuccess(healthKey);
         const serverInfo: CachedMcpServer = {
           tools: filteredRetryTools,
@@ -3684,17 +3721,56 @@ export class McpProxy {
       organizationId: params.organizationId,
       logContext: "tools/call",
     });
+    const refreshDiagnostic =
+      this.refreshDiagnosticFromErrorMessage(errorMessage);
+    const diagnosticText = refreshDiagnostic
+      ? ` Refresh failure: ${refreshDiagnostic}.`
+      : "";
 
     // The link is best-effort (needs publicGatewayUrl + a signing key). Say the
     // authorization expired either way — "reconnect in the workbench" is still
     // actionable, and silence is what caused this to go unnoticed for weeks.
     const text = connectUrl
       ? `Authorization for the "${params.mcpId}" connector has expired, so this tool cannot run. ` +
-        `Tell the user to reconnect by opening this link, then wait for them to confirm before retrying: ${connectUrl}`
+        `Tell the user to reconnect by opening this link, then wait for them to confirm before retrying: ${connectUrl}${diagnosticText}`
       : `Authorization for the "${params.mcpId}" connector has expired, so this tool cannot run. ` +
-        `Tell the user to reconnect it at ${WORKBENCH_CONNECTIONS_HINT}, then wait for them to confirm before retrying.`;
+        `Tell the user to reconnect it at ${WORKBENCH_CONNECTIONS_HINT}, then wait for them to confirm before retrying.${diagnosticText}`;
 
     return { text, diagnosticCode: "needs_reauth" };
+  }
+
+  private refreshDiagnosticFromErrorMessage(message: string): string | null {
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      const start = message.indexOf("{");
+      if (start >= 0) {
+        const candidate = message.slice(start);
+        const value = JSON.parse(candidate);
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          parsed = value as Record<string, unknown>;
+        }
+      }
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) return null;
+
+    const parts = [
+      typeof parsed.refresh_failure_reason === "string"
+        ? parsed.refresh_failure_reason
+        : undefined,
+      typeof parsed.refresh_upstream_error === "string"
+        ? parsed.refresh_upstream_error
+        : undefined,
+      typeof parsed.refresh_upstream_status === "number"
+        ? `HTTP ${parsed.refresh_upstream_status}`
+        : undefined,
+      typeof parsed.refresh_failure_permanent === "boolean"
+        ? `permanent=${parsed.refresh_failure_permanent}`
+        : undefined,
+    ].filter((part): part is string => Boolean(part));
+
+    return parts.length > 0 ? parts.join(", ") : null;
   }
 
   private async resolveCredentialToken(
@@ -3795,16 +3871,16 @@ export class McpProxy {
       await response.body?.cancel().catch(() => {
         /* noop */
       });
-      const refreshedToken = await this.refreshCredentialToken(
+      const refreshResult = await this.refreshCredentialToken(
         agentId,
         scopeKey,
         mcpId,
       );
-      if (refreshedToken) {
+      if (refreshResult.accessToken) {
         const retryHeaders = this.buildUpstreamHeaders(
           sessionId,
           httpServer.headers,
-          refreshedToken,
+          refreshResult.accessToken,
           false,
         );
         if (extraHeaders) {
@@ -3832,11 +3908,33 @@ export class McpProxy {
       // catch-all then reports as `connector_unavailable`, destroying the fact
       // that this was an authorization failure. Return a fresh, readable 401
       // instead so callers can act on the status.
+      const refreshFailure =
+        refreshResult.failure ??
+        this.takeRefreshFailure(agentId, scopeKey, mcpId);
+
       return new Response(
         JSON.stringify({
           error: "unauthorized",
           error_description:
             "Upstream returned 401 and the stored credential could not be refreshed.",
+          ...(refreshFailure
+            ? {
+                refresh_failure_reason: refreshFailure.reason,
+                refresh_failure_permanent: refreshFailure.permanent,
+                ...(refreshFailure.status
+                  ? { refresh_upstream_status: refreshFailure.status }
+                  : {}),
+                ...(refreshFailure.upstreamError
+                  ? { refresh_upstream_error: refreshFailure.upstreamError }
+                  : {}),
+                ...(refreshFailure.upstreamErrorDescription
+                  ? {
+                      refresh_upstream_error_description:
+                        refreshFailure.upstreamErrorDescription,
+                    }
+                  : {}),
+              }
+            : {}),
         }),
         {
           status: 401,
@@ -3858,23 +3956,32 @@ export class McpProxy {
     agentId: string,
     scopeKey: string,
     mcpId: string,
-  ): Promise<string | null> {
+  ): Promise<{
+    accessToken: string | null;
+    failure?: CredentialRefreshFailure;
+  }> {
     const credential = await getStoredCredential(
       this.secretStore,
       agentId,
       scopeKey,
       mcpId,
     );
-    if (!credential) return null;
+    if (!credential) return { accessToken: null };
 
-    const refreshed = await refreshCredential(
+    const { credential: refreshed, failure } = await refreshCredentialDetailed(
       this.secretStore,
       agentId,
       scopeKey,
       mcpId,
       credential,
     );
-    return refreshed?.accessToken ?? null;
+    if (failure) {
+      this.recentRefreshFailures.set(
+        this.refreshFailureKey(agentId, scopeKey, mcpId),
+        { failure, at: Date.now() },
+      );
+    }
+    return { accessToken: refreshed?.accessToken ?? null, failure };
   }
 
   /**

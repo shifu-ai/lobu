@@ -2391,6 +2391,269 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     );
   });
 
+  test("does not send stale access token upstream after refresh lock contention", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-race/credential",
+      JSON.stringify({
+        accessToken: "stale-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+
+    const configSource = createConfigSource({
+      "toolbox-race": {
+        id: "toolbox-race",
+        upstreamUrl: "https://toolbox.example.com/mcp",
+        oauth: { resource: "https://toolbox.example.com/mcp" },
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore,
+      grantStore: new GrantStore(),
+    });
+
+    const upstreamAuthorizations: string[] = [];
+    let refreshCount = 0;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+
+      if (url === "https://auth.example.com/oauth/token") {
+        refreshCount++;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return new Response(
+          JSON.stringify({
+            access_token: "fresh-access-token",
+            refresh_token: "rotated-refresh-token",
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      upstreamAuthorizations.push(
+        String((init?.headers as Record<string, string>)?.Authorization || ""),
+      );
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { tools: [{ name: "meeting_search" }] },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const [first, second] = await Promise.all([
+      inTestOrg(() =>
+        proxy.fetchToolsForMcp(
+          "toolbox-race",
+          "agent1",
+          { userId: "user1", channelId: "ch1" },
+          agent1Token,
+          { surfaceErrors: true },
+        ),
+      ),
+      inTestOrg(() =>
+        proxy.fetchToolsForMcp(
+          "toolbox-race",
+          "agent1",
+          { userId: "user1", channelId: "ch1" },
+          agent1Token,
+          { surfaceErrors: true },
+        ),
+      ),
+    ]);
+
+    expect(refreshCount).toBe(1);
+    expect([...first.tools, ...second.tools].map((tool) => tool.name)).toEqual([
+      "meeting_search",
+      "meeting_search",
+    ]);
+    expect(upstreamAuthorizations).not.toContain("Bearer stale-access-token");
+    expect(upstreamAuthorizations.length).toBeGreaterThan(0);
+    expect(upstreamAuthorizations).toEqual(
+      upstreamAuthorizations.map(() => "Bearer fresh-access-token"),
+    );
+  });
+
+  test("classifies a 401 after refresh failure without consuming the response body error", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-expired/credential",
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "revoked-refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+
+    const configSource = createConfigSource({
+      "toolbox-expired": {
+        id: "toolbox-expired",
+        upstreamUrl: "https://toolbox.example.com/mcp",
+        oauth: { resource: "https://toolbox.example.com/mcp" },
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore,
+      grantStore: new GrantStore(),
+    });
+
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(
+          JSON.stringify({
+            error: "invalid_grant",
+            error_description: "Token has been expired or revoked.",
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("upstream says token expired", {
+        status: 401,
+        headers: { "Content-Type": "text/plain" },
+      });
+    };
+
+    const result = await executeDirectInTestOrg(
+      proxy,
+      "agent1",
+      "user1",
+      "toolbox-expired",
+      "meeting_search",
+      {},
+      { organizationId: "test-org" },
+    );
+    const text = result.content.map((part) => part.text).join(" ");
+
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("needs_reauth");
+    expect(text).toContain("toolbox-expired");
+    expect(text).toContain("reconnect");
+    expect(text).toContain("upstream_rejected");
+    expect(text).toContain("invalid_grant");
+    expect(text).toContain("400");
+    expect(text).not.toContain("Body is unusable");
+    expect(text).not.toContain("Tool execution error");
+  });
+
+  test("surfaces zero discovered tools for an auth-required MCP as degraded", async () => {
+    const configSource = createConfigSource({
+      "empty-oauth-mcp": {
+        id: "empty-oauth-mcp",
+        upstreamUrl: "https://empty.example.com/mcp",
+        oauth: { resource: "https://empty.example.com/mcp" },
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+      grantStore: new GrantStore(),
+    });
+
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { tools: [] },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+
+    const result = await inTestOrg(() =>
+      proxy.fetchToolsForMcp("empty-oauth-mcp", "agent1", {
+        userId: "user1",
+        channelId: "ch1",
+      }),
+    );
+
+    expect(result.tools).toEqual([]);
+    expect(result.instructions).toContain("empty-oauth-mcp");
+    expect(result.instructions?.toLowerCase()).toContain("degraded");
+    expect(result.instructions?.toLowerCase()).toContain("reauthorization");
+  });
+
+  test("surfaces zero discovered tools after retry success for an auth-required MCP as degraded", async () => {
+    const configSource = createConfigSource({
+      "empty-oauth-retry-mcp": {
+        id: "empty-oauth-retry-mcp",
+        upstreamUrl: "https://empty-retry.example.com/mcp",
+        oauth: { resource: "https://empty-retry.example.com/mcp" },
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+      grantStore: new GrantStore(),
+    });
+
+    let toolsListCalls = 0;
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { method?: string };
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { protocolVersion: "2025-03-26" },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response("", { status: 202 });
+      }
+
+      toolsListCalls++;
+      if (toolsListCalls === 1) {
+        return new Response("temporary failure", { status: 503 });
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { tools: [] },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const result = await inTestOrg(() =>
+      proxy.fetchToolsForMcp("empty-oauth-retry-mcp", "agent1", {
+        userId: "user1",
+        channelId: "ch1",
+      }),
+    );
+
+    expect(toolsListCalls).toBe(2);
+    expect(result.tools).toEqual([]);
+    expect(result.instructions).toContain("empty-oauth-retry-mcp");
+    expect(result.instructions?.toLowerCase()).toContain("degraded");
+    expect(result.instructions?.toLowerCase()).toContain("reauthorization");
+  });
+
   test("onToolBlocked receives correct agentId and tool metadata", async () => {
     const toolCache = new McpToolCache();
     const grantStore = new GrantStore();
