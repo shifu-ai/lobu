@@ -2018,7 +2018,7 @@ export class McpProxy {
         diagnosticCode,
         instructions:
           `The "${mcpId}" connector is configured for this user but its authorization is ` +
-          `currently ${diagnosticCode === "upstream_forbidden" ? "insufficient" : "expired"}, ` +
+          `currently expired, ` +
           `so none of its tools are available right now. This is NOT the same as the user ` +
           `not having the service — do not claim the capability is missing. If the user asks ` +
           `for something this connector would handle, tell them it needs reconnecting at ` +
