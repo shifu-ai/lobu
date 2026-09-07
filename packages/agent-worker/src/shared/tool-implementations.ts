@@ -839,7 +839,7 @@ function mcpAuthReauthResult(
   const message = exposeLogin && verificationUrl
     ? `Authentication needs to be refreshed for ${mcpId}. Send this authorization link to the user as a plain text message: ${verificationUrl}`
     : status.status === "needs_reauth"
-      ? `Authentication needs to be refreshed for ${mcpId}. Ask the user to reconnect it before retrying.`
+      ? `Authentication needs to be refreshed for ${mcpId}. Direct the user to Agent Workbench's tool connections, ask them to reconnect ${mcpId}, then wait for confirmation before retrying.`
       : `Authentication for ${mcpId} cannot be confirmed right now. Tell the user the connection is temporarily degraded and retry later.`;
   return textResult(
     JSON.stringify({

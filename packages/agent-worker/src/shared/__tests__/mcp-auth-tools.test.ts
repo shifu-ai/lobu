@@ -124,6 +124,34 @@ describe("startMcpLogin message copy", () => {
 		);
 	});
 
+	test("reauth status without a login link directs the user to Agent Workbench tool connections", async () => {
+		stubGateway(
+			{
+				userCode: "SHOULD-NOT-START",
+				verificationUri: "https://idp.example.com/device",
+				expiresIn: 600,
+			},
+			{
+				authenticated: false,
+				status: "needs_reauth",
+				reason: "missing_login_url",
+				upstreamError: "invalid_grant",
+			},
+		);
+
+		const parsed = parseResult(
+			await startMcpLogin(GW, { mcpId: "shifu-toolbox" }),
+		);
+
+		expect(parsed.status).toBe("needs_reauth");
+		expect(parsed.reason).toBe("missing_login_url");
+		expect(parsed.upstream_error).toBe("invalid_grant");
+		expect(parsed.verification_url).toBeUndefined();
+		expect(parsed.message).toBe(
+			"Authentication needs to be refreshed for shifu-toolbox. Direct the user to Agent Workbench's tool connections, ask them to reconnect shifu-toolbox, then wait for confirmation before retrying.",
+		);
+	});
+
 	test("degraded preflight status with a login payload does not return direct reauth copy", async () => {
 		stubGateway(
 			{
@@ -154,8 +182,10 @@ describe("startMcpLogin message copy", () => {
 		expect(parsed.authenticated).toBe(false);
 		expect(parsed.verification_url).toBeUndefined();
 		expect(parsed.message).toContain("cannot be confirmed right now");
+		expect(parsed.message).toContain("temporarily degraded");
 		expect(parsed.message).not.toContain("needs to be refreshed");
-		expect(parsed.message).not.toContain("reconnect it before retrying");
+		expect(parsed.message).not.toContain("reconnect");
+		expect(parsed.message).not.toContain("Agent Workbench");
 	});
 });
 
@@ -188,6 +218,28 @@ describe("checkMcpLogin auth truth", () => {
 		);
 	});
 
+	test("reauth status without a login link directs the user to Agent Workbench tool connections", async () => {
+		stubGateway(
+			{ status: "pending" },
+			{
+				authenticated: false,
+				status: "needs_reauth",
+				reason: "no_refresh_token",
+			},
+		);
+
+		const parsed = parseResult(
+			await checkMcpLogin(GW, { mcpId: "shifu-toolbox" }),
+		);
+
+		expect(parsed.status).toBe("needs_reauth");
+		expect(parsed.reason).toBe("no_refresh_token");
+		expect(parsed.verification_url).toBeUndefined();
+		expect(parsed.message).toBe(
+			"Authentication needs to be refreshed for shifu-toolbox. Direct the user to Agent Workbench's tool connections, ask them to reconnect shifu-toolbox, then wait for confirmation before retrying.",
+		);
+	});
+
 	test("transient degraded status with a login payload does not tell the user they definitely need to reconnect", async () => {
 		stubGateway(
 			{ status: "pending" },
@@ -213,7 +265,9 @@ describe("checkMcpLogin auth truth", () => {
 		expect(parsed.authenticated).toBe(false);
 		expect(parsed.verification_url).toBeUndefined();
 		expect(parsed.message).toContain("cannot be confirmed right now");
+		expect(parsed.message).toContain("temporarily degraded");
 		expect(parsed.message).not.toContain("needs to be refreshed");
-		expect(parsed.message).not.toContain("reconnect it before retrying");
+		expect(parsed.message).not.toContain("reconnect");
+		expect(parsed.message).not.toContain("Agent Workbench");
 	});
 });
