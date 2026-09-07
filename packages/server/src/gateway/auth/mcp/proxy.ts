@@ -572,6 +572,45 @@ class McpJsonRpcError extends Error {
   }
 }
 
+function jsonRpcErrorFromSseEvent(eventText: string): McpJsonRpcError | null {
+  const dataLines: string[] = [];
+  for (const line of eventText.split(/\r\n|\r|\n/)) {
+    if (line === "data") {
+      dataLines.push("");
+    } else if (line.startsWith("data:")) {
+      const value = line.slice(5);
+      dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
+    }
+  }
+  if (dataLines.length === 0) return null;
+
+  try {
+    const data = JSON.parse(dataLines.join("\n")) as JsonRpcResponse;
+    if (!data?.error) return null;
+    const message =
+      data.error.message ||
+      (typeof data.error === "string" ? data.error : "Upstream error");
+    return new McpJsonRpcError(data.error.code, message);
+  } catch {
+    return null;
+  }
+}
+
+function completeSseEventEnd(text: string): number {
+  let consecutiveLineEndings = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character !== "\r" && character !== "\n") {
+      consecutiveLineEndings = 0;
+      continue;
+    }
+    if (character === "\r" && text[index + 1] === "\n") index += 1;
+    consecutiveLineEndings += 1;
+    if (consecutiveLineEndings === 2) return index + 1;
+  }
+  return -1;
+}
+
 class McpDiscoveryAuthError extends Error {
   constructor(
     public readonly diagnosticCode:
@@ -658,10 +697,7 @@ async function inspectForwardedToolCallResponseForObs(
   response: Response,
 ): Promise<ForwardedToolCallObsInspection | null> {
   const contentType = response.headers.get("content-type") || "";
-  if (
-    !contentType.includes("application/json") &&
-    !contentType.includes("text/event-stream")
-  ) {
+  if (!contentType.includes("application/json")) {
     return null;
   }
 
@@ -4555,16 +4591,12 @@ export class McpProxy {
       });
     }
 
-    const responseHeaders = new Headers();
+    const responseHeaders = new Headers(response.headers);
     const contentType = response.headers.get("content-type");
-    if (contentType) {
-      responseHeaders.set("Content-Type", contentType);
-    }
-    if (newSessionId) {
-      responseHeaders.set("Mcp-Session-Id", newSessionId);
-    }
+    const isEventStream = contentType?.includes("text/event-stream") ?? false;
 
-    const shouldInspectForwardedToolCallResponse = forwardedToolName;
+    const shouldInspectForwardedToolCallResponse =
+      forwardedToolName && contentType?.includes("application/json");
     const forwardedToolCallInspection = shouldInspectForwardedToolCallResponse
       ? await inspectForwardedToolCallResponseForObs(response.clone())
       : null;
@@ -4579,42 +4611,15 @@ export class McpProxy {
         forwardedToolCallInspection.resultOrError.message,
       )
     ) {
-      const payload = await this.handleUpstream401({
+      const result = await this.buildForwardedReauthResult({
         mcpId,
         agentId,
-        userId: authContext.userId,
         scopeKey: scopeKey ?? authContext.userId,
         httpServer,
+        authContext,
         wwwAuthenticate: response.headers.get("www-authenticate"),
-        platform: authContext.platform ?? "",
-        channelId: authContext.channelId,
-        conversationId: authContext.conversationId,
-        teamId: authContext.teamId,
-        connectionId: authContext.connectionId,
-        deviceAuthFallback: false,
+        organizationId: getOrgId(),
       });
-      const connectUrl = payload
-        ? undefined
-        : buildMcpConnectUrl({
-            publicGatewayUrl: this.publicGatewayUrl,
-            agentId,
-            mcpId,
-            userId: authContext.userId,
-            organizationId: getOrgId(),
-            logContext: "streamable tools/call",
-          });
-      const finalPayload = payload ?? {
-        status: "login_required" as const,
-        ...(connectUrl ? { url: connectUrl } : {}),
-        message: connectUrl
-          ? `Authentication is required for ${mcpId}. STOP calling tools and show the user this login link. Do NOT retry this tool call — wait for the user to complete login first.`
-          : `Authentication is required for ${mcpId}. Tell the user to reconnect it at ${WORKBENCH_CONNECTIONS_HINT} before retrying.`,
-      };
-      const result = {
-        content: [{ type: "text", text: JSON.stringify(finalPayload) }],
-        isError: true,
-        diagnosticCode: "needs_reauth",
-      };
       await response.body?.cancel().catch(() => {
         /* noop */
       });
@@ -4632,15 +4637,36 @@ export class McpProxy {
         id: forwardedToolCall?.id ?? null,
         result,
       });
-      const replacementBody = contentType?.includes("text/event-stream")
-        ? `event: message\ndata: ${replacement}\n\n`
-        : replacement;
-      return new Response(replacementBody, {
+      responseHeaders.delete("content-length");
+      return new Response(replacement, {
         status: 200,
         headers: responseHeaders,
       });
     }
-    const body = this.wrapStreamableResponseBody(response.body, mcpId, agentId);
+
+    let body = response.body;
+    if (isEventStream && response.ok && authContext && forwardedToolCall) {
+      const organizationId = getOrgId();
+      const wwwAuthenticate = response.headers.get("www-authenticate");
+      body = this.wrapSseReauthResponseBody(
+        body,
+        forwardedToolCall.id,
+        () =>
+          orgContext.run({ organizationId }, () =>
+            this.buildForwardedReauthResult({
+              mcpId,
+              agentId,
+              scopeKey: scopeKey ?? authContext.userId,
+              httpServer,
+              authContext,
+              wwwAuthenticate,
+              organizationId,
+            }),
+          ),
+      );
+      responseHeaders.delete("content-length");
+    }
+    body = this.wrapStreamableResponseBody(body, mcpId, agentId);
     emitForwardedToolCallCompleted(
       forwardedToolCallInspection?.status ?? (response.ok ? "ok" : "failed"),
       forwardedToolCallInspection
@@ -4663,6 +4689,141 @@ export class McpProxy {
       status: response.status,
       headers: responseHeaders,
     });
+  }
+
+  private async buildForwardedReauthResult(params: {
+    mcpId: string;
+    agentId: string;
+    scopeKey: string;
+    httpServer: HttpMcpServerConfig;
+    authContext: {
+      userId: string;
+      platform?: string;
+      channelId: string;
+      conversationId: string;
+      teamId?: string;
+      connectionId?: string;
+    };
+    wwwAuthenticate: string | null;
+    organizationId: string;
+  }) {
+    const payload = await this.handleUpstream401({
+      mcpId: params.mcpId,
+      agentId: params.agentId,
+      userId: params.authContext.userId,
+      scopeKey: params.scopeKey,
+      httpServer: params.httpServer,
+      wwwAuthenticate: params.wwwAuthenticate,
+      platform: params.authContext.platform ?? "",
+      channelId: params.authContext.channelId,
+      conversationId: params.authContext.conversationId,
+      teamId: params.authContext.teamId,
+      connectionId: params.authContext.connectionId,
+      deviceAuthFallback: false,
+    });
+    const connectUrl = payload
+      ? undefined
+      : buildMcpConnectUrl({
+          publicGatewayUrl: this.publicGatewayUrl,
+          agentId: params.agentId,
+          mcpId: params.mcpId,
+          userId: params.authContext.userId,
+          organizationId: params.organizationId,
+          logContext: "streamable tools/call",
+        });
+    const finalPayload = payload ?? {
+      status: "login_required" as const,
+      ...(connectUrl ? { url: connectUrl } : {}),
+      message: connectUrl
+        ? `Authentication is required for ${params.mcpId}. STOP calling tools and show the user this login link. Do NOT retry this tool call — wait for the user to complete login first.`
+        : `Authentication is required for ${params.mcpId}. Tell the user to reconnect it at ${WORKBENCH_CONNECTIONS_HINT} before retrying.`,
+    };
+    return {
+      content: [{ type: "text", text: JSON.stringify(finalPayload) }],
+      isError: true,
+      diagnosticCode: "needs_reauth",
+    };
+  }
+
+  private wrapSseReauthResponseBody(
+    body: ReadableStream<Uint8Array> | null,
+    requestId: unknown,
+    buildResult: () => Promise<{
+      content: { type: string; text: string }[];
+      isError: boolean;
+      diagnosticCode: string;
+    }>,
+  ): ReadableStream<Uint8Array> | null {
+    if (!body) return body;
+
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    let buffer = "";
+    let inspecting = true;
+
+    const emit = async (
+      text: string,
+      controller: TransformStreamDefaultController<Uint8Array>,
+    ) => {
+      if (!text) return;
+      if (!inspecting) {
+        controller.enqueue(encoder.encode(text));
+        return;
+      }
+
+      buffer += text;
+      while (true) {
+        const eventEnd = completeSseEventEnd(buffer);
+        if (eventEnd < 0) break;
+        const eventText = buffer.slice(0, eventEnd);
+        if (encoder.encode(eventText).byteLength > OBS_RESPONSE_INSPECT_MAX_BYTES) {
+          inspecting = false;
+          controller.enqueue(encoder.encode(buffer));
+          buffer = "";
+          return;
+        }
+        buffer = buffer.slice(eventEnd);
+
+        const error = jsonRpcErrorFromSseEvent(eventText);
+        if (
+          error &&
+          this.authDiagnosticCodeFromMessage(error.message) ===
+            "upstream_unauthorized" &&
+          isMessageOnlyReauthSignal(error.message)
+        ) {
+          const result = await buildResult();
+          controller.enqueue(
+            encoder.encode(
+              `event: message\ndata: ${JSON.stringify({
+                jsonrpc: "2.0",
+                id: requestId ?? null,
+                result,
+              })}\n\n`,
+            ),
+          );
+        } else {
+          controller.enqueue(encoder.encode(eventText));
+        }
+      }
+
+      if (encoder.encode(buffer).byteLength > OBS_RESPONSE_INSPECT_MAX_BYTES) {
+        inspecting = false;
+        controller.enqueue(encoder.encode(buffer));
+        buffer = "";
+      }
+    };
+
+    return body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform: async (chunk, controller) => {
+          await emit(decoder.decode(chunk, { stream: true }), controller);
+        },
+        flush: async (controller) => {
+          await emit(decoder.decode(), controller);
+          if (buffer) controller.enqueue(encoder.encode(buffer));
+        },
+      }),
+    );
   }
 
   private wrapStreamableResponseBody(

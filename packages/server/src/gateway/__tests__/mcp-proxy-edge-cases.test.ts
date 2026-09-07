@@ -1449,21 +1449,34 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       }),
     });
 
-    const response = await requestPromise;
+    let responseTimer: ReturnType<typeof setTimeout> | undefined;
+    const responseOutcome = await Promise.race([
+      requestPromise.then((response) => ({ kind: "response" as const, response })),
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        responseTimer = setTimeout(() => resolve({ kind: "timeout" }), 200);
+      }),
+    ]);
+    if (responseTimer) clearTimeout(responseTimer);
+    if (responseOutcome.kind === "timeout") {
+      controller?.close();
+      await requestPromise;
+    }
+    expect(responseOutcome.kind).toBe("response");
+    if (responseOutcome.kind !== "response") return;
+
+    const response = responseOutcome.response;
     expect(response.status).toBe(200);
-    controller?.enqueue(
-      new TextEncoder().encode(
-        `data: ${JSON.stringify({
-          jsonrpc: "2.0",
-          id: 7,
-          result: {
-            content: [{ type: "text", text: "eventual" }],
-            isError: false,
-          },
-        })}\n\n`,
-      ),
-    );
+    const event = `data: ${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 7,
+      result: {
+        content: [{ type: "text", text: "eventual" }],
+        isError: false,
+      },
+    })}\n\n`;
+    controller?.enqueue(new TextEncoder().encode(event));
     controller?.close();
+    expect(await response.text()).toBe(event);
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     const completedEvents = obsBodies.filter(
@@ -2912,7 +2925,10 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
         "",
       ].join("\n");
       return new Response(sseBody, {
-        headers: { "Content-Type": "text/event-stream" },
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Mcp-Session-Id": "upstream-sse-session-123",
+        },
       });
     };
 
@@ -2945,6 +2961,9 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(response.headers.get("Mcp-Session-Id")).toBe(
+      "upstream-sse-session-123",
+    );
     expect(body).toMatchObject({
       jsonrpc: "2.0",
       id: 2,
@@ -2958,6 +2977,137 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
       ),
       message: expect.stringContaining("show the user this login link"),
     });
+  });
+
+  test("streamable SSE emits reauthorization before the upstream stream closes", async () => {
+    const mcpId = "toolbox-stream-sse-open-unauthorized";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      {
+        secretStore: new InMemoryWritableStore(),
+        publicGatewayUrl: "https://gateway.example.com",
+      },
+    );
+    let upstreamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      if (request.method === "tools/call") {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            upstreamController = controller;
+            controller.enqueue(
+              new TextEncoder().encode(
+                `event: message\ndata: ${JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: request.id,
+                  error: {
+                    code: -32001,
+                    message: "Unauthorized: token expired",
+                  },
+                })}\n\n`,
+              ),
+            );
+          },
+        });
+        return new Response(stream, {
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      return new Response("{}", {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const requestPromise = proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    let responseTimer: ReturnType<typeof setTimeout> | undefined;
+    const responseOutcome = await Promise.race([
+      requestPromise.then((response) => ({ kind: "response" as const, response })),
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        responseTimer = setTimeout(() => resolve({ kind: "timeout" }), 200);
+      }),
+    ]);
+    if (responseTimer) clearTimeout(responseTimer);
+    if (responseOutcome.kind === "timeout") {
+      upstreamController?.close();
+      await requestPromise;
+    }
+    expect(responseOutcome.kind).toBe("response");
+    if (responseOutcome.kind !== "response") return;
+
+    const reader = responseOutcome.response.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) return;
+    let readTimer: ReturnType<typeof setTimeout> | undefined;
+    const readOutcome = await Promise.race([
+      reader.read().then((result) => ({ kind: "chunk" as const, result })),
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        readTimer = setTimeout(() => resolve({ kind: "timeout" }), 200);
+      }),
+    ]);
+    if (readTimer) clearTimeout(readTimer);
+    if (readOutcome.kind === "timeout") {
+      upstreamController?.close();
+      await reader.cancel();
+    }
+    expect(readOutcome.kind).toBe("chunk");
+    if (readOutcome.kind !== "chunk") return;
+
+    const eventText = new TextDecoder().decode(readOutcome.result.value);
+    const dataLine = eventText
+      .split(/\r?\n/)
+      .find((line) => line.startsWith("data:"));
+    const body = JSON.parse(dataLine?.slice(5).trimStart() ?? "{}") as {
+      result?: {
+        diagnosticCode?: string;
+        content?: { text: string }[];
+      };
+    };
+    expect(body.result?.diagnosticCode).toBe("needs_reauth");
+    expect(
+      JSON.parse(body.result?.content?.[0]?.text ?? "{}"),
+    ).toMatchObject({
+      status: "login_required",
+      url: expect.stringContaining(
+        "https://gateway.example.com/mcp/oauth/start?token=",
+      ),
+    });
+
+    upstreamController?.close();
+    await reader.cancel();
   });
 
   test("worker tool calls preserve upstream JSON-RPC forbidden responses", async () => {
