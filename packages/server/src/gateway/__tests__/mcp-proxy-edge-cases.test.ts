@@ -1146,6 +1146,7 @@ describe("durable observability for tools/list", () => {
 describe("durable observability for forwarded JSON-RPC tools/call", () => {
   async function requestForwardedToolCall(
     upstreamToolCallResult: object | string,
+    responseContentType: string | null = "application/json",
   ): Promise<{ response: Response; obsBodies: any[] }> {
     enableObsEnv();
     const obsBodies: any[] = [];
@@ -1181,13 +1182,20 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
           );
         }
         if (body.method === "tools/call") {
-          return new Response(
+          const responseBody =
             typeof upstreamToolCallResult === "string"
               ? upstreamToolCallResult
-              : JSON.stringify(upstreamToolCallResult),
+              : JSON.stringify(upstreamToolCallResult);
+          return new Response(
+            responseContentType === null
+              ? new TextEncoder().encode(responseBody)
+              : responseBody,
             {
               status: 200,
-              headers: { "Content-Type": "application/json" },
+              headers:
+                responseContentType === null
+                  ? undefined
+                  : { "Content-Type": responseContentType },
             },
           );
         }
@@ -1258,6 +1266,28 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toBe(malformedResponse);
     expectSingleUnverifiedCompletion(obsBodies);
+  });
+
+  test("passes through unsupported non-SSE responses with one unverified failed completion", async () => {
+    const upstreamBody = "upstream plaintext response";
+    const cases = [
+      { contentType: "text/plain", expectedContentType: "text/plain" },
+      { contentType: null, expectedContentType: null },
+    ];
+
+    for (const testCase of cases) {
+      const { response, obsBodies } = await requestForwardedToolCall(
+        upstreamBody,
+        testCase.contentType,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe(
+        testCase.expectedContentType,
+      );
+      expect(await response.text()).toBe(upstreamBody);
+      expectSingleUnverifiedCompletion(obsBodies);
+    }
   });
 
   test("passes through missing-id JSON bodies and notifications with one unverified failed completion", async () => {

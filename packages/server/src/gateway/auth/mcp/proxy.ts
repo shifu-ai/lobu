@@ -4859,9 +4859,9 @@ export class McpProxy {
     body = this.wrapStreamableResponseBody(body, mcpId, agentId);
     if (!isEventStream && forwardedToolName) {
       const completion =
-        shouldInspectForwardedToolCallResponse &&
-        !forwardedToolCallInspection &&
-        response.ok
+        response.ok &&
+        (!shouldInspectForwardedToolCallResponse ||
+          !forwardedToolCallInspection)
           ? unavailableForwardedToolCallObsInspection(response.status, false)
           : forwardedToolCallInspection;
       emitForwardedToolCallCompleted(
