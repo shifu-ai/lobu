@@ -357,6 +357,57 @@ describe("device-auth status runtime auth truth", () => {
     user = `user-${userSeq}`;
   });
 
+  test("transient refresh failure reports degraded without a login payload", async () => {
+    await storeCredentialForScope(
+      secretStore,
+      AGENT,
+      user,
+      MCP,
+      staleCredential({ expiresAt: Date.now() - 60_000 }),
+    );
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ error: "server_error" }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      });
+
+    const routes = createDeviceAuthRoutes({
+      secretStore,
+      publicGatewayUrl: "https://gateway.example.com",
+      mcpConfigService: {
+        getHttpServer: async () => ({
+          id: MCP,
+          upstreamUrl: "https://mcp.example.com/mcp",
+        }),
+        getAllHttpServers: async () => new Map(),
+      },
+    });
+    const workerToken = await import("@lobu/core").then(
+      ({ generateWorkerToken }) =>
+        generateWorkerToken(user, "conv-1", "test-deployment", {
+          agentId: AGENT,
+          channelId: "channel-1",
+          organizationId: "org-1",
+        }),
+    );
+
+    const response = await routes.request(
+      `/internal/device-auth/status?mcpId=${encodeURIComponent(MCP)}`,
+      { headers: { Authorization: `Bearer ${workerToken}` } },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      authenticated: false,
+      status: "degraded",
+      reason: "upstream_error",
+      refreshStatus: 503,
+    });
+    expect(body).not.toHaveProperty("login");
+    expect(body).not.toHaveProperty("connectUrl");
+  });
+
   test("expired stored credential with invalid_grant refresh reports reauth needed, not authenticated", async () => {
     await storeCredentialForScope(
       secretStore,

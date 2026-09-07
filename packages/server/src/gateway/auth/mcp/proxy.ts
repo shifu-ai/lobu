@@ -283,7 +283,10 @@ function mcpObsErrorSignal(error: unknown): string {
 function classifyMcpObsError(error: unknown): string {
   const signal = mcpObsErrorSignal(error);
   const diagnosticCode = signal.toLowerCase().replace(/[-\s]+/g, "_");
-  if (/401|403|unauthorized|forbidden|oauth|token/i.test(signal)) {
+  if (/403|forbidden/i.test(signal)) {
+    return "upstream_forbidden";
+  }
+  if (/401|unauthorized|oauth|token/i.test(signal)) {
     return "needs_reauth";
   }
   if (

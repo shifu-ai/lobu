@@ -1125,14 +1125,17 @@ export function createDeviceAuthRoutes(
       return c.json({ authenticated: true, status: "authenticated" });
     }
 
-    const connectUrl = buildMcpConnectUrl({
-      publicGatewayUrl: config.publicGatewayUrl,
-      agentId,
-      mcpId,
-      userId,
-      organizationId: worker.organizationId,
-      logContext: "device-auth/status",
-    });
+    const connectUrl =
+      authState.status === "needs_reauth"
+        ? buildMcpConnectUrl({
+            publicGatewayUrl: config.publicGatewayUrl,
+            agentId,
+            mcpId,
+            userId,
+            organizationId: worker.organizationId,
+            logContext: "device-auth/status",
+          })
+        : undefined;
     const login = connectUrl
       ? {
           flow: "auth_code" as const,

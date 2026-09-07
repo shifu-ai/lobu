@@ -953,14 +953,35 @@ describe("durable observability for tools/list", () => {
   });
 
   test.each([
-    { status: 401, phase: "initialize", diagnostic: "upstream_unauthorized" },
-    { status: 403, phase: "initialize", diagnostic: "upstream_forbidden" },
-    { status: 401, phase: "tools/list", diagnostic: "upstream_unauthorized" },
-    { status: 403, phase: "tools/list", diagnostic: "upstream_forbidden" },
+    {
+      status: 401,
+      phase: "initialize",
+      diagnostic: "upstream_unauthorized",
+      errorClass: "needs_reauth",
+    },
+    {
+      status: 403,
+      phase: "initialize",
+      diagnostic: "upstream_forbidden",
+      errorClass: "upstream_forbidden",
+    },
+    {
+      status: 401,
+      phase: "tools/list",
+      diagnostic: "upstream_unauthorized",
+      errorClass: "needs_reauth",
+    },
+    {
+      status: 403,
+      phase: "tools/list",
+      diagnostic: "upstream_forbidden",
+      errorClass: "upstream_forbidden",
+    },
   ])("emits a failed completed event for $phase HTTP $status auth early return", async ({
     status,
     phase,
     diagnostic,
+    errorClass,
   }) => {
     enableObsEnv();
     const obsBodies: any[] = [];
@@ -1042,7 +1063,7 @@ describe("durable observability for tools/list", () => {
       metadata: expect.objectContaining({
         module: "mcp-proxy",
         mcp_id: "auth-mcp",
-        error_class: "needs_reauth",
+        error_class: errorClass,
         diagnostic_code: diagnostic,
         next_debug_hint: expect.stringContaining("MCP"),
       }),
