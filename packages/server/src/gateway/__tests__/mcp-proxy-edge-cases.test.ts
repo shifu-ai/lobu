@@ -3926,6 +3926,153 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     },
   );
 
+  test.each(["transient", "permanent"] as const)(
+    "REST stale-session retry keeps its %s refresh failure authoritative",
+    async (failure) => {
+      const secretStore = new InMemoryWritableStore();
+      const mcpId = `rest-stale-retry-refresh-${failure}`;
+      const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+      const credential = {
+        accessToken: "initial-valid-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      };
+      await secretStore.put(credentialName, JSON.stringify(credential));
+      const proxy = new McpProxy(
+        createConfigSource({
+          [mcpId]: {
+            id: mcpId,
+            upstreamUrl: "https://toolbox.example.com/mcp",
+            oauth: { resource: "https://toolbox.example.com/mcp" },
+          },
+        }),
+        {
+          secretStore,
+          grantStore: new OrgAwareGrantStore(),
+          publicGatewayUrl: "https://gateway.example.com",
+        },
+      );
+      let upstreamToolCalls = 0;
+      let staleToolCallReturned = false;
+
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://auth.example.com/oauth/token") {
+          return failure === "permanent"
+            ? new Response(
+                JSON.stringify({
+                  error: "invalid_grant",
+                  error_description: "Refresh token was revoked.",
+                }),
+                {
+                  status: 400,
+                  headers: { "Content-Type": "application/json" },
+                },
+              )
+            : new Response(JSON.stringify({ error: "server_error" }), {
+                status: 503,
+                headers: { "Content-Type": "application/json" },
+              });
+        }
+
+        const request = JSON.parse(String(init?.body ?? "{}")) as {
+          id?: number;
+          method?: string;
+        };
+        if (request.method === "tools/call") {
+          upstreamToolCalls += 1;
+          staleToolCallReturned = true;
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: request.id,
+              error: { code: -32000, message: "Session not found" },
+            }),
+            {
+              status: 404,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+        if (request.method === "tools/list") {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: {
+                tools: [
+                  {
+                    name: "meeting_search",
+                    inputSchema: { type: "object" },
+                    annotations: { readOnlyHint: true },
+                  },
+                ],
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (request.method === "initialize") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (request.method === "notifications/initialized") {
+          if (staleToolCallReturned) {
+            await secretStore.put(
+              credentialName,
+              JSON.stringify({ ...credential, expiresAt: Date.now() - 60_000 }),
+            );
+          }
+          return new Response(null, { status: 202 });
+        }
+        return new Response("forbidden", { status: 403 });
+      };
+
+      const response = await proxy.getApp().request(
+        `/${mcpId}/tools/meeting_search`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${agent1Token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ query: "course" }),
+        },
+      );
+      const result = await response.json();
+      const text = result.content
+        .map((part: { text: string }) => part.text)
+        .join(" ");
+
+      expect(response.status).toBe(200);
+      expect(upstreamToolCalls).toBe(1);
+      expect(result.isError).toBe(true);
+      expect(result.diagnosticCode).toBe(
+        failure === "permanent" ? "needs_reauth" : "oauth_refresh_failed",
+      );
+      if (failure === "permanent") {
+        expect(text).toContain(
+          "https://gateway.example.com/mcp/oauth/start?token=",
+        );
+        expect(text).toContain("invalid_grant");
+      } else {
+        expect(text.toLowerCase()).not.toContain("reconnect");
+        expect(text.toLowerCase()).not.toContain("login");
+      }
+    },
+  );
+
   test("REST tool calls keep transient refresh truth ahead of HTTP 403", async () => {
     const secretStore = new InMemoryWritableStore();
     await secretStore.put(

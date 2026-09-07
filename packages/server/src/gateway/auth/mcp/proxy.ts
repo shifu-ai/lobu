@@ -3098,7 +3098,6 @@ export class McpProxy {
         );
         return c.json(result, 200);
       }
-      const refreshDiagnostic = diagnosticCodeForRefreshFailure(refreshFailure);
 
       // Detect HTTP 401 + WWW-Authenticate → start MCP OAuth 2.1 auth-code flow.
       // This path runs before JSON-RPC parsing because most compliant MCP
@@ -3130,7 +3129,7 @@ export class McpProxy {
             },
           ],
           isError: true,
-          diagnosticCode: refreshDiagnostic ?? "needs_reauth",
+          diagnosticCode: "needs_reauth",
         };
         emitToolCallCompleted(
           "failed",
@@ -3151,7 +3150,7 @@ export class McpProxy {
               },
             ],
             isError: true,
-            diagnosticCode: refreshDiagnostic ?? "needs_reauth",
+            diagnosticCode: "needs_reauth",
           },
           200,
         );
@@ -3225,6 +3224,26 @@ export class McpProxy {
             retry: true,
           },
         });
+        const retryRefreshFailure =
+          this.refreshFailureForResponse(response);
+        if (retryRefreshFailure) {
+          const result = this.credentialRefreshFailureResult({
+            failure: retryRefreshFailure,
+            agentId,
+            userId: requesterUserId,
+            mcpId,
+            organizationId: auth.tokenData.organizationId,
+          });
+          emitToolCallCompleted(
+            "failed",
+            {
+              http_status: response.status,
+              result_preview: resultPreviewFromValue(result),
+            },
+            new McpHttpStatusError(response.status, result.content[0].text),
+          );
+          return c.json(result, 200);
+        }
         data =
           response.ok || response.status === 404
             ? ((await parseJsonRpcResponse(response)) as JsonRpcResponse)
