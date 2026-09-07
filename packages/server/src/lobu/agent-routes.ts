@@ -492,6 +492,7 @@ type ToolboxMcpToolsDiscovery =
         | 'lobu_mcp_unavailable'
         | 'lobu_mcp_tools_discovery_failed'
         | 'auth_required_zero_tools'
+        | 'oauth_refresh_failed'
         | 'upstream_unauthorized'
         | 'upstream_forbidden';
     };
