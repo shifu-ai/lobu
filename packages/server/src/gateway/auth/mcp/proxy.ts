@@ -243,6 +243,11 @@ const HOP_BY_HOP_RESPONSE_HEADERS = [
   "upgrade",
 ] as const;
 
+const UPSTREAM_CREDENTIAL_RESPONSE_HEADERS = [
+  "set-cookie",
+  "set-cookie2",
+] as const;
+
 function proxyResponseHeaders(upstreamHeaders: Headers): Headers {
   const headers = new Headers(upstreamHeaders);
   const connectionHeaders = headers
@@ -252,12 +257,21 @@ function proxyResponseHeaders(upstreamHeaders: Headers): Headers {
     .filter(Boolean);
   for (const name of connectionHeaders ?? []) headers.delete(name);
   for (const name of HOP_BY_HOP_RESPONSE_HEADERS) headers.delete(name);
+  for (const name of UPSTREAM_CREDENTIAL_RESPONSE_HEADERS) headers.delete(name);
   return headers;
 }
 
 function stripTransformedRepresentationHeaders(headers: Headers): void {
-  headers.delete("content-length");
-  headers.delete("content-encoding");
+  for (const name of [
+    "content-length",
+    "content-encoding",
+    "etag",
+    "content-digest",
+    "digest",
+    "content-md5",
+  ]) {
+    headers.delete(name);
+  }
 }
 
 function safeObjectKeys(value: unknown): string[] {

@@ -1484,6 +1484,12 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
         Vary: "Accept-Encoding, Origin",
         "Retry-After": "12",
         "X-Upstream-Request-Id": "vendor-request-123",
+        "Set-Cookie": "upstream_session=secret; HttpOnly; Secure",
+        "Set-Cookie2": "upstream_legacy=secret; Version=1",
+        ETag: '"unchanged-json"',
+        "Content-Digest": "sha-256=:dGVzdA==:",
+        Digest: "sha-256=dGVzdA==",
+        "Content-MD5": "dGVzdA==",
         Connection: "keep-alive",
         "Keep-Alive": "timeout=5",
       },
@@ -1499,6 +1505,12 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
     expect(response.headers.get("x-upstream-request-id")).toBe(
       "vendor-request-123",
     );
+    expect(response.headers.get("set-cookie")).toBeNull();
+    expect(response.headers.get("set-cookie2")).toBeNull();
+    expect(response.headers.get("etag")).toBe('"unchanged-json"');
+    expect(response.headers.get("content-digest")).toBe("sha-256=:dGVzdA==:");
+    expect(response.headers.get("digest")).toBe("sha-256=dGVzdA==");
+    expect(response.headers.get("content-md5")).toBe("dGVzdA==");
     expect(response.headers.get("connection")).toBeNull();
     expect(response.headers.get("keep-alive")).toBeNull();
     expect(await response.json()).toEqual(upstreamResponse);
@@ -4456,6 +4468,14 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
           headers: {
             "Content-Type": "application/json",
             "Mcp-Session-Id": "upstream-session-123",
+            "Cache-Control": "private, no-store",
+            "X-Upstream-Request-Id": "vendor-json-request-123",
+            "Set-Cookie": "upstream_session=secret; HttpOnly; Secure",
+            "Set-Cookie2": "upstream_legacy=secret; Version=1",
+            ETag: '"upstream-json"',
+            "Content-Digest": "sha-256=:dGVzdA==:",
+            Digest: "sha-256=dGVzdA==",
+            "Content-MD5": "dGVzdA==",
           },
         },
       );
@@ -4488,6 +4508,20 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     expect(response.headers.get("Mcp-Session-Id")).toBe(
       "upstream-session-123",
     );
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("x-upstream-request-id")).toBe(
+      "vendor-json-request-123",
+    );
+    for (const header of [
+      "set-cookie",
+      "set-cookie2",
+      "etag",
+      "content-digest",
+      "digest",
+      "content-md5",
+    ]) {
+      expect(response.headers.get(header)).toBeNull();
+    }
     expect(body).toMatchObject({
       jsonrpc: "2.0",
       id: 1,
@@ -4576,6 +4610,12 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
           Vary: "Accept-Encoding, Origin",
           "Retry-After": "7",
           "X-Upstream-Request-Id": "vendor-sse-request-123",
+          "Set-Cookie": "upstream_session=secret; HttpOnly; Secure",
+          "Set-Cookie2": "upstream_legacy=secret; Version=1",
+          ETag: '"upstream-sse"',
+          "Content-Digest": "sha-256=:dGVzdA==:",
+          Digest: "sha-256=dGVzdA==",
+          "Content-MD5": "dGVzdA==",
         },
       });
     };
@@ -4634,6 +4674,12 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     for (const header of [
       "content-encoding",
       "content-length",
+      "set-cookie",
+      "set-cookie2",
+      "etag",
+      "content-digest",
+      "digest",
+      "content-md5",
       "transfer-encoding",
       "connection",
       "keep-alive",
