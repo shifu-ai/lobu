@@ -594,6 +594,12 @@ function diagnosticCodeForHttpStatus(status: number): string {
   return "connector_unavailable";
 }
 
+function isMessageOnlyReauthSignal(message: string): boolean {
+  return /\b(unauthori[sz]ed|unauthenticated|invalid_grant|reauth(?:enticate|entication)?|authentication required|authorization required|tokens?\s+(?:expired|revoked)|expired\s+(?:token|authorization|credential|grant))\b/i.test(
+    message,
+  );
+}
+
 function safeMcpToolDiagnosticCode(value: unknown): string | undefined {
   return typeof value === "string" && SAFE_MCP_TOOL_DIAGNOSTIC_CODES.has(value)
     ? value
@@ -3729,14 +3735,25 @@ export class McpProxy {
     refreshFailure?: CredentialRefreshFailure;
   }): { text: string; diagnosticCode: string } | null {
     if (params.refreshFailure && !params.refreshFailure.permanent) return null;
-    if (!params.refreshFailure && params.httpStatus !== 401) return null;
 
     const errorMessage =
       params.error instanceof Error
         ? params.error.message
         : String(params.error ?? "");
+    const messageOnlyReauth =
+      !params.refreshFailure &&
+      (params.httpStatus === undefined ||
+        (params.httpStatus >= 200 && params.httpStatus < 300)) &&
+      isMessageOnlyReauthSignal(errorMessage);
+    if (
+      !params.refreshFailure &&
+      params.httpStatus !== 401 &&
+      !messageOnlyReauth
+    ) {
+      return null;
+    }
     const classification = classifyToolCallFailure({
-      httpStatus: params.httpStatus,
+      httpStatus: messageOnlyReauth ? undefined : params.httpStatus,
       errorMessage,
     });
     if (classification !== "needs_reauth") return null;

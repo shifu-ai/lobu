@@ -164,6 +164,34 @@ describe("tool call surfaces an expired authorization", () => {
     expect(text.toLowerCase()).not.toContain("reconnect");
   });
 
+  test("reports needs_reauth on a JSON-RPC unauthorized token-expired error over HTTP 200", async () => {
+    const proxy = makeProxy();
+    globalThis.fetch = upstream(
+      () =>
+        new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            error: { code: -32001, message: "Unauthorized: token expired" },
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+    );
+
+    const result = (await runTool(proxy)) as {
+      isError: boolean;
+      diagnosticCode?: string;
+      content: { text: string }[];
+    };
+
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("needs_reauth");
+    const text = result.content.map((c) => c.text).join(" ");
+    expect(text).toContain("google_workspace");
+    expect(text.toLowerCase()).toContain("expired");
+    expect(text.toLowerCase()).toContain("reconnect");
+  });
+
   test("a JSON-RPC error no longer returns empty content", async () => {
     const proxy = makeProxy();
     globalThis.fetch = upstream(

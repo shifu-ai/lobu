@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
+	__resetEncryptionKeyCacheForTests,
 	encrypt,
 	type AgentConnectionStore,
 	type ReleaseCapabilityState,
@@ -65,15 +66,15 @@ function createFakeConnectionStore(): AgentConnectionStore {
 	};
 }
 
-const TEST_ENCRYPTION_KEY = Buffer.from(
-	"12345678901234567890123456789012",
-).toString("base64");
+const TEST_ENCRYPTION_KEY =
+	"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 describe("WorkerGateway session context", () => {
 	const previousEncryptionKey = process.env.ENCRYPTION_KEY;
 
 	beforeEach(() => {
 		process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
+		__resetEncryptionKeyCacheForTests();
 		fakeConnections.clear();
 	});
 
@@ -83,6 +84,7 @@ describe("WorkerGateway session context", () => {
 		} else {
 			process.env.ENCRYPTION_KEY = previousEncryptionKey;
 		}
+		__resetEncryptionKeyCacheForTests();
 		mock.restore();
 	});
 

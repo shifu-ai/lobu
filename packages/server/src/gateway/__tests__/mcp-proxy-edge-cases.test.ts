@@ -3424,6 +3424,42 @@ describe("executeToolDirect", () => {
     expect(result.content[0].text).not.toContain("reconnect");
   });
 
+  test("executeToolDirect returns needs_reauth for HTTP 200 Unauthorized JSON-RPC auth errors", async () => {
+    const configSource = createConfigSource({
+      "jsonrpc-auth-mcp": {
+        id: "jsonrpc-auth-mcp",
+        upstreamUrl: "http://jsonrpc-auth.example.com/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
+
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32001, message: "Unauthorized: token expired" },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+
+    const result = await executeDirectInTestOrg(
+      proxy,
+      "agent1",
+      "user1",
+      "jsonrpc-auth-mcp",
+      "any_tool",
+      {},
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("needs_reauth");
+    expect(result.content[0].text).toContain("jsonrpc-auth-mcp");
+    expect(result.content[0].text.toLowerCase()).toContain("reconnect");
+  });
+
   test("executeToolDirect preserves safe JSON-RPC result diagnostic code", async () => {
     const configSource = createConfigSource({
       "scoped-mcp": {

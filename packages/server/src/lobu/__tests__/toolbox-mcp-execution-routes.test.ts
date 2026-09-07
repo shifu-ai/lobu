@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { generateWorkerToken } from '@lobu/core';
+import { __resetEncryptionKeyCacheForTests, generateWorkerToken } from '@lobu/core';
 import { Type } from '@sinclair/typebox';
 import { Hono } from 'hono';
 
@@ -10,6 +10,7 @@ import { Hono } from 'hono';
 process.env.ENCRYPTION_KEY =
   process.env.ENCRYPTION_KEY ??
   '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+__resetEncryptionKeyCacheForTests();
 
 import { verifyConnectLinkToken } from '../../gateway/auth/mcp/connect-link-token';
 import { McpProxy } from '../../gateway/auth/mcp/proxy';
@@ -1539,6 +1540,7 @@ describe('Toolbox MCP execution routes', () => {
     process.env.ENCRYPTION_KEY =
       priorEncryptionKey ??
       '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    __resetEncryptionKeyCacheForTests();
     authStash.rejectMcpAuth = true;
     try {
       const workerToken = generateWorkerToken('toolbox-user', 'conversation-1', 'api-agent', {
@@ -1572,6 +1574,7 @@ describe('Toolbox MCP execution routes', () => {
       } else {
         process.env.ENCRYPTION_KEY = priorEncryptionKey;
       }
+      __resetEncryptionKeyCacheForTests();
     }
   });
 
