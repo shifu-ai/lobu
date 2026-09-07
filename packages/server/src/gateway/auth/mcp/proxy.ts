@@ -785,6 +785,27 @@ type ForwardedToolCallObsInspection = {
   resultOrError?: unknown;
 };
 
+function unavailableForwardedToolCallObsInspection(
+  httpStatus: number,
+  streamedResponse: boolean,
+): ForwardedToolCallObsInspection {
+  return {
+    status: "failed",
+    metadata: {
+      inspection_status: "unavailable",
+      result_preview: {
+        inspection_unavailable: true,
+        matching_terminal: false,
+        streamed_response: streamedResponse,
+        http_status: httpStatus,
+      },
+    },
+    resultOrError: new Error(
+      "MCP tool response ended without an inspectable matching JSON-RPC terminal",
+    ),
+  };
+}
+
 function inspectJsonRpcTerminalForObs(
   data: JsonRpcResponse,
 ): ForwardedToolCallObsInspection {
@@ -3000,7 +3021,10 @@ export class McpProxy {
         mcpId,
       );
       const refreshDiagnostic = diagnosticCodeForRefreshFailure(refreshFailure);
-      if (refreshDiagnostic === "oauth_refresh_failed") {
+      if (
+        refreshDiagnostic === "oauth_refresh_failed" &&
+        response.status !== 403
+      ) {
         const result = {
           content: [
             { type: "text", text: transientRefreshFailureMessage(mcpId) },
@@ -4553,7 +4577,10 @@ export class McpProxy {
       mcpId,
     );
     const refreshDiagnostic = diagnosticCodeForRefreshFailure(refreshFailure);
-    if (refreshDiagnostic === "oauth_refresh_failed") {
+    if (
+      refreshDiagnostic === "oauth_refresh_failed" &&
+      response.status !== 403
+    ) {
       const result = {
         content: [
           { type: "text", text: transientRefreshFailureMessage(mcpId) },
@@ -4812,21 +4839,38 @@ export class McpProxy {
             },
             inspection.resultOrError,
           ),
+        () => {
+          const inspection = unavailableForwardedToolCallObsInspection(
+            response.status,
+            true,
+          );
+          emitForwardedToolCallCompleted(
+            inspection.status,
+            {
+              http_status: response.status,
+              ...inspection.metadata,
+            },
+            inspection.resultOrError,
+          );
+        },
       );
       responseHeaders.delete("content-length");
     }
     body = this.wrapStreamableResponseBody(body, mcpId, agentId);
-    if (
-      !isEventStream &&
-      (!shouldInspectForwardedToolCallResponse || forwardedToolCallInspection)
-    ) {
+    if (!isEventStream && forwardedToolName) {
+      const completion =
+        shouldInspectForwardedToolCallResponse &&
+        !forwardedToolCallInspection &&
+        response.ok
+          ? unavailableForwardedToolCallObsInspection(response.status, false)
+          : forwardedToolCallInspection;
       emitForwardedToolCallCompleted(
-        forwardedToolCallInspection?.status ?? (response.ok ? "ok" : "failed"),
-        forwardedToolCallInspection
+        completion?.status ?? (response.ok ? "ok" : "failed"),
+        completion
           ? {
               http_status: response.status,
-              ...forwardedToolCallInspection.metadata,
-              ...(forwardedToolCallInspection.status === "ok"
+              ...completion.metadata,
+              ...(completion.status === "ok"
                 ? {
                     result_preview: {
                       streamed_response: true,
@@ -4842,7 +4886,7 @@ export class McpProxy {
                 http_status: response.status,
               },
             },
-        forwardedToolCallInspection?.resultOrError ??
+        completion?.resultOrError ??
           (response.ok ? undefined : new McpHttpStatusError(response.status)),
       );
     }
@@ -4918,8 +4962,12 @@ export class McpProxy {
         }>)
       | undefined,
     onMatchingTerminal: (inspection: ForwardedToolCallObsInspection) => void,
+    onEndWithoutMatchingTerminal: () => void,
   ): ReadableStream<Uint8Array> | null {
-    if (!body) return body;
+    if (!body) {
+      onEndWithoutMatchingTerminal();
+      return body;
+    }
 
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
@@ -5060,6 +5108,7 @@ export class McpProxy {
         flush: async (controller) => {
           await emit(decoder.decode(), controller);
           if (buffer) controller.enqueue(encoder.encode(buffer));
+          if (!matchedTerminal) onEndWithoutMatchingTerminal();
         },
       }),
     );

@@ -1145,7 +1145,7 @@ describe("durable observability for tools/list", () => {
 
 describe("durable observability for forwarded JSON-RPC tools/call", () => {
   async function requestForwardedToolCall(
-    upstreamToolCallResult: object,
+    upstreamToolCallResult: object | string,
   ): Promise<{ response: Response; obsBodies: any[] }> {
     enableObsEnv();
     const obsBodies: any[] = [];
@@ -1181,10 +1181,15 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
           );
         }
         if (body.method === "tools/call") {
-          return new Response(JSON.stringify(upstreamToolCallResult), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
+          return new Response(
+            typeof upstreamToolCallResult === "string"
+              ? upstreamToolCallResult
+              : JSON.stringify(upstreamToolCallResult),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
         }
         return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
           status: 200,
@@ -1211,7 +1216,27 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
     return { response, obsBodies };
   }
 
-  test("passes through mismatched-id JSON auth errors without terminal completion", async () => {
+  function expectSingleUnverifiedCompletion(obsBodies: any[]) {
+    const completedEvents = obsBodies.filter(
+      (body) => body.eventName === "mcp.tool_call.completed",
+    );
+    expect(completedEvents).toHaveLength(1);
+    expect(completedEvents[0]).toMatchObject({
+      status: "failed",
+      metadata: expect.objectContaining({
+        classification: "unknown_error",
+        inspection_status: "unavailable",
+        result_preview: expect.objectContaining({
+          inspection_unavailable: true,
+          matching_terminal: false,
+          http_status: 200,
+        }),
+      }),
+    });
+    expect(completedEvents.some((event) => event.status === "ok")).toBe(false);
+  }
+
+  test("passes through mismatched-id JSON auth errors with one unverified failed completion", async () => {
     const upstreamResponse = {
       jsonrpc: "2.0",
       id: 999,
@@ -1222,14 +1247,20 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
 
     expect(response.status).toBe(200);
     expect(await response.text()).toBe(JSON.stringify(upstreamResponse));
-    expect(
-      obsBodies.filter(
-        (body) => body.eventName === "mcp.tool_call.completed",
-      ),
-    ).toHaveLength(0);
+    expectSingleUnverifiedCompletion(obsBodies);
   });
 
-  test("passes through missing-id JSON bodies and notifications without terminal completion", async () => {
+  test("passes through malformed JSON with one unverified failed completion", async () => {
+    const malformedResponse = '{"jsonrpc":"2.0","id":7,"result":';
+    const { response, obsBodies } =
+      await requestForwardedToolCall(malformedResponse);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(malformedResponse);
+    expectSingleUnverifiedCompletion(obsBodies);
+  });
+
+  test("passes through missing-id JSON bodies and notifications with one unverified failed completion", async () => {
     const upstreamResponses = [
       {
         jsonrpc: "2.0",
@@ -1248,11 +1279,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
 
       expect(response.status).toBe(200);
       expect(await response.text()).toBe(JSON.stringify(upstreamResponse));
-      expect(
-        obsBodies.filter(
-          (body) => body.eventName === "mcp.tool_call.completed",
-        ),
-      ).toHaveLength(0);
+      expectSingleUnverifiedCompletion(obsBodies);
     }
   });
 
@@ -1624,6 +1651,108 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
         /* noop */
       });
     }
+  });
+
+  test("passes through unmatched SSE and emits one unverified failed completion at stream end", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const mcpId = "sse-unmatched-telemetry-mcp";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://sse-unmatched.example.test/mcp",
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (body.method === "initialize") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
+            { headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (body.method === "notifications/initialized") {
+          return new Response(null, { status: 202 });
+        }
+        if (body.method === "tools/call") {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(streamController) {
+                controller = streamController;
+              },
+            }),
+            { headers: { "Content-Type": "text/event-stream" } },
+          );
+        }
+        return new Response("{}", { status: 404 });
+      },
+    ) as unknown as typeof fetch;
+
+    const response = await proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 8,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    expect(
+      obsBodies.filter(
+        (body) => body.eventName === "mcp.tool_call.completed",
+      ),
+    ).toHaveLength(0);
+
+    const mismatchedEvent = `data: ${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 999,
+      result: { content: [], isError: false },
+    })}\n\n`;
+    controller?.enqueue(new TextEncoder().encode(mismatchedEvent));
+    controller?.close();
+    controller = undefined;
+    expect(await response.text()).toBe(mismatchedEvent);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const completedEvents = obsBodies.filter(
+      (body) => body.eventName === "mcp.tool_call.completed",
+    );
+    expect(completedEvents).toHaveLength(1);
+    expect(completedEvents[0]).toMatchObject({
+      status: "failed",
+      metadata: expect.objectContaining({
+        classification: "unknown_error",
+        inspection_status: "unavailable",
+        result_preview: expect.objectContaining({
+          inspection_unavailable: true,
+          matching_terminal: false,
+          streamed_response: true,
+          http_status: 200,
+        }),
+      }),
+    });
+    expect(completedEvents.some((event) => event.status === "ok")).toBe(false);
   });
 
   test("emits failed needs_reauth telemetry only after matching SSE auth error", async () => {
@@ -2868,6 +2997,157 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     expect(result.diagnosticCode).toBe("oauth_refresh_failed");
     expect(text).not.toContain("reconnect");
     expect(text).not.toContain("login");
+  });
+
+  test("keeps upstream HTTP 403 forbidden after a transient refresh failure", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-refresh-then-forbidden/credential",
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-refresh-then-forbidden": {
+          id: "toolbox-refresh-then-forbidden",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore, grantStore: new OrgAwareGrantStore() },
+    );
+
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("forbidden", { status: 403 });
+    };
+
+    const response = await proxy.getApp().request(
+      "/toolbox-refresh-then-forbidden/tools/meeting_search",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${agent1Token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query: "course" }),
+      },
+    );
+    const result = await response.json();
+    const text = result.content
+      .map((part: { text: string }) => part.text)
+      .join(" ")
+      .toLowerCase();
+
+    expect(response.status).toBe(200);
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("upstream_forbidden");
+    expect(text).toContain("403");
+    expect(text).not.toContain("login");
+    expect(text).not.toContain("reconnect");
+  });
+
+  test("forwarded JSON-RPC keeps upstream HTTP 403 after a transient refresh failure", async () => {
+    const secretStore = new InMemoryWritableStore();
+    const mcpId = "toolbox-forward-refresh-then-forbidden";
+    await secretStore.put(
+      `mcp-auth/agent1/user1/${mcpId}/credential`,
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    const forbidden = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 9,
+      error: { code: -32003, message: "Forbidden" },
+    });
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      return new Response(forbidden, {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const response = await proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 9,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    const body = await response.text();
+
+    expect(response.status).toBe(403);
+    expect(body).toBe(forbidden);
+    expect(body.toLowerCase()).not.toContain("login");
+    expect(body.toLowerCase()).not.toContain("reconnect");
+    expect(body).not.toContain("oauth_refresh_failed");
   });
 
   test("worker tool calls surface a transient refresh failure without login guidance", async () => {
