@@ -4320,9 +4320,7 @@ export class McpProxy {
       // that this was an authorization failure. Return a fresh, readable 401
       // instead so callers can act on the status.
       const refreshFailure =
-        refreshResult.failure ??
-        credentialResolutionFailure ??
-        this.takeRefreshFailure(agentId, scopeKey, mcpId);
+        refreshResult.failure ?? credentialResolutionFailure;
 
       const failureResponse = new Response(
         JSON.stringify({

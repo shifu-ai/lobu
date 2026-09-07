@@ -3313,6 +3313,114 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     );
   });
 
+  test("does not attribute a concurrent refresh failure to a synthesized 401 response", async () => {
+    const secretStore = new InMemoryWritableStore();
+    const mcpId = "toolbox-refresh-401-no-local-failure";
+    const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    const firstToolCallStarted = createSignal();
+    const releaseFirstToolCall = createSignal();
+    let toolCallCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+
+      toolCallCount += 1;
+      if (toolCallCount === 1) {
+        firstToolCallStarted.resolve();
+        await releaseFirstToolCall.promise;
+        return new Response("upstream requires authorization", { status: 401 });
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [{ type: "text", text: "concurrent failure request" }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const noLocalFailureRequest = executeDirectInTestOrg(
+      proxy,
+      "agent1",
+      "user1",
+      mcpId,
+      "meeting_search",
+      {},
+      { organizationId: "test-org" },
+    );
+    await firstToolCallStarted.promise;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+
+    await executeDirectInTestOrg(
+      proxy,
+      "agent1",
+      "user1",
+      mcpId,
+      "meeting_search",
+      {},
+      { organizationId: "test-org" },
+    );
+    await secretStore.delete(credentialName);
+    releaseFirstToolCall.resolve();
+    const noLocalFailureResult = await noLocalFailureRequest;
+
+    expect(noLocalFailureResult.isError).toBe(true);
+    expect(noLocalFailureResult.diagnosticCode).toBe("needs_reauth");
+    expect(JSON.stringify(noLocalFailureResult)).not.toContain(
+      "oauth_refresh_failed",
+    );
+  });
+
   test("classifies a 401 after refresh failure without consuming the response body error", async () => {
     const secretStore = new InMemoryWritableStore();
     await secretStore.put(
