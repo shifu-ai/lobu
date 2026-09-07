@@ -125,6 +125,11 @@ export interface McpDiscoveryProvenance {
 export interface McpDiscoveryResult {
   tools: McpTool[];
   instructions?: string;
+  status?: "degraded" | "needs_reauth";
+  diagnosticCode?:
+    | "auth_required_zero_tools"
+    | "upstream_unauthorized"
+    | "upstream_forbidden";
   provenance?: McpDiscoveryProvenance;
 }
 
@@ -1717,6 +1722,8 @@ export class McpProxy {
       // on the tools/call path instead, at the moment it is needed.
       return bindDiscoveryProvenance({
         tools: [],
+        status: "needs_reauth",
+        diagnosticCode,
         instructions:
           `The "${mcpId}" connector is configured for this user but its authorization is ` +
           `currently ${diagnosticCode === "upstream_forbidden" ? "insufficient" : "expired"}, ` +
@@ -1797,6 +1804,8 @@ export class McpProxy {
       );
       return bindDiscoveryProvenance({
         tools: [],
+        status: "degraded",
+        diagnosticCode: "auth_required_zero_tools",
         instructions:
           `The "${mcpId}" connector is configured and auth-required, but tool discovery ` +
           `returned zero tools. Treat this connector as degraded and likely requiring ` +

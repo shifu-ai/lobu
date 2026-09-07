@@ -308,6 +308,40 @@ describe("refreshCredentialDetailed failure diagnosis", () => {
     expect(waiterResult.failure).toBeUndefined();
     expect(waiterResult.credential?.accessToken).toBe("fresh-token");
   });
+
+  test("uses a concurrently stored fresh credential instead of returning permanent reauth", async () => {
+    const stale = staleCredential();
+    globalThis.fetch = async () => {
+      await storeCredentialForScope(
+        secretStore,
+        AGENT,
+        user,
+        MCP,
+        staleCredential({
+          accessToken: "fresh-from-another-replica",
+          expiresAt: Date.now() + 3_600_000,
+        }),
+      );
+      return new Response(
+        JSON.stringify({
+          error: "invalid_grant",
+          error_description: "Token has been expired or revoked.",
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const result = await refreshCredentialDetailed(
+      secretStore,
+      AGENT,
+      user,
+      MCP,
+      stale,
+    );
+
+    expect(result.failure).toBeUndefined();
+    expect(result.credential?.accessToken).toBe("fresh-from-another-replica");
+  });
 });
 
 describe("device-auth status runtime auth truth", () => {

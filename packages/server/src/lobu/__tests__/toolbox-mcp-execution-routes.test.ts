@@ -2027,6 +2027,30 @@ describe('Toolbox MCP execution routes', () => {
     await expect(res.json()).resolves.toEqual({
       status: 'needs_reauth',
       toolsDiscovered: [],
+      errorCode: 'upstream_unauthorized',
+    });
+  });
+
+  test('GET /mcp/connections/status maps auth-required zero discovered tools to degraded', async () => {
+    listToolsDirectMock.mockResolvedValueOnce({
+      tools: [],
+      status: 'degraded',
+      diagnosticCode: 'auth_required_zero_tools',
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request(
+      `/lobu/api/v1/mcp/connections/status?agentId=${AGENT_ID}&ownerUserId=${OWNER_USER_ID}&connectorKey=google_workspace&connectionRef=${CONNECTION_REF}`,
+      {
+        headers: { Authorization: 'Bearer admin-token' },
+      }
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'degraded',
+      toolsDiscovered: [],
+      errorCode: 'auth_required_zero_tools',
     });
   });
 
@@ -2387,6 +2411,37 @@ describe('Toolbox MCP execution routes', () => {
       lobuConnectionRef: null,
       toolsDiscovered: [],
       errorCode: 'upstream_forbidden',
+    });
+  });
+
+  test('POST /mcp/connections/materialize maps auth-required zero discovered tools to degraded', async () => {
+    seedSourceConnectionForMaterialize();
+    listToolsDirectMock.mockResolvedValueOnce({
+      tools: [],
+      status: 'degraded',
+      diagnosticCode: 'auth_required_zero_tools',
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'degraded',
+      lobuConnectionRef: null,
+      toolsDiscovered: [],
+      errorCode: 'auth_required_zero_tools',
     });
   });
 

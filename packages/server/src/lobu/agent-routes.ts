@@ -41,7 +41,7 @@ import {
 } from './connector-mcp-resolver';
 import { classifyToolCallFailure } from './tool-call-classifier';
 import { buildMcpConnectUrl } from '../gateway/auth/mcp/connect-link-url';
-import { emitAgentObsEvent } from '@lobu/core';
+import { emitAgentObsEvent } from '../../../core/src/observability/shifu-agent-obs.js';
 import { parseShifuTraceHeaders } from '../observability/trace-context';
 import {
   AgentConfigurationFieldError,
@@ -435,6 +435,7 @@ const TOOLBOX_DISCOVERY_TOOL_ALIASES: Record<
 const SAFE_TOOL_DIAGNOSTIC_CODES = new Set([
   'oauth_scope_denied',
   'oauth_refresh_failed',
+  'auth_required_zero_tools',
   'upstream_unauthorized',
   'upstream_forbidden',
   'upstream_rate_limited',
@@ -473,7 +474,12 @@ type ToolboxMcpToolCallRequest = {
   conversation_id?: unknown;
 };
 
-type ToolboxMcpConnectionStatus = 'ready' | 'needs_reauth' | 'not_connected' | 'error';
+type ToolboxMcpConnectionStatus =
+  | 'ready'
+  | 'needs_reauth'
+  | 'degraded'
+  | 'not_connected'
+  | 'error';
 type ToolboxMcpExecutableReadiness =
   | { ok: true }
   | { ok: false; errorCode: 'mcp_server_missing' };
@@ -485,6 +491,7 @@ type ToolboxMcpToolsDiscovery =
       errorCode?:
         | 'lobu_mcp_unavailable'
         | 'lobu_mcp_tools_discovery_failed'
+        | 'auth_required_zero_tools'
         | 'upstream_unauthorized'
         | 'upstream_forbidden';
     };
@@ -813,11 +820,13 @@ function toolboxMcpMaterializeResult(
 
 function toolboxMcpStatusResult(
   status: ToolboxMcpConnectionStatus,
-  toolsDiscovered: string[] = []
+  toolsDiscovered: string[] = [],
+  errorCode?: string
 ) {
   return {
     status,
     toolsDiscovered: status === 'ready' ? toolsDiscovered : [],
+    ...(errorCode ? { errorCode } : {}),
   };
 }
 
@@ -953,6 +962,45 @@ function extractMcpToolNames(result: unknown): string[] {
   return [...new Set(names)];
 }
 
+function discoveryFailureFromStructuredResult(
+  result: unknown
+): ToolboxMcpToolsDiscovery | null {
+  if (!isPlainRecord(result)) return null;
+  const diagnosticCode = safeToolDiagnosticCode(result);
+  const status = result.status;
+
+  if (status === 'degraded') {
+    return {
+      ok: false,
+      status: 'degraded',
+      errorCode:
+        diagnosticCode === 'auth_required_zero_tools'
+          ? diagnosticCode
+          : 'lobu_mcp_tools_discovery_failed',
+    };
+  }
+
+  if (status === 'needs_reauth') {
+    return {
+      ok: false,
+      status: 'needs_reauth',
+      errorCode: isMcpAuthDiagnosticCode(diagnosticCode)
+        ? diagnosticCode
+        : undefined,
+    };
+  }
+
+  if (diagnosticCode === 'auth_required_zero_tools') {
+    return {
+      ok: false,
+      status: 'degraded',
+      errorCode: diagnosticCode,
+    };
+  }
+
+  return null;
+}
+
 async function discoverMcpToolNames(params: {
   agentId: string;
   ownerUserId: string;
@@ -969,6 +1017,9 @@ async function discoverMcpToolNames(params: {
       params.ownerUserId,
       params.mcpId
     );
+    const structuredFailure = discoveryFailureFromStructuredResult(result);
+    if (structuredFailure) return structuredFailure;
+
     return { ok: true, toolsDiscovered: extractMcpToolNames(result) };
   } catch (error) {
     const diagnosticCode = safeToolDiagnosticCode(error);
@@ -1540,7 +1591,7 @@ toolboxMcpRoutes.get('/mcp/connections/status', async (c) => {
   });
   if (!tools.ok) {
     if (tools.status !== 'error') {
-      return c.json(toolboxMcpStatusResult(tools.status));
+      return c.json(toolboxMcpStatusResult(tools.status, [], tools.errorCode));
     }
     return c.json({
       status: 'error',

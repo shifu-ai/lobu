@@ -542,6 +542,21 @@ export async function refreshCredentialDetailed(
         response.status < 500 &&
         (upstreamError === undefined ||
           PERMANENT_OAUTH_ERRORS.has(upstreamError));
+      if (permanent) {
+        const latest = await getStoredCredential(
+          secretStore,
+          agentId,
+          userId,
+          mcpId,
+        );
+        if (latest && latest.expiresAt > Date.now() + REFRESH_EXPIRY_BUFFER_MS) {
+          logger.info(
+            "Token refresh rejected but a fresh credential was already stored",
+            { agentId, userId, mcpId },
+          );
+          return { credential: latest };
+        }
+      }
       logger.error("Token refresh failed", {
         status: response.status,
         upstreamError,

@@ -835,6 +835,11 @@ function mcpAuthReauthResult(
   }
 
   const verificationUrl = mcpAuthLoginUrl(status);
+  const message = verificationUrl
+    ? `Authentication needs to be refreshed for ${mcpId}. Send this authorization link to the user as a plain text message: ${verificationUrl}`
+    : status.status === "needs_reauth"
+      ? `Authentication needs to be refreshed for ${mcpId}. Ask the user to reconnect it before retrying.`
+      : `Authentication for ${mcpId} cannot be confirmed right now. Tell the user the connection is temporarily degraded and retry later.`;
   return textResult(
     JSON.stringify({
       status: status.status,
@@ -847,9 +852,7 @@ function mcpAuthReauthResult(
       verification_uri: status.login?.verificationUri,
       user_code: status.login?.userCode || "",
       expires_in_seconds: status.login?.expiresIn,
-      message: verificationUrl
-        ? `Authentication needs to be refreshed for ${mcpId}. Send this authorization link to the user as a plain text message: ${verificationUrl}`
-        : `Authentication needs to be refreshed for ${mcpId}. Ask the user to reconnect it before retrying.`,
+      message,
     })
   );
 }
