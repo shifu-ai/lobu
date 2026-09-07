@@ -1465,6 +1465,7 @@ export class McpProxy {
           userId,
           mcpId,
           organizationId: options?.organizationId,
+          refreshFailure: this.refreshFailureForResponse(response),
         });
         const result = {
           content: [
@@ -3661,6 +3662,8 @@ export class McpProxy {
     string,
     { failure: CredentialRefreshFailure; at: number }
   >();
+  private readonly refreshFailuresByResponse =
+    new WeakMap<Response, CredentialRefreshFailure>();
 
   private static readonly REFRESH_FAILURE_TTL_MS = 60_000;
 
@@ -3711,7 +3714,10 @@ export class McpProxy {
     userId: string;
     mcpId: string;
     organizationId?: string;
+    refreshFailure?: CredentialRefreshFailure;
   }): { text: string; diagnosticCode: string } | null {
+    if (!params.refreshFailure?.permanent) return null;
+
     const errorMessage =
       params.error instanceof Error
         ? params.error.message
@@ -3730,8 +3736,7 @@ export class McpProxy {
       organizationId: params.organizationId,
       logContext: "tools/call",
     });
-    const refreshDiagnostic =
-      this.refreshDiagnosticFromErrorMessage(errorMessage);
+    const refreshDiagnostic = this.describeRefreshFailure(params.refreshFailure);
     const diagnosticText = refreshDiagnostic
       ? ` Refresh failure: ${refreshDiagnostic}.`
       : "";
@@ -3748,38 +3753,24 @@ export class McpProxy {
     return { text, diagnosticCode: "needs_reauth" };
   }
 
-  private refreshDiagnosticFromErrorMessage(message: string): string | null {
-    let parsed: Record<string, unknown> | null = null;
-    try {
-      const start = message.indexOf("{");
-      if (start >= 0) {
-        const candidate = message.slice(start);
-        const value = JSON.parse(candidate);
-        if (value && typeof value === "object" && !Array.isArray(value)) {
-          parsed = value as Record<string, unknown>;
-        }
-      }
-    } catch {
-      parsed = null;
-    }
-    if (!parsed) return null;
-
+  private describeRefreshFailure(
+    failure: CredentialRefreshFailure | undefined,
+  ): string | null {
+    if (!failure) return null;
     const parts = [
-      typeof parsed.refresh_failure_reason === "string"
-        ? parsed.refresh_failure_reason
-        : undefined,
-      typeof parsed.refresh_upstream_error === "string"
-        ? parsed.refresh_upstream_error
-        : undefined,
-      typeof parsed.refresh_upstream_status === "number"
-        ? `HTTP ${parsed.refresh_upstream_status}`
-        : undefined,
-      typeof parsed.refresh_failure_permanent === "boolean"
-        ? `permanent=${parsed.refresh_failure_permanent}`
-        : undefined,
+      failure.reason,
+      failure.upstreamError,
+      typeof failure.status === "number" ? `HTTP ${failure.status}` : undefined,
+      `permanent=${failure.permanent}`,
     ].filter((part): part is string => Boolean(part));
 
     return parts.length > 0 ? parts.join(", ") : null;
+  }
+
+  private refreshFailureForResponse(
+    response: Response,
+  ): CredentialRefreshFailure | undefined {
+    return this.refreshFailuresByResponse.get(response);
   }
 
   private async resolveCredentialToken(
@@ -3921,7 +3912,7 @@ export class McpProxy {
         refreshResult.failure ??
         this.takeRefreshFailure(agentId, scopeKey, mcpId);
 
-      return new Response(
+      const failureResponse = new Response(
         JSON.stringify({
           error: "unauthorized",
           error_description:
@@ -3950,6 +3941,10 @@ export class McpProxy {
           headers: { "Content-Type": "application/json" },
         },
       );
+      if (refreshFailure) {
+        this.refreshFailuresByResponse.set(failureResponse, refreshFailure);
+      }
+      return failureResponse;
     }
 
     // Track session

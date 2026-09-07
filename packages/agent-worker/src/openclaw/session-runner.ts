@@ -11,7 +11,6 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
   createLogger,
-  emitAgentObsEvent,
   getOptionalEnv,
   type McpStatus,
   type McpToolDef,
@@ -21,6 +20,7 @@ import {
   type ToolsConfig,
   type TrustedExecutionScope,
 } from "@lobu/core";
+import { emitAgentObsEvent } from "../../../core/src/observability/shifu-agent-obs";
 import {
   PERSONAL_BROWSER_LOCAL_EGO_CAPABILITY,
   PERSONAL_BROWSER_LOCAL_EGO_TOOL_NAME,
@@ -758,7 +758,7 @@ function buildMcpAuthToolNameMap(
   return names;
 }
 
-function buildProjectedMcpSetupInstructions(
+export function buildProjectedMcpSetupInstructions(
   mcpStatus: McpStatus[],
   mcpTools: Record<string, McpToolDef[]>,
   authToolNames: Record<string, McpAuthToolNames>
@@ -768,8 +768,13 @@ function buildProjectedMcpSetupInstructions(
   }
 
   const mcpToolIds = new Set(Object.keys(mcpTools));
+  const degradedAuthentication = mcpStatus.filter(
+    (mcp) =>
+      mcp.requiresAuth && !mcp.authenticated && mcp.authStatus === "degraded"
+  );
   const needsAuthentication = mcpStatus.filter(
-    (mcp) => mcp.requiresAuth && !mcp.authenticated
+    (mcp) =>
+      mcp.requiresAuth && !mcp.authenticated && mcp.authStatus !== "degraded"
   );
   const needsConfiguration = mcpStatus.filter(
     (mcp) => mcp.requiresInput && !mcp.configured
@@ -778,6 +783,7 @@ function buildProjectedMcpSetupInstructions(
 
   if (
     needsAuthentication.length === 0 &&
+    degradedAuthentication.length === 0 &&
     needsConfiguration.length === 0 &&
     undiscoveredMcps.length === 0
   ) {
@@ -790,6 +796,12 @@ function buildProjectedMcpSetupInstructions(
     const names = authToolNames[mcp.id] ?? buildMcpAuthToolNames(mcp.id);
     lines.push(
       `- ⚠️ **${mcp.name}** (id: ${mcp.id}): Authentication is required. To start login, call \`${names.login}\`. After the user completes login, call \`${names.loginCheck}\`. Newly available MCP tools will refresh on the next message.`
+    );
+  }
+
+  for (const mcp of degradedAuthentication) {
+    lines.push(
+      `- ⚠️ **${mcp.name}** (id: ${mcp.id}): The connection cannot be confirmed right now and is temporarily degraded; try again later before asking the user to reconnect.`
     );
   }
 

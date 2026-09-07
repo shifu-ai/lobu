@@ -3410,6 +3410,9 @@ describe("executeToolDirect", () => {
 
     expect(result.isError).toBe(true);
     expect(result.diagnosticCode).toBe("upstream_forbidden");
+    expect(result.content[0].text).toContain("403");
+    expect(result.content[0].text).not.toContain("Authorization for");
+    expect(result.content[0].text).not.toContain("reconnect");
   });
 
   test("executeToolDirect preserves safe JSON-RPC result diagnostic code", async () => {

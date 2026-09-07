@@ -16,12 +16,22 @@ function tool(name: string): McpToolDef {
 }
 
 const mcpStatus: McpStatus[] = [];
+const originalDispatcherUrl = process.env.DISPATCHER_URL;
+const originalEncryptionKey = process.env.ENCRYPTION_KEY;
 
 describe("buildMcpToolInventoryInstructions capability notes", () => {
   afterEach(() => {
     mock.restore();
-    delete process.env.DISPATCHER_URL;
-    delete process.env.ENCRYPTION_KEY;
+    if (originalDispatcherUrl === undefined) {
+      delete process.env.DISPATCHER_URL;
+    } else {
+      process.env.DISPATCHER_URL = originalDispatcherUrl;
+    }
+    if (originalEncryptionKey === undefined) {
+      delete process.env.ENCRYPTION_KEY;
+    } else {
+      process.env.ENCRYPTION_KEY = originalEncryptionKey;
+    }
     __resetEncryptionKeyCacheForTests();
     invalidateSessionContextCache();
   });
@@ -106,5 +116,50 @@ describe("buildMcpToolInventoryInstructions capability notes", () => {
     expect(context.toolboxPersonalAgentTools[0]?.tools[0]?.name).toBe(
       "private_writeback"
     );
+  });
+
+  test("degraded MCP auth status does not generate start-login setup guidance", async () => {
+    process.env.DISPATCHER_URL = "https://gateway.test";
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    globalThis.fetch = mock(async () =>
+      Response.json({
+        userId: "user-1",
+        agentId: "agent-1",
+        agentInstructions: "identity",
+        platformInstructions: "platform",
+        networkInstructions: "network",
+        skillsInstructions: "skills",
+        mcpStatus: [
+          {
+            id: "shifu-toolbox",
+            name: "ShiFu Toolbox",
+            requiresAuth: true,
+            authenticated: false,
+            authStatus: "degraded",
+            diagnosticCode: "auth_required_zero_tools",
+            configured: true,
+          },
+        ],
+        mcpTools: {},
+      })
+    ) as typeof fetch;
+
+    const workerToken = generateWorkerToken(
+      "user-1",
+      "conversation-1",
+      "deploy",
+      {
+        channelId: "line-1",
+        agentId: "agent-1",
+      }
+    );
+    const context = await getOpenClawSessionContext({ workerToken });
+
+    expect(context.gatewayInstructions).toContain("temporarily degraded");
+    expect(context.gatewayInstructions).toContain("try again later");
+    expect(context.gatewayInstructions).not.toContain("To start login");
+    expect(context.gatewayInstructions).not.toContain("auth login");
   });
 });
