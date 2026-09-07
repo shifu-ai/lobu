@@ -572,7 +572,7 @@ class McpJsonRpcError extends Error {
   }
 }
 
-function jsonRpcErrorFromSseEvent(eventText: string): McpJsonRpcError | null {
+function jsonRpcTerminalFromSseEvent(eventText: string): JsonRpcResponse | null {
   const dataLines: string[] = [];
   for (const line of eventText.split(/\r\n|\r|\n/)) {
     if (line === "data") {
@@ -586,29 +586,115 @@ function jsonRpcErrorFromSseEvent(eventText: string): McpJsonRpcError | null {
 
   try {
     const data = JSON.parse(dataLines.join("\n")) as JsonRpcResponse;
-    if (!data?.error) return null;
-    const message =
-      data.error.message ||
-      (typeof data.error === "string" ? data.error : "Upstream error");
-    return new McpJsonRpcError(data.error.code, message);
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+    if (!Object.hasOwn(data, "id")) return null;
+    if (!Object.hasOwn(data, "result") && !Object.hasOwn(data, "error")) {
+      return null;
+    }
+    return data;
   } catch {
     return null;
   }
 }
 
-function completeSseEventEnd(text: string): number {
-  let consecutiveLineEndings = 0;
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index];
-    if (character !== "\r" && character !== "\n") {
-      consecutiveLineEndings = 0;
-      continue;
-    }
-    if (character === "\r" && text[index + 1] === "\n") index += 1;
-    consecutiveLineEndings += 1;
-    if (consecutiveLineEndings === 2) return index + 1;
+function replaceSseDataFields(eventText: string, replacement: string): string {
+  let replaced = false;
+  return eventText.replace(
+    /(^|[\r\n])(data(?::[^\r\n]*)?)(?=\r\n|\r|\n|$)/g,
+    (_match, lineStart: string) => {
+      const value = replaced ? "" : ` ${replacement}`;
+      replaced = true;
+      return `${lineStart}data:${value}`;
+    },
+  );
+}
+
+type SseEventBoundaryScanState = {
+  offset: number;
+  consecutiveLineEndings: number;
+  previousWasCarriageReturn?: boolean;
+};
+
+export function scanSseEventBoundary(
+  text: string,
+  state: SseEventBoundaryScanState,
+): {
+  eventEnd: number;
+  inspectedCharacters: number;
+  state: SseEventBoundaryScanState;
+} {
+  let { offset, consecutiveLineEndings } = state;
+  let previousWasCarriageReturn =
+    state.previousWasCarriageReturn ?? false;
+  let inspectedCharacters = 0;
+
+  if (
+    consecutiveLineEndings >= 2 &&
+    !(previousWasCarriageReturn && text[offset] === "\n")
+  ) {
+    return { eventEnd: offset, inspectedCharacters, state };
   }
-  return -1;
+
+  while (offset < text.length) {
+    const character = text[offset];
+    inspectedCharacters += 1;
+
+    if (previousWasCarriageReturn) {
+      previousWasCarriageReturn = false;
+      if (character === "\n") {
+        offset += 1;
+        if (consecutiveLineEndings >= 2) {
+          return {
+            eventEnd: offset,
+            inspectedCharacters,
+            state: {
+              offset,
+              consecutiveLineEndings,
+              previousWasCarriageReturn,
+            },
+          };
+        }
+        continue;
+      }
+    }
+
+    if (character === "\r") {
+      consecutiveLineEndings += 1;
+      previousWasCarriageReturn = true;
+    } else if (character === "\n") {
+      consecutiveLineEndings += 1;
+    } else {
+      consecutiveLineEndings = 0;
+    }
+    offset += 1;
+
+    if (consecutiveLineEndings >= 2) {
+      if (previousWasCarriageReturn && text[offset] === "\n") {
+        inspectedCharacters += 1;
+        previousWasCarriageReturn = false;
+        offset += 1;
+      }
+      return {
+        eventEnd: offset,
+        inspectedCharacters,
+        state: {
+          offset,
+          consecutiveLineEndings,
+          previousWasCarriageReturn,
+        },
+      };
+    }
+  }
+
+  return {
+    eventEnd: -1,
+    inspectedCharacters,
+    state: {
+      offset,
+      consecutiveLineEndings,
+      previousWasCarriageReturn,
+    },
+  };
 }
 
 class McpDiscoveryAuthError extends Error {
@@ -692,6 +778,39 @@ type ForwardedToolCallObsInspection = {
   metadata: Record<string, unknown>;
   resultOrError?: unknown;
 };
+
+function inspectJsonRpcTerminalForObs(
+  data: JsonRpcResponse,
+): ForwardedToolCallObsInspection {
+  if (data.error) {
+    const message =
+      data.error.message ||
+      (typeof data.error === "string" ? data.error : "Upstream error");
+    return {
+      status: "failed",
+      metadata: {
+        jsonrpc_error_code: data.error.code,
+        result_preview: resultPreviewFromJsonRpcError(data.error),
+      },
+      resultOrError: new McpJsonRpcError(data.error.code, message),
+    };
+  }
+
+  if (data.result?.isError) {
+    return {
+      status: "failed",
+      metadata: {
+        result_preview: resultPreviewFromValue(data.result),
+        ...(diagnosticCodeFromToolResult(data.result)
+          ? { diagnostic_code: diagnosticCodeFromToolResult(data.result) }
+          : {}),
+      },
+      resultOrError: data.result,
+    };
+  }
+
+  return { status: "ok", metadata: {} };
+}
 
 async function inspectForwardedToolCallResponseForObs(
   response: Response,
@@ -4591,8 +4710,14 @@ export class McpProxy {
       });
     }
 
-    const responseHeaders = new Headers(response.headers);
     const contentType = response.headers.get("content-type");
+    const responseHeaders = new Headers();
+    if (contentType) {
+      responseHeaders.set("Content-Type", contentType);
+    }
+    if (newSessionId) {
+      responseHeaders.set("Mcp-Session-Id", newSessionId);
+    }
     const isEventStream = contentType?.includes("text/event-stream") ?? false;
 
     const shouldInspectForwardedToolCallResponse =
@@ -4645,45 +4770,66 @@ export class McpProxy {
     }
 
     let body = response.body;
-    if (isEventStream && response.ok && authContext && forwardedToolCall) {
+    if (isEventStream && forwardedToolCall) {
       const organizationId = getOrgId();
       const wwwAuthenticate = response.headers.get("www-authenticate");
       body = this.wrapSseReauthResponseBody(
         body,
         forwardedToolCall.id,
-        () =>
-          orgContext.run({ organizationId }, () =>
-            this.buildForwardedReauthResult({
-              mcpId,
-              agentId,
-              scopeKey: scopeKey ?? authContext.userId,
-              httpServer,
-              authContext,
-              wwwAuthenticate,
-              organizationId,
-            }),
+        response.ok && authContext
+          ? () =>
+              orgContext.run({ organizationId }, () =>
+                this.buildForwardedReauthResult({
+                  mcpId,
+                  agentId,
+                  scopeKey: scopeKey ?? authContext.userId,
+                  httpServer,
+                  authContext,
+                  wwwAuthenticate,
+                  organizationId,
+                }),
+              )
+          : undefined,
+        (inspection) =>
+          emitForwardedToolCallCompleted(
+            inspection.status,
+            {
+              http_status: response.status,
+              ...inspection.metadata,
+              ...(inspection.status === "ok"
+                ? {
+                    result_preview: {
+                      streamed_response: true,
+                      http_status: response.status,
+                    },
+                  }
+                : {}),
+            },
+            inspection.resultOrError,
           ),
       );
       responseHeaders.delete("content-length");
     }
     body = this.wrapStreamableResponseBody(body, mcpId, agentId);
-    emitForwardedToolCallCompleted(
-      forwardedToolCallInspection?.status ?? (response.ok ? "ok" : "failed"),
-      forwardedToolCallInspection
-        ? {
-            http_status: response.status,
-            ...forwardedToolCallInspection.metadata,
-          }
-        : {
-            http_status: response.status,
-            result_preview: {
-              streamed_response: true,
+    if (!isEventStream) {
+      emitForwardedToolCallCompleted(
+        forwardedToolCallInspection?.status ?? (response.ok ? "ok" : "failed"),
+        forwardedToolCallInspection
+          ? {
               http_status: response.status,
+              ...forwardedToolCallInspection.metadata,
+            }
+          : {
+              http_status: response.status,
+              result_preview: {
+                streamed_response: true,
+                http_status: response.status,
+              },
             },
-          },
-      forwardedToolCallInspection?.resultOrError ??
-        (response.ok ? undefined : new McpHttpStatusError(response.status)),
-    );
+        forwardedToolCallInspection?.resultOrError ??
+          (response.ok ? undefined : new McpHttpStatusError(response.status)),
+      );
+    }
 
     return new Response(body, {
       status: response.status,
@@ -4748,18 +4894,27 @@ export class McpProxy {
   private wrapSseReauthResponseBody(
     body: ReadableStream<Uint8Array> | null,
     requestId: unknown,
-    buildResult: () => Promise<{
-      content: { type: string; text: string }[];
-      isError: boolean;
-      diagnosticCode: string;
-    }>,
+    buildResult:
+      | (() => Promise<{
+          content: { type: string; text: string }[];
+          isError: boolean;
+          diagnosticCode: string;
+        }>)
+      | undefined,
+    onMatchingTerminal: (inspection: ForwardedToolCallObsInspection) => void,
   ): ReadableStream<Uint8Array> | null {
     if (!body) return body;
 
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
     let buffer = "";
+    let bufferedByteLength = 0;
+    let scanState: SseEventBoundaryScanState = {
+      offset: 0,
+      consecutiveLineEndings: 0,
+    };
     let inspecting = true;
+    let matchedTerminal = false;
 
     const emit = async (
       text: string,
@@ -4772,44 +4927,77 @@ export class McpProxy {
       }
 
       buffer += text;
+      bufferedByteLength += encoder.encode(text).byteLength;
       while (true) {
-        const eventEnd = completeSseEventEnd(buffer);
+        const scanResult = scanSseEventBoundary(buffer, scanState);
+        scanState = scanResult.state;
+        const { eventEnd } = scanResult;
         if (eventEnd < 0) break;
         const eventText = buffer.slice(0, eventEnd);
-        if (encoder.encode(eventText).byteLength > OBS_RESPONSE_INSPECT_MAX_BYTES) {
+        const encodedEvent = encoder.encode(eventText);
+        if (encodedEvent.byteLength > OBS_RESPONSE_INSPECT_MAX_BYTES) {
           inspecting = false;
           controller.enqueue(encoder.encode(buffer));
           buffer = "";
+          bufferedByteLength = 0;
           return;
         }
         buffer = buffer.slice(eventEnd);
+        bufferedByteLength -= encodedEvent.byteLength;
+        scanState = {
+          offset: 0,
+          consecutiveLineEndings: 0,
+          previousWasCarriageReturn:
+            scanResult.state.previousWasCarriageReturn,
+        };
 
-        const error = jsonRpcErrorFromSseEvent(eventText);
+        const terminal = jsonRpcTerminalFromSseEvent(eventText);
+        if (!terminal || terminal.id !== requestId || matchedTerminal) {
+          controller.enqueue(encodedEvent);
+          continue;
+        }
+
+        matchedTerminal = true;
+        const inspection = inspectJsonRpcTerminalForObs(terminal);
+        const error = inspection.resultOrError;
         if (
-          error &&
+          buildResult &&
+          error instanceof McpJsonRpcError &&
           this.authDiagnosticCodeFromMessage(error.message) ===
             "upstream_unauthorized" &&
           isMessageOnlyReauthSignal(error.message)
         ) {
           const result = await buildResult();
+          onMatchingTerminal({
+            ...inspection,
+            metadata: {
+              ...inspection.metadata,
+              result_preview: resultPreviewFromValue(result),
+            },
+          });
           controller.enqueue(
             encoder.encode(
-              `event: message\ndata: ${JSON.stringify({
-                jsonrpc: "2.0",
-                id: requestId ?? null,
-                result,
-              })}\n\n`,
+              replaceSseDataFields(
+                eventText,
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: terminal.id,
+                  result,
+                }),
+              ),
             ),
           );
         } else {
+          onMatchingTerminal(inspection);
           controller.enqueue(encoder.encode(eventText));
         }
       }
 
-      if (encoder.encode(buffer).byteLength > OBS_RESPONSE_INSPECT_MAX_BYTES) {
+      if (bufferedByteLength > OBS_RESPONSE_INSPECT_MAX_BYTES) {
         inspecting = false;
         controller.enqueue(encoder.encode(buffer));
         buffer = "";
+        bufferedByteLength = 0;
       }
     };
 

@@ -201,6 +201,48 @@ beforeEach(() => {
   delete process.env.TOOLBOX_INTERNAL_SECRET;
 });
 
+test("SSE boundary scanning stays linear across highly fragmented input", async () => {
+  const proxyModule = await import("../auth/mcp/proxy.js");
+  const scan = (
+    proxyModule as typeof proxyModule & {
+      scanSseEventBoundary?: (
+        text: string,
+        state: { offset: number; consecutiveLineEndings: number },
+      ) => {
+        eventEnd: number;
+        inspectedCharacters: number;
+        state: { offset: number; consecutiveLineEndings: number };
+      };
+    }
+  ).scanSseEventBoundary;
+  expect(scan).toBeFunction();
+  if (!scan) return;
+
+  const event = `data: ${"x".repeat(64 * 1024 - 16)}\r\n\r\n`;
+  let buffered = "";
+  let state = { offset: 0, consecutiveLineEndings: 0 };
+  let inspectedCharacters = 0;
+  let eventEnd = -1;
+  for (const character of event) {
+    buffered += character;
+    const result = scan(buffered, state);
+    state = result.state;
+    inspectedCharacters += result.inspectedCharacters;
+    eventEnd = result.eventEnd;
+  }
+
+  expect(eventEnd).toBe(event.length);
+  expect(inspectedCharacters).toBeLessThanOrEqual(event.length + 2);
+  for (const delimiter of ["\n\n", "\r\r", "\r\n\r\n"]) {
+    expect(
+      scan(`data: ok${delimiter}`, {
+        offset: 0,
+        consecutiveLineEndings: 0,
+      }).eventEnd,
+    ).toBe(`data: ok${delimiter}`.length);
+  }
+});
+
 describe("trusted course memory tool policy", () => {
   const scope = {
     ownerUserId: "owner-1",
@@ -1466,6 +1508,11 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
 
     const response = responseOutcome.response;
     expect(response.status).toBe(200);
+    expect(
+      obsBodies.filter(
+        (body) => body.eventName === "mcp.tool_call.completed",
+      ),
+    ).toHaveLength(0);
     const event = `data: ${JSON.stringify({
       jsonrpc: "2.0",
       id: 7,
@@ -1496,6 +1543,88 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
           http_status: 200,
         }),
       }),
+    });
+  });
+
+  test("emits failed needs_reauth telemetry only after matching SSE auth error", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const mcpId = "sse-auth-telemetry-mcp";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://sse-auth-telemetry.example.test/mcp",
+          oauth: { resource: "https://sse-auth-telemetry.example.test/mcp" },
+        },
+      }),
+      {
+        secretStore: new InMemoryWritableStore(),
+        publicGatewayUrl: "https://gateway.example.com",
+      },
+    );
+
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (body.method === "initialize") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
+            { headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (body.method === "notifications/initialized") {
+          return new Response(null, { status: 202 });
+        }
+        if (body.method === "tools/call") {
+          return new Response(
+            `data: ${JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              error: { code: -32001, message: "Unauthorized: token expired" },
+            })}\n\n`,
+            { headers: { "Content-Type": "text/event-stream" } },
+          );
+        }
+        return new Response("{}", { status: 404 });
+      },
+    ) as unknown as typeof fetch;
+
+    const response = await proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 8,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+
+    await response.text();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const completedEvents = obsBodies.filter(
+      (body) => body.eventName === "mcp.tool_call.completed",
+    );
+    expect(completedEvents).toHaveLength(1);
+    expect(completedEvents[0]).toMatchObject({
+      status: "failed",
+      metadata: expect.objectContaining({ classification: "needs_reauth" }),
     });
   });
 });
@@ -2886,6 +3015,11 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
 
   test("streamable SSE HTTP 200 Unauthorized JSON-RPC returns actionable reauthorization", async () => {
     const mcpId = "toolbox-stream-sse-unauthorized";
+    const mismatchedAuthResponse = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 999,
+      error: { code: -32001, message: "Unauthorized: unrelated request" },
+    });
     const proxy = new McpProxy(
       createConfigSource({
         [mcpId]: {
@@ -2914,20 +3048,40 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
       if (request.method === "notifications/initialized") {
         return new Response(null, { status: 202 });
       }
-      const sseBody = [
+      const matchingAuthResponse = JSON.stringify({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: -32001, message: "Unauthorized: token expired" },
+      });
+      const errorFieldStart = matchingAuthResponse.indexOf('"error"');
+      const sseBody = `${[
         "event: message",
-        `data: ${JSON.stringify({
-          jsonrpc: "2.0",
-          id: request.id,
-          error: { code: -32001, message: "Unauthorized: token expired" },
-        })}`,
+        `data: ${mismatchedAuthResponse}`,
+        "",
+        "event: message",
+        ": preserve-comment",
+        "id: auth-event-2",
+        `data: ${matchingAuthResponse.slice(0, errorFieldStart)}`,
+        "retry: 1500",
+        "x-extension: preserve-me",
+        `data: ${matchingAuthResponse.slice(errorFieldStart)}`,
         "",
         "",
-      ].join("\n");
+      ].join("\r\n")}`;
       return new Response(sseBody, {
         headers: {
           "Content-Type": "text/event-stream",
           "Mcp-Session-Id": "upstream-sse-session-123",
+          "Content-Encoding": "identity",
+          "Content-Length": String(sseBody.length),
+          "Transfer-Encoding": "chunked",
+          Connection: "keep-alive",
+          "Keep-Alive": "timeout=5",
+          "Proxy-Authenticate": "Basic realm=upstream",
+          "Proxy-Authorization": "Basic dGVzdA==",
+          TE: "trailers",
+          Trailer: "Expires",
+          Upgrade: "websocket",
         },
       });
     };
@@ -2946,10 +3100,14 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
       }),
     });
     const bodyText = await response.text();
-    const dataLine = bodyText
-      .split(/\r?\n/)
-      .find((line) => line.startsWith("data:"));
-    const body = JSON.parse(dataLine?.slice(5).trimStart() ?? "{}") as {
+    const transformedEvent =
+      bodyText.split("\r\n\r\n").filter(Boolean).at(-1) ?? "";
+    const transformedData = transformedEvent
+      .split(/\r\n|\r|\n/)
+      .filter((line) => line === "data" || line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    const body = JSON.parse(transformedData || "{}") as {
       jsonrpc?: string;
       id?: number | null;
       result?: {
@@ -2964,6 +3122,27 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     expect(response.headers.get("Mcp-Session-Id")).toBe(
       "upstream-sse-session-123",
     );
+    expect(bodyText).toContain(`data: ${mismatchedAuthResponse}\r\n\r\n`);
+    expect(transformedEvent).toContain("event: message\r\n");
+    expect(transformedEvent).toContain(": preserve-comment\r\n");
+    expect(transformedEvent).toContain("id: auth-event-2\r\n");
+    expect(transformedEvent).toContain("retry: 1500\r\n");
+    expect(transformedEvent).toContain("x-extension: preserve-me\r\n");
+    expect(bodyText.endsWith("\r\n\r\n")).toBe(true);
+    for (const header of [
+      "content-encoding",
+      "content-length",
+      "transfer-encoding",
+      "connection",
+      "keep-alive",
+      "proxy-authenticate",
+      "proxy-authorization",
+      "te",
+      "trailer",
+      "upgrade",
+    ]) {
+      expect(response.headers.get(header)).toBeNull();
+    }
     expect(body).toMatchObject({
       jsonrpc: "2.0",
       id: 2,
