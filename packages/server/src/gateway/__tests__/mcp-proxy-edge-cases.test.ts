@@ -124,6 +124,36 @@ function mockFetch(handler: (url: string) => Response) {
     );
 }
 
+const OPEN_SSE_WATCHDOG_MS = 500;
+
+function createSignal() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+async function withOpenSseWatchdog<T>(
+  promise: Promise<T>,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(message)),
+          OPEN_SSE_WATCHDOG_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function successFetch(
   body: object = { jsonrpc: "2.0", id: 1, result: { tools: [] } },
 ) {
@@ -1482,6 +1512,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
     });
     const app = proxy.getApp();
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const toolsCallReady = createSignal();
 
     globalThis.fetch = mock(
       async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1509,10 +1540,12 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
               controller = streamController;
             },
           });
-          return new Response(stream, {
+          const response = new Response(stream, {
             status: 200,
             headers: { "Content-Type": "text/event-stream" },
           });
+          toolsCallReady.resolve();
+          return response;
         }
         return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
           status: 200,
@@ -1535,60 +1568,62 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
         params: { name: "meeting_search", arguments: { query: "course" } },
       }),
     });
+    await toolsCallReady.promise;
 
-    let responseTimer: ReturnType<typeof setTimeout> | undefined;
-    const responseOutcome = await Promise.race([
-      requestPromise.then((response) => ({ kind: "response" as const, response })),
-      new Promise<{ kind: "timeout" }>((resolve) => {
-        responseTimer = setTimeout(() => resolve({ kind: "timeout" }), 200);
-      }),
-    ]);
-    if (responseTimer) clearTimeout(responseTimer);
-    if (responseOutcome.kind === "timeout") {
+    let response: Response | undefined;
+    try {
+      response = await withOpenSseWatchdog(
+        requestPromise,
+        "forwarded SSE response was buffered",
+      );
+      expect(response.status).toBe(200);
+      expect(
+        obsBodies.filter(
+          (body) => body.eventName === "mcp.tool_call.completed",
+        ),
+      ).toHaveLength(0);
+      const event = `data: ${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        result: {
+          content: [{ type: "text", text: "eventual" }],
+          isError: false,
+        },
+      })}\n\n`;
+      controller?.enqueue(new TextEncoder().encode(event));
       controller?.close();
-      await requestPromise;
-    }
-    expect(responseOutcome.kind).toBe("response");
-    if (responseOutcome.kind !== "response") return;
+      controller = undefined;
+      expect(await response.text()).toBe(event);
 
-    const response = responseOutcome.response;
-    expect(response.status).toBe(200);
-    expect(
-      obsBodies.filter(
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const completedEvents = obsBodies.filter(
         (body) => body.eventName === "mcp.tool_call.completed",
-      ),
-    ).toHaveLength(0);
-    const event = `data: ${JSON.stringify({
-      jsonrpc: "2.0",
-      id: 7,
-      result: {
-        content: [{ type: "text", text: "eventual" }],
-        isError: false,
-      },
-    })}\n\n`;
-    controller?.enqueue(new TextEncoder().encode(event));
-    controller?.close();
-    expect(await response.text()).toBe(event);
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    const completedEvents = obsBodies.filter(
-      (body) => body.eventName === "mcp.tool_call.completed",
-    );
-    expect(completedEvents).toHaveLength(1);
-    expect(completedEvents[0]).toMatchObject({
-      eventName: "mcp.tool_call.completed",
-      status: "ok",
-      metadata: expect.objectContaining({
-        module: "mcp-proxy",
-        mcp_id: "sse-forwarded-mcp",
-        tool_name: "meeting_search",
-        classification: "ok",
-        result_preview: expect.objectContaining({
-          streamed_response: true,
-          http_status: 200,
+      );
+      expect(completedEvents).toHaveLength(1);
+      expect(completedEvents[0]).toMatchObject({
+        eventName: "mcp.tool_call.completed",
+        status: "ok",
+        metadata: expect.objectContaining({
+          module: "mcp-proxy",
+          mcp_id: "sse-forwarded-mcp",
+          tool_name: "meeting_search",
+          classification: "ok",
+          result_preview: expect.objectContaining({
+            streamed_response: true,
+            http_status: 200,
+          }),
         }),
-      }),
-    });
+      });
+    } finally {
+      try {
+        controller?.close();
+      } catch {
+        // The response consumer may already have canceled the upstream stream.
+      }
+      await response?.body?.cancel().catch(() => {
+        /* noop */
+      });
+    }
   });
 
   test("emits failed needs_reauth telemetry only after matching SSE auth error", async () => {
@@ -3058,7 +3093,7 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     });
   });
 
-  test("streamable SSE HTTP 200 Unauthorized JSON-RPC returns actionable reauthorization", async () => {
+  test("streamable mixed-case SSE HTTP 200 Unauthorized JSON-RPC returns actionable reauthorization", async () => {
     const mcpId = "toolbox-stream-sse-unauthorized";
     const mismatchedAuthResponse = JSON.stringify({
       jsonrpc: "2.0",
@@ -3115,7 +3150,7 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
       ].join("\r\n")}`;
       return new Response(sseBody, {
         headers: {
-          "Content-Type": "text/event-stream",
+          "Content-Type": "Text/Event-Stream; Charset=UTF-8",
           "Mcp-Session-Id": "upstream-sse-session-123",
           "Content-Encoding": "identity",
           "Content-Length": String(sseBody.length),
@@ -3163,7 +3198,9 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     };
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(response.headers.get("content-type")).toBe(
+      "Text/Event-Stream; Charset=UTF-8",
+    );
     expect(response.headers.get("Mcp-Session-Id")).toBe(
       "upstream-sse-session-123",
     );
@@ -3203,6 +3240,168 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     });
   });
 
+  test("resumes SSE auth inspection after an oversized comment event", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const mcpId = "toolbox-stream-sse-oversized-comment";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      {
+        secretStore: new InMemoryWritableStore(),
+        publicGatewayUrl: "https://gateway.example.com",
+      },
+    );
+    const oversizedEvent = `:${"x".repeat(65 * 1024)}\n\n`;
+    let upstreamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const toolsCallReady = createSignal();
+
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+
+        const request = JSON.parse(String(init?.body ?? "{}")) as {
+          id?: number;
+          method?: string;
+        };
+        if (request.method === "initialize") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+            { headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (request.method === "notifications/initialized") {
+          return new Response(null, { status: 202 });
+        }
+        if (request.method === "tools/call") {
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              upstreamController = controller;
+            },
+          });
+          const response = new Response(stream, {
+            headers: { "Content-Type": "text/event-stream" },
+          });
+          toolsCallReady.resolve();
+          return response;
+        }
+        return new Response("{}", { status: 404 });
+      },
+    ) as unknown as typeof fetch;
+
+    const requestPromise = proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+        "X-Shifu-Trace-Id": "trace-oversized-sse-auth",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    await toolsCallReady.promise;
+
+    let response: Response | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      response = await withOpenSseWatchdog(
+        requestPromise,
+        "oversized SSE response was buffered",
+      );
+      reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      if (!reader) return;
+
+      const encoder = new TextEncoder();
+      upstreamController?.enqueue(
+        encoder.encode(oversizedEvent.slice(0, -2)),
+      );
+      const authEvent = `data: ${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 4,
+        error: { code: -32001, message: "Unauthorized: token expired" },
+      })}\n\n`;
+      upstreamController?.enqueue(encoder.encode(`\n\n${authEvent}`));
+
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.slice(oversizedEvent.length).includes("\n\n")) {
+        const chunk = await withOpenSseWatchdog(
+          reader.read(),
+          "later SSE auth terminal was not emitted",
+        );
+        expect(chunk.done).toBe(false);
+        output += decoder.decode(chunk.value, { stream: true });
+      }
+
+      expect(output.slice(0, oversizedEvent.length)).toBe(oversizedEvent);
+      expect(output.lastIndexOf(oversizedEvent)).toBe(0);
+      const transformedEvent = output.slice(oversizedEvent.length);
+      const transformedData = transformedEvent
+        .split(/\r\n|\r|\n/)
+        .filter((line) => line === "data" || line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      const body = JSON.parse(transformedData || "{}") as {
+        result?: {
+          diagnosticCode?: string;
+          content?: { text: string }[];
+        };
+      };
+      expect(body.result?.diagnosticCode).toBe("needs_reauth");
+      expect(
+        JSON.parse(body.result?.content?.[0]?.text ?? "{}"),
+      ).toMatchObject({
+        status: "login_required",
+        url: expect.stringContaining(
+          "https://gateway.example.com/mcp/oauth/start?token=",
+        ),
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const completedEvents = obsBodies.filter(
+        (event) => event.eventName === "mcp.tool_call.completed",
+      );
+      expect(completedEvents).toHaveLength(1);
+      expect(completedEvents[0]).toMatchObject({
+        status: "failed",
+        metadata: expect.objectContaining({ classification: "needs_reauth" }),
+      });
+    } finally {
+      try {
+        upstreamController?.close();
+      } catch {
+        // The response consumer may already have canceled the upstream stream.
+      }
+      await reader?.cancel().catch(() => {
+        /* noop */
+      });
+      await response?.body?.cancel().catch(() => {
+        /* noop */
+      });
+    }
+  });
+
   test("streamable SSE emits reauthorization before the upstream stream closes", async () => {
     const mcpId = "toolbox-stream-sse-open-unauthorized";
     const proxy = new McpProxy(
@@ -3221,6 +3420,7 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     let upstreamController:
       | ReadableStreamDefaultController<Uint8Array>
       | undefined;
+    const toolsCallReady = createSignal();
 
     globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
       const request = JSON.parse(String(init?.body ?? "{}")) as {
@@ -3254,9 +3454,11 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
             );
           },
         });
-        return new Response(stream, {
+        const response = new Response(stream, {
           headers: { "Content-Type": "text/event-stream" },
         });
+        toolsCallReady.resolve();
+        return response;
       }
       return new Response("{}", {
         status: 404,
@@ -3277,61 +3479,55 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
         params: { name: "meeting_search", arguments: { query: "course" } },
       }),
     });
-    let responseTimer: ReturnType<typeof setTimeout> | undefined;
-    const responseOutcome = await Promise.race([
-      requestPromise.then((response) => ({ kind: "response" as const, response })),
-      new Promise<{ kind: "timeout" }>((resolve) => {
-        responseTimer = setTimeout(() => resolve({ kind: "timeout" }), 200);
-      }),
-    ]);
-    if (responseTimer) clearTimeout(responseTimer);
-    if (responseOutcome.kind === "timeout") {
-      upstreamController?.close();
-      await requestPromise;
-    }
-    expect(responseOutcome.kind).toBe("response");
-    if (responseOutcome.kind !== "response") return;
+    await toolsCallReady.promise;
 
-    const reader = responseOutcome.response.body?.getReader();
-    expect(reader).toBeDefined();
-    if (!reader) return;
-    let readTimer: ReturnType<typeof setTimeout> | undefined;
-    const readOutcome = await Promise.race([
-      reader.read().then((result) => ({ kind: "chunk" as const, result })),
-      new Promise<{ kind: "timeout" }>((resolve) => {
-        readTimer = setTimeout(() => resolve({ kind: "timeout" }), 200);
-      }),
-    ]);
-    if (readTimer) clearTimeout(readTimer);
-    if (readOutcome.kind === "timeout") {
-      upstreamController?.close();
-      await reader.cancel();
-    }
-    expect(readOutcome.kind).toBe("chunk");
-    if (readOutcome.kind !== "chunk") return;
+    let response: Response | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      response = await withOpenSseWatchdog(
+        requestPromise,
+        "open SSE response was buffered",
+      );
+      reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      if (!reader) return;
+      const readResult = await withOpenSseWatchdog(
+        reader.read(),
+        "open SSE auth event was buffered",
+      );
 
-    const eventText = new TextDecoder().decode(readOutcome.result.value);
-    const dataLine = eventText
-      .split(/\r?\n/)
-      .find((line) => line.startsWith("data:"));
-    const body = JSON.parse(dataLine?.slice(5).trimStart() ?? "{}") as {
-      result?: {
-        diagnosticCode?: string;
-        content?: { text: string }[];
+      const eventText = new TextDecoder().decode(readResult.value);
+      const dataLine = eventText
+        .split(/\r?\n/)
+        .find((line) => line.startsWith("data:"));
+      const body = JSON.parse(dataLine?.slice(5).trimStart() ?? "{}") as {
+        result?: {
+          diagnosticCode?: string;
+          content?: { text: string }[];
+        };
       };
-    };
-    expect(body.result?.diagnosticCode).toBe("needs_reauth");
-    expect(
-      JSON.parse(body.result?.content?.[0]?.text ?? "{}"),
-    ).toMatchObject({
-      status: "login_required",
-      url: expect.stringContaining(
-        "https://gateway.example.com/mcp/oauth/start?token=",
-      ),
-    });
-
-    upstreamController?.close();
-    await reader.cancel();
+      expect(body.result?.diagnosticCode).toBe("needs_reauth");
+      expect(
+        JSON.parse(body.result?.content?.[0]?.text ?? "{}"),
+      ).toMatchObject({
+        status: "login_required",
+        url: expect.stringContaining(
+          "https://gateway.example.com/mcp/oauth/start?token=",
+        ),
+      });
+    } finally {
+      try {
+        upstreamController?.close();
+      } catch {
+        // The response consumer may already have canceled the upstream stream.
+      }
+      await reader?.cancel().catch(() => {
+        /* noop */
+      });
+      await response?.body?.cancel().catch(() => {
+        /* noop */
+      });
+    }
   });
 
   test("worker tool calls preserve upstream JSON-RPC forbidden responses", async () => {

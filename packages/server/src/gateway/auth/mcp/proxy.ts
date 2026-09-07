@@ -408,12 +408,18 @@ function jsonRpcToolCallFromRequest(
   bodyText: string,
 ): { id: unknown; name: string } | undefined {
   try {
-    const parsed = JSON.parse(bodyText);
+    const parsed = JSON.parse(bodyText) as unknown;
+    if (!parsed || typeof parsed !== "object") return undefined;
     if (Array.isArray(parsed)) return undefined;
-    if (parsed?.method !== "tools/call") return undefined;
-    const name = parsed.params?.name;
+    const request = parsed as Record<string, unknown>;
+    if (request.method !== "tools/call") return undefined;
+    const params = request.params;
+    const name =
+      params && typeof params === "object" && !Array.isArray(params)
+        ? (params as Record<string, unknown>).name
+        : undefined;
     return typeof name === "string" && name.trim()
-      ? { id: parsed.id, name: name.trim() }
+      ? { id: request.id, name: name.trim() }
       : undefined;
   } catch {
     return undefined;
@@ -520,7 +526,7 @@ async function parseJsonRpcResponse(response: Response): Promise<any> {
 }
 
 function parseJsonRpcResponseText(contentType: string, text: string): any {
-  if (contentType.includes("text/event-stream")) {
+  if (contentType.toLowerCase().includes("text/event-stream")) {
     // SSE frames: sequence of `event:`/`data:` lines separated by blank lines.
     // For request/response JSON-RPC we expect the last `data:` payload to be
     // the JSON-RPC response object.
@@ -816,7 +822,9 @@ async function inspectForwardedToolCallResponseForObs(
   response: Response,
   requestId: unknown,
 ): Promise<ForwardedToolCallObsInspection | null> {
-  const contentType = response.headers.get("content-type") || "";
+  const contentType = (
+    response.headers.get("content-type") || ""
+  ).toLowerCase();
   if (!contentType.includes("application/json")) {
     return null;
   }
@@ -831,8 +839,17 @@ async function inspectForwardedToolCallResponseForObs(
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return null;
     }
-    if (!Object.hasOwn(parsed, "id") || parsed.id !== requestId) return null;
-    if (!Object.hasOwn(parsed, "result") && !Object.hasOwn(parsed, "error")) {
+    const responseRecord = parsed as Record<string, unknown>;
+    if (
+      !Object.hasOwn(responseRecord, "id") ||
+      responseRecord.id !== requestId
+    ) {
+      return null;
+    }
+    if (
+      !Object.hasOwn(responseRecord, "result") &&
+      !Object.hasOwn(responseRecord, "error")
+    ) {
       return null;
     }
     return inspectJsonRpcTerminalForObs(parsed as JsonRpcResponse);
@@ -4691,6 +4708,7 @@ export class McpProxy {
     }
 
     const contentType = response.headers.get("content-type");
+    const normalizedContentType = contentType?.toLowerCase();
     const responseHeaders = new Headers();
     if (contentType) {
       responseHeaders.set("Content-Type", contentType);
@@ -4698,10 +4716,11 @@ export class McpProxy {
     if (newSessionId) {
       responseHeaders.set("Mcp-Session-Id", newSessionId);
     }
-    const isEventStream = contentType?.includes("text/event-stream") ?? false;
+    const isEventStream =
+      normalizedContentType?.includes("text/event-stream") ?? false;
 
     const shouldInspectForwardedToolCallResponse =
-      forwardedToolName && contentType?.includes("application/json");
+      forwardedToolName && normalizedContentType?.includes("application/json");
     const forwardedToolCallInspection = shouldInspectForwardedToolCallResponse
       ? await inspectForwardedToolCallResponseForObs(
           response.clone(),
@@ -4907,7 +4926,7 @@ export class McpProxy {
       offset: 0,
       consecutiveLineEndings: 0,
     };
-    let inspecting = true;
+    let passthroughOversizedEvent = false;
     let matchedTerminal = false;
 
     const emit = async (
@@ -4915,83 +4934,118 @@ export class McpProxy {
       controller: TransformStreamDefaultController<Uint8Array>,
     ) => {
       if (!text) return;
-      if (!inspecting) {
-        controller.enqueue(encoder.encode(text));
-        return;
-      }
+      let remaining = text;
+      while (remaining) {
+        if (passthroughOversizedEvent) {
+          const scanResult = scanSseEventBoundary(remaining, scanState);
+          const { eventEnd } = scanResult;
+          if (eventEnd < 0) {
+            controller.enqueue(encoder.encode(remaining));
+            scanState = { ...scanResult.state, offset: 0 };
+            return;
+          }
 
-      buffer += text;
-      bufferedByteLength += encoder.encode(text).byteLength;
-      while (true) {
-        const scanResult = scanSseEventBoundary(buffer, scanState);
-        scanState = scanResult.state;
-        const { eventEnd } = scanResult;
-        if (eventEnd < 0) break;
-        const eventText = buffer.slice(0, eventEnd);
-        const encodedEvent = encoder.encode(eventText);
-        if (encodedEvent.byteLength > OBS_RESPONSE_INSPECT_MAX_BYTES) {
-          inspecting = false;
-          controller.enqueue(encoder.encode(buffer));
-          buffer = "";
-          bufferedByteLength = 0;
-          return;
-        }
-        buffer = buffer.slice(eventEnd);
-        bufferedByteLength -= encodedEvent.byteLength;
-        scanState = {
-          offset: 0,
-          consecutiveLineEndings: 0,
-          previousWasCarriageReturn:
-            scanResult.state.previousWasCarriageReturn,
-        };
-
-        const terminal = jsonRpcTerminalFromSseEvent(eventText);
-        if (!terminal || terminal.id !== requestId || matchedTerminal) {
-          controller.enqueue(encodedEvent);
+          controller.enqueue(encoder.encode(remaining.slice(0, eventEnd)));
+          remaining = remaining.slice(eventEnd);
+          passthroughOversizedEvent = false;
+          scanState = {
+            offset: 0,
+            consecutiveLineEndings: 0,
+            previousWasCarriageReturn:
+              scanResult.state.previousWasCarriageReturn,
+          };
           continue;
         }
 
-        matchedTerminal = true;
-        const inspection = inspectJsonRpcTerminalForObs(terminal);
-        const error = inspection.resultOrError;
-        if (
-          buildResult &&
-          error instanceof McpJsonRpcError &&
-          this.authDiagnosticCodeFromMessage(error.message) ===
-            "upstream_unauthorized" &&
-          isMessageOnlyReauthSignal(error.message)
-        ) {
-          const result = await buildResult();
-          onMatchingTerminal({
-            ...inspection,
-            metadata: {
-              ...inspection.metadata,
-              result_preview: resultPreviewFromValue(result),
-            },
-          });
-          controller.enqueue(
-            encoder.encode(
-              replaceSseDataFields(
-                eventText,
-                JSON.stringify({
-                  jsonrpc: "2.0",
-                  id: terminal.id,
-                  result,
-                }),
-              ),
-            ),
-          );
-        } else {
-          onMatchingTerminal(inspection);
-          controller.enqueue(encoder.encode(eventText));
+        const byteCapacity =
+          OBS_RESPONSE_INSPECT_MAX_BYTES - bufferedByteLength + 1;
+        const destination = new Uint8Array(
+          Math.min(byteCapacity, Math.max(4, remaining.length * 3)),
+        );
+        const encoded = encoder.encodeInto(remaining, destination);
+        if (encoded.read === 0) {
+          passthroughOversizedEvent = true;
+          controller.enqueue(encoder.encode(buffer));
+          buffer = "";
+          bufferedByteLength = 0;
+          scanState = { ...scanState, offset: 0 };
+          continue;
         }
-      }
 
-      if (bufferedByteLength > OBS_RESPONSE_INSPECT_MAX_BYTES) {
-        inspecting = false;
-        controller.enqueue(encoder.encode(buffer));
-        buffer = "";
-        bufferedByteLength = 0;
+        buffer += remaining.slice(0, encoded.read);
+        remaining = remaining.slice(encoded.read);
+        bufferedByteLength += encoded.written;
+
+        while (true) {
+          const scanResult = scanSseEventBoundary(buffer, scanState);
+          scanState = scanResult.state;
+          const { eventEnd } = scanResult;
+          if (eventEnd < 0) break;
+          const eventText = buffer.slice(0, eventEnd);
+          const encodedEvent = encoder.encode(eventText);
+          buffer = buffer.slice(eventEnd);
+          bufferedByteLength -= encodedEvent.byteLength;
+          scanState = {
+            offset: 0,
+            consecutiveLineEndings: 0,
+            previousWasCarriageReturn:
+              scanResult.state.previousWasCarriageReturn,
+          };
+
+          if (encodedEvent.byteLength > OBS_RESPONSE_INSPECT_MAX_BYTES) {
+            controller.enqueue(encodedEvent);
+            continue;
+          }
+
+          const terminal = jsonRpcTerminalFromSseEvent(eventText);
+          if (!terminal || terminal.id !== requestId || matchedTerminal) {
+            controller.enqueue(encodedEvent);
+            continue;
+          }
+
+          matchedTerminal = true;
+          const inspection = inspectJsonRpcTerminalForObs(terminal);
+          const error = inspection.resultOrError;
+          if (
+            buildResult &&
+            error instanceof McpJsonRpcError &&
+            this.authDiagnosticCodeFromMessage(error.message) ===
+              "upstream_unauthorized" &&
+            isMessageOnlyReauthSignal(error.message)
+          ) {
+            const result = await buildResult();
+            onMatchingTerminal({
+              ...inspection,
+              metadata: {
+                ...inspection.metadata,
+                result_preview: resultPreviewFromValue(result),
+              },
+            });
+            controller.enqueue(
+              encoder.encode(
+                replaceSseDataFields(
+                  eventText,
+                  JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: terminal.id,
+                    result,
+                  }),
+                ),
+              ),
+            );
+          } else {
+            onMatchingTerminal(inspection);
+            controller.enqueue(encodedEvent);
+          }
+        }
+
+        if (bufferedByteLength > OBS_RESPONSE_INSPECT_MAX_BYTES) {
+          passthroughOversizedEvent = true;
+          controller.enqueue(encoder.encode(buffer));
+          buffer = "";
+          bufferedByteLength = 0;
+          scanState = { ...scanState, offset: 0 };
+        }
       }
     };
 
