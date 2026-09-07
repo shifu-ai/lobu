@@ -3001,9 +3001,62 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     const text = result.content.map((part) => part.text).join(" ").toLowerCase();
 
     expect(response.status).toBe(200);
+    expect(body.id).toBe(1);
     expect(result.diagnosticCode).toBe("oauth_refresh_failed");
     expect(text).not.toContain("login_required");
     expect(text).not.toContain("reconnect");
+  });
+
+  test("streamable HTTP 401 synthetic reauth response preserves the tools/call request id", async () => {
+    const mcpId = "toolbox-stream-http-unauthorized";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          internal: true,
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      return new Response("upstream says token expired", { status: 401 });
+    };
+
+    const response = await proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 47,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      jsonrpc: "2.0",
+      id: 47,
+      result: { isError: true, diagnosticCode: "needs_reauth" },
+    });
   });
 
   test("streamable HTTP 200 Unauthorized JSON-RPC returns actionable reauthorization", async () => {

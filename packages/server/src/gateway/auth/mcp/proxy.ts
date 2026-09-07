@@ -4569,7 +4569,10 @@ export class McpProxy {
         },
         new McpHttpStatusError(response.status, result.content[0].text),
       );
-      return c.json({ jsonrpc: "2.0", id: null, result }, 200);
+      return c.json(
+        { jsonrpc: "2.0", id: forwardedToolCall?.id ?? null, result },
+        200,
+      );
     }
 
     // Detect HTTP 401 + WWW-Authenticate → start MCP OAuth 2.1 auth-code flow.
@@ -4607,7 +4610,7 @@ export class McpProxy {
       return c.json(
         {
           jsonrpc: "2.0",
-          id: null,
+          id: forwardedToolCall?.id ?? null,
           result: {
             content: [{ type: "text", text: JSON.stringify(finalPayload) }],
             isError: true,
