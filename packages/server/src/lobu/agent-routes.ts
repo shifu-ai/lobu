@@ -857,10 +857,18 @@ function safeToolDiagnosticCode(error: unknown): string | undefined {
     : undefined;
 }
 
-function isMcpAuthDiagnosticCode(
-  value: unknown
-): value is 'upstream_unauthorized' | 'upstream_forbidden' {
-  return value === 'upstream_unauthorized' || value === 'upstream_forbidden';
+function isMcpReauthDiagnosticCode(value: unknown): value is 'upstream_unauthorized' {
+  return value === 'upstream_unauthorized';
+}
+
+function isMcpForbiddenDiagnosticCode(value: unknown): value is 'upstream_forbidden' {
+  return value === 'upstream_forbidden';
+}
+
+function classifyMcpToolFailure(diagnosticCode: string | undefined, errorMessage: string) {
+  if (isMcpForbiddenDiagnosticCode(diagnosticCode)) return 'upstream_forbidden';
+  if (isMcpReauthDiagnosticCode(diagnosticCode)) return 'needs_reauth';
+  return classifyToolCallFailure({ errorMessage });
 }
 
 /**
@@ -974,17 +982,25 @@ function discoveryFailureFromStructuredResult(
       ok: false,
       status: 'degraded',
       errorCode:
-        diagnosticCode === 'auth_required_zero_tools'
+        diagnosticCode === 'auth_required_zero_tools' ||
+        isMcpForbiddenDiagnosticCode(diagnosticCode)
           ? diagnosticCode
           : 'lobu_mcp_tools_discovery_failed',
     };
   }
 
   if (status === 'needs_reauth') {
+    if (isMcpForbiddenDiagnosticCode(diagnosticCode)) {
+      return {
+        ok: false,
+        status: 'degraded',
+        errorCode: diagnosticCode,
+      };
+    }
     return {
       ok: false,
       status: 'needs_reauth',
-      errorCode: isMcpAuthDiagnosticCode(diagnosticCode)
+      errorCode: isMcpReauthDiagnosticCode(diagnosticCode)
         ? diagnosticCode
         : undefined,
     };
@@ -1023,7 +1039,14 @@ async function discoverMcpToolNames(params: {
     return { ok: true, toolsDiscovered: extractMcpToolNames(result) };
   } catch (error) {
     const diagnosticCode = safeToolDiagnosticCode(error);
-    if (isMcpAuthDiagnosticCode(diagnosticCode)) {
+    if (isMcpForbiddenDiagnosticCode(diagnosticCode)) {
+      return {
+        ok: false,
+        status: 'degraded',
+        errorCode: diagnosticCode,
+      };
+    }
+    if (isMcpReauthDiagnosticCode(diagnosticCode)) {
       return {
         ok: false,
         status: 'needs_reauth',
@@ -1269,11 +1292,10 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     );
     if (result?.isError) {
       const diagnosticCode = safeToolDiagnosticCode(result);
-      const classification = isMcpAuthDiagnosticCode(diagnosticCode)
-        ? 'needs_reauth'
-        : classifyToolCallFailure({
-            errorMessage: extractToolFailureSignal(result),
-          });
+      const classification = classifyMcpToolFailure(
+        diagnosticCode,
+        extractToolFailureSignal(result)
+      );
       const connectUrl =
         classification === 'needs_reauth'
           ? buildToolCallConnectUrl({
@@ -1295,9 +1317,10 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     return c.json({ ok: true, content: result?.content ?? null });
   } catch (error) {
     const diagnosticCode = safeToolDiagnosticCode(error);
-    const classification = classifyToolCallFailure({
-      errorMessage: error instanceof Error ? error.message : String(error),
-    });
+    const classification = classifyMcpToolFailure(
+      diagnosticCode,
+      error instanceof Error ? error.message : String(error)
+    );
     const connectUrl =
       classification === 'needs_reauth'
         ? buildToolCallConnectUrl({

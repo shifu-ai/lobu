@@ -1022,6 +1022,15 @@ describe("durable observability for tools/list", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(result.tools).toEqual([]);
+    if (diagnostic === "upstream_forbidden") {
+      expect(result.status).toBe("degraded");
+      expect(result.instructions?.toLowerCase()).not.toContain("reconnect");
+      expect(result.instructions?.toLowerCase()).not.toContain("login");
+    } else {
+      expect(result.status).toBe("needs_reauth");
+      expect(result.instructions?.toLowerCase()).toContain("reconnect");
+    }
+    expect(result.diagnosticCode).toBe(diagnostic);
     const completed = obsBodies.find(
       (body) =>
         body.eventName === "mcp.tools_list.completed" &&

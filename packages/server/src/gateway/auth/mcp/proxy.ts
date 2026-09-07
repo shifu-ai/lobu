@@ -1721,6 +1721,18 @@ export class McpProxy {
       // (CONNECT_LINK_TOKEN_TTL_MS) while a session's instructions outlive
       // that, and an expired link is worse than none. The live link is minted
       // on the tools/call path instead, at the moment it is needed.
+      if (diagnosticCode === "upstream_forbidden") {
+        return bindDiscoveryProvenance({
+          tools: [],
+          status: "degraded",
+          diagnosticCode,
+          instructions:
+            `The "${mcpId}" connector is configured for this user but upstream returned forbidden, ` +
+            `so none of its tools are available right now. This is NOT the same as the user ` +
+            `not having the service — do not claim the capability is missing. Ask an administrator ` +
+            `to review connector permissions or scopes before retrying.`,
+        });
+      }
       return bindDiscoveryProvenance({
         tools: [],
         status: "needs_reauth",

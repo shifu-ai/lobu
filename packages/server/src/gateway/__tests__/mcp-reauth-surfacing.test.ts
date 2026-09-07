@@ -219,6 +219,27 @@ describe("discovery distinguishes a broken connector from a missing one", () => 
     expect(instructions.toLowerCase()).toContain("not the same");
   });
 
+  test("explains upstream forbidden discovery without reconnect guidance", async () => {
+    const proxy = makeProxy();
+    globalThis.fetch = upstream(() => new Response("forbidden", { status: 403 }));
+
+    const result = (await discover(proxy)) as {
+      tools: unknown[];
+      status?: string;
+      diagnosticCode?: string;
+      instructions?: string;
+    };
+
+    expect(result.tools).toEqual([]);
+    expect(result.status).toBe("degraded");
+    expect(result.diagnosticCode).toBe("upstream_forbidden");
+    const instructions = result.instructions ?? "";
+    expect(instructions).toContain("google_workspace");
+    expect(instructions.toLowerCase()).toContain("forbidden");
+    expect(instructions.toLowerCase()).not.toContain("reconnect");
+    expect(instructions.toLowerCase()).not.toContain("login");
+  });
+
   test("carries no connect link, whose token would outlive its 15 minute TTL", async () => {
     const proxy = makeProxy();
     globalThis.fetch = upstream(() => new Response("no", { status: 401 }));

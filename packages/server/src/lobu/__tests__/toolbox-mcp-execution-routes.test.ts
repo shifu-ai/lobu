@@ -899,7 +899,7 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
-  test('POST /mcp/tools/call returns safe diagnostic code and classifies upstream_forbidden isError result as needs_reauth', async () => {
+  test('POST /mcp/tools/call returns safe diagnostic code and classifies upstream_forbidden isError result as forbidden', async () => {
     executeToolDirectMock.mockResolvedValueOnce({
       content: [{ type: 'text', text: 'private upstream body must not leak' }],
       isError: true,
@@ -930,7 +930,7 @@ describe('Toolbox MCP execution routes', () => {
       errorCode: 'lobu_mcp_tool_error',
       errorMessage: 'MCP tool execution failed',
       diagnosticCode: 'upstream_forbidden',
-      classification: 'needs_reauth',
+      classification: 'upstream_forbidden',
     });
     expect(executeToolDirectMock).toHaveBeenCalledWith(
       AGENT_ID,
@@ -2383,7 +2383,7 @@ describe('Toolbox MCP execution routes', () => {
     });
   });
 
-  test('POST /mcp/connections/materialize maps tools/list auth failures to needs_reauth', async () => {
+  test('POST /mcp/connections/materialize maps upstream_forbidden tools/list failures to degraded', async () => {
     seedSourceConnectionForMaterialize();
     listToolsDirectMock.mockRejectedValueOnce(
       Object.assign(new Error('MCP tools/list requires authentication'), {
@@ -2407,7 +2407,7 @@ describe('Toolbox MCP execution routes', () => {
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({
-      status: 'needs_reauth',
+      status: 'degraded',
       lobuConnectionRef: null,
       toolsDiscovered: [],
       errorCode: 'upstream_forbidden',
