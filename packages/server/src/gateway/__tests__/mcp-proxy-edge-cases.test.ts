@@ -3068,6 +3068,125 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     expect(failedBody.result.diagnosticCode).toBe("oauth_refresh_failed");
   });
 
+  test("does not apply a later concurrent refresh failure to an in-flight successful request", async () => {
+    const secretStore = new InMemoryWritableStore();
+    const mcpId = "toolbox-refresh-opposite-order";
+    const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+    const credential = {
+      accessToken: "valid-access-token",
+      refreshToken: "refresh-token",
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      clientId: "client-id",
+      tokenUrl: "https://auth.example.com/oauth/token",
+      resource: "https://toolbox.example.com/mcp",
+      tokenEndpointAuthMethod: "none",
+    };
+    await secretStore.put(credentialName, JSON.stringify(credential));
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    const firstToolCallStarted = createSignal();
+    const releaseFirstToolCall = createSignal();
+    let toolCallCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+
+      toolCallCount += 1;
+      const callNumber = toolCallCount;
+      if (callNumber === 1) {
+        firstToolCallStarted.resolve();
+        await releaseFirstToolCall.promise;
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [{ type: "text", text: `success-${callNumber}` }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const callRequest = {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: {} },
+      }),
+    };
+    const successfulRequest = proxy.getApp().request(`/${mcpId}`, callRequest);
+    await firstToolCallStarted.promise;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        ...credential,
+        accessToken: "expired-access-token",
+        expiresAt: Date.now() - 60_000,
+      }),
+    );
+
+    const failedResponse = await proxy.getApp().request(`/${mcpId}`, callRequest);
+    const failedBody = await failedResponse.json();
+    releaseFirstToolCall.resolve();
+    const successfulResponse = await successfulRequest;
+    const successfulBody = await successfulResponse.json();
+
+    expect(failedBody.result.isError).toBe(true);
+    expect(failedBody.result.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(successfulResponse.status).toBe(200);
+    expect(successfulBody).toMatchObject({
+      jsonrpc: "2.0",
+      id: 2,
+      result: {
+        content: [{ type: "text", text: "success-1" }],
+        isError: false,
+      },
+    });
+    expect(JSON.stringify(successfulBody)).not.toContain("oauth_refresh_failed");
+  });
+
   test("classifies a 401 after refresh failure without consuming the response body error", async () => {
     const secretStore = new InMemoryWritableStore();
     await secretStore.put(

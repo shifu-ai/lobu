@@ -4012,6 +4012,7 @@ export class McpProxy {
   >();
   private readonly refreshFailuresByResponse =
     new WeakMap<Response, CredentialRefreshFailure>();
+  private readonly responsesWithCredentialResolution = new WeakSet<Response>();
 
   private static readonly REFRESH_FAILURE_TTL_MS = 60_000;
 
@@ -4150,10 +4151,18 @@ export class McpProxy {
     userId: string | undefined,
     mcpId: string,
   ): CredentialRefreshFailure | undefined {
-    return (
-      this.refreshFailureForResponse(response) ??
-      this.takeRefreshFailure(agentId, userId, mcpId)
-    );
+    const responseFailure = this.refreshFailureForResponse(response);
+    if (responseFailure) return responseFailure;
+    if (this.responsesWithCredentialResolution.has(response)) return undefined;
+    return this.takeRefreshFailure(agentId, userId, mcpId);
+  }
+
+  private attributeCredentialResolution(
+    response: Response,
+    failure?: CredentialRefreshFailure,
+  ): void {
+    this.responsesWithCredentialResolution.add(response);
+    if (failure) this.refreshFailuresByResponse.set(response, failure);
   }
 
   private async resolveCredentialToken(
@@ -4268,11 +4277,8 @@ export class McpProxy {
       body: body || undefined,
       signal: upstreamTimeoutSignal(method),
     });
-    if (credentialResolutionFailure) {
-      this.refreshFailuresByResponse.set(
-        response,
-        credentialResolutionFailure,
-      );
+    if (scopeKey && !httpServer.internal) {
+      this.attributeCredentialResolution(response, credentialResolutionFailure);
     }
 
     if (response.status === 401 && scopeKey && !httpServer.internal) {
@@ -4303,6 +4309,7 @@ export class McpProxy {
           body: body || undefined,
           signal: upstreamTimeoutSignal(method),
         });
+        this.attributeCredentialResolution(retryResponse);
         const retrySessionId = retryResponse.headers.get("Mcp-Session-Id");
         if (retrySessionId) {
           this.setSession(sessionKey, retrySessionId);
@@ -4598,11 +4605,8 @@ export class McpProxy {
         body: bodyText || undefined,
         signal: upstreamTimeoutSignal(c.req.method),
       });
-      if (credentialResolutionFailure) {
-        this.refreshFailuresByResponse.set(
-          response,
-          credentialResolutionFailure,
-        );
+      if (scopeKey && !httpServer.internal) {
+        this.attributeCredentialResolution(response, credentialResolutionFailure);
       }
     } catch (error) {
       this.recordServerFailure(
@@ -4741,8 +4745,8 @@ export class McpProxy {
             // Retry path is POST-only (guarded above) — always bounded.
             signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS),
           });
-          if (credentialResolutionFailure) {
-            this.refreshFailuresByResponse.set(
+          if (scopeKey && !httpServer.internal) {
+            this.attributeCredentialResolution(
               response,
               credentialResolutionFailure,
             );
