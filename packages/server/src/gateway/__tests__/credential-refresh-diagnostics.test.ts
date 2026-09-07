@@ -6,6 +6,7 @@ import {
   expect,
   test,
 } from "bun:test";
+import { __resetEncryptionKeyCacheForTests } from "@lobu/core";
 import type { SecretPutOptions, SecretRef } from "@lobu/core";
 import {
   createDeviceAuthRoutes,
@@ -89,6 +90,7 @@ let userSeq = 0;
 beforeAll(() => {
   originalEncryptionKey = process.env.ENCRYPTION_KEY;
   process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
+  __resetEncryptionKeyCacheForTests();
   originalFetch = globalThis.fetch;
 });
 
@@ -98,6 +100,7 @@ afterAll(() => {
   } else {
     delete process.env.ENCRYPTION_KEY;
   }
+  __resetEncryptionKeyCacheForTests();
   globalThis.fetch = originalFetch;
 });
 

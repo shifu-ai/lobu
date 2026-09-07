@@ -117,6 +117,23 @@ describe("tool call surfaces an expired authorization", () => {
     expect(text.toLowerCase()).toContain("reconnect");
   });
 
+  test("reports upstream_forbidden instead of needs_reauth on a 403", async () => {
+    const proxy = makeProxy();
+    globalThis.fetch = upstream(() => new Response("forbidden", { status: 403 }));
+
+    const result = (await runTool(proxy)) as {
+      isError: boolean;
+      diagnosticCode?: string;
+      content: { type: string; text: string }[];
+    };
+
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("upstream_forbidden");
+    const text = result.content.map((c) => c.text).join(" ");
+    expect(text).toContain("403");
+    expect(text.toLowerCase()).not.toContain("reconnect");
+  });
+
   test("a 401 body stays readable after a failed refresh", async () => {
     // Regression: the 401 branch cancelled the body then fell through, so the
     // caller's `.text()` threw `Body is unusable` and the authorization signal

@@ -3716,7 +3716,8 @@ export class McpProxy {
     organizationId?: string;
     refreshFailure?: CredentialRefreshFailure;
   }): { text: string; diagnosticCode: string } | null {
-    if (!params.refreshFailure?.permanent) return null;
+    if (params.refreshFailure && !params.refreshFailure.permanent) return null;
+    if (!params.refreshFailure && params.httpStatus !== 401) return null;
 
     const errorMessage =
       params.error instanceof Error
