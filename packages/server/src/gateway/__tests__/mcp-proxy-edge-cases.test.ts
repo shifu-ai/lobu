@@ -2820,7 +2820,12 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
           id: request.id,
           error: { code: -32001, message: "Unauthorized: token expired" },
         }),
-        { headers: { "Content-Type": "application/json" } },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "Mcp-Session-Id": "upstream-session-123",
+          },
+        },
       );
     };
 
@@ -2848,9 +2853,101 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     };
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("Mcp-Session-Id")).toBe(
+      "upstream-session-123",
+    );
     expect(body).toMatchObject({
       jsonrpc: "2.0",
       id: 1,
+      result: { isError: true, diagnosticCode: "needs_reauth" },
+    });
+    const loginPayload = JSON.parse(body.result?.content?.[0]?.text ?? "{}");
+    expect(loginPayload).toMatchObject({
+      status: "login_required",
+      url: expect.stringContaining(
+        "https://gateway.example.com/mcp/oauth/start?token=",
+      ),
+      message: expect.stringContaining("show the user this login link"),
+    });
+  });
+
+  test("streamable SSE HTTP 200 Unauthorized JSON-RPC returns actionable reauthorization", async () => {
+    const mcpId = "toolbox-stream-sse-unauthorized";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      {
+        secretStore: new InMemoryWritableStore(),
+        publicGatewayUrl: "https://gateway.example.com",
+      },
+    );
+
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      const sseBody = [
+        "event: message",
+        `data: ${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          error: { code: -32001, message: "Unauthorized: token expired" },
+        })}`,
+        "",
+        "",
+      ].join("\n");
+      return new Response(sseBody, {
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+
+    const response = await proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    const bodyText = await response.text();
+    const dataLine = bodyText
+      .split(/\r?\n/)
+      .find((line) => line.startsWith("data:"));
+    const body = JSON.parse(dataLine?.slice(5).trimStart() ?? "{}") as {
+      jsonrpc?: string;
+      id?: number | null;
+      result?: {
+        diagnosticCode?: string;
+        content?: { text: string }[];
+        isError?: boolean;
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(body).toMatchObject({
+      jsonrpc: "2.0",
+      id: 2,
       result: { isError: true, diagnosticCode: "needs_reauth" },
     });
     const loginPayload = JSON.parse(body.result?.content?.[0]?.text ?? "{}");

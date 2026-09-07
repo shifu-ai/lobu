@@ -4564,8 +4564,7 @@ export class McpProxy {
       responseHeaders.set("Mcp-Session-Id", newSessionId);
     }
 
-    const shouldInspectForwardedToolCallResponse =
-      forwardedToolName && !contentType?.includes("text/event-stream");
+    const shouldInspectForwardedToolCallResponse = forwardedToolName;
     const forwardedToolCallInspection = shouldInspectForwardedToolCallResponse
       ? await inspectForwardedToolCallResponseForObs(response.clone())
       : null;
@@ -4628,10 +4627,18 @@ export class McpProxy {
         },
         forwardedToolCallInspection.resultOrError,
       );
-      return c.json(
-        { jsonrpc: "2.0", id: forwardedToolCall?.id ?? null, result },
-        200,
-      );
+      const replacement = JSON.stringify({
+        jsonrpc: "2.0",
+        id: forwardedToolCall?.id ?? null,
+        result,
+      });
+      const replacementBody = contentType?.includes("text/event-stream")
+        ? `event: message\ndata: ${replacement}\n\n`
+        : replacement;
+      return new Response(replacementBody, {
+        status: 200,
+        headers: responseHeaders,
+      });
     }
     const body = this.wrapStreamableResponseBody(response.body, mcpId, agentId);
     emitForwardedToolCallCompleted(
