@@ -192,7 +192,7 @@ describe("tool call surfaces an expired authorization", () => {
     expect(text.toLowerCase()).toContain("reconnect");
   });
 
-  test("a JSON-RPC error no longer returns empty content", async () => {
+  test("a non-auth JSON-RPC error remains connector_unavailable", async () => {
     const proxy = makeProxy();
     globalThis.fetch = upstream(
       () =>
@@ -208,14 +208,16 @@ describe("tool call surfaces an expired authorization", () => {
 
     const result = (await runTool(proxy)) as {
       isError: boolean;
+      diagnosticCode?: string;
       content: { text: string }[];
     };
 
     expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("connector_unavailable");
     expect(result.content.length).toBeGreaterThan(0);
-    expect(result.content.map((c) => c.text).join(" ")).toContain(
-      "upstream exploded",
-    );
+    const text = result.content.map((c) => c.text).join(" ");
+    expect(text).toContain("upstream exploded");
+    expect(text.toLowerCase()).not.toContain("reconnect");
   });
 });
 

@@ -3742,8 +3742,9 @@ export class McpProxy {
         : String(params.error ?? "");
     const messageOnlyReauth =
       !params.refreshFailure &&
-      (params.httpStatus === undefined ||
-        (params.httpStatus >= 200 && params.httpStatus < 300)) &&
+      params.httpStatus !== undefined &&
+      params.httpStatus >= 200 &&
+      params.httpStatus < 300 &&
       isMessageOnlyReauthSignal(errorMessage);
     if (
       !params.refreshFailure &&
