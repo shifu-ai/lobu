@@ -814,6 +814,7 @@ function inspectJsonRpcTerminalForObs(
 
 async function inspectForwardedToolCallResponseForObs(
   response: Response,
+  requestId: unknown,
 ): Promise<ForwardedToolCallObsInspection | null> {
   const contentType = response.headers.get("content-type") || "";
   if (!contentType.includes("application/json")) {
@@ -823,42 +824,21 @@ async function inspectForwardedToolCallResponseForObs(
   try {
     const bodyText = await readResponseTextForObs(response);
     if (!bodyText) return null;
-    const data = parseJsonRpcResponseText(
+    const parsed = parseJsonRpcResponseText(
       contentType,
       bodyText,
-    ) as JsonRpcResponse;
-    if (data?.error) {
-      const errorMsg =
-        data.error.message ||
-        (typeof data.error === "string" ? data.error : "Upstream error");
-      return {
-        status: "failed",
-        metadata: {
-          jsonrpc_error_code: data.error.code,
-          result_preview: resultPreviewFromJsonRpcError(data.error),
-        },
-        resultOrError: new McpJsonRpcError(data.error.code, errorMsg),
-      };
+    ) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
     }
-
-    const result = data?.result;
-    if (result?.isError) {
-      return {
-        status: "failed",
-        metadata: {
-          result_preview: resultPreviewFromValue(result),
-          ...(diagnosticCodeFromToolResult(result)
-            ? { diagnostic_code: diagnosticCodeFromToolResult(result) }
-            : {}),
-        },
-        resultOrError: result,
-      };
+    if (!Object.hasOwn(parsed, "id") || parsed.id !== requestId) return null;
+    if (!Object.hasOwn(parsed, "result") && !Object.hasOwn(parsed, "error")) {
+      return null;
     }
+    return inspectJsonRpcTerminalForObs(parsed as JsonRpcResponse);
   } catch {
     return null;
   }
-
-  return null;
 }
 
 async function readResponseTextForObs(
@@ -4723,7 +4703,10 @@ export class McpProxy {
     const shouldInspectForwardedToolCallResponse =
       forwardedToolName && contentType?.includes("application/json");
     const forwardedToolCallInspection = shouldInspectForwardedToolCallResponse
-      ? await inspectForwardedToolCallResponseForObs(response.clone())
+      ? await inspectForwardedToolCallResponseForObs(
+          response.clone(),
+          forwardedToolCall.id,
+        )
       : null;
     if (
       response.ok &&
@@ -4811,13 +4794,24 @@ export class McpProxy {
       responseHeaders.delete("content-length");
     }
     body = this.wrapStreamableResponseBody(body, mcpId, agentId);
-    if (!isEventStream) {
+    if (
+      !isEventStream &&
+      (!shouldInspectForwardedToolCallResponse || forwardedToolCallInspection)
+    ) {
       emitForwardedToolCallCompleted(
         forwardedToolCallInspection?.status ?? (response.ok ? "ok" : "failed"),
         forwardedToolCallInspection
           ? {
               http_status: response.status,
               ...forwardedToolCallInspection.metadata,
+              ...(forwardedToolCallInspection.status === "ok"
+                ? {
+                    result_preview: {
+                      streamed_response: true,
+                      http_status: response.status,
+                    },
+                  }
+                : {}),
             }
           : {
               http_status: response.status,

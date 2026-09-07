@@ -1181,6 +1181,51 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
     return { response, obsBodies };
   }
 
+  test("passes through mismatched-id JSON auth errors without terminal completion", async () => {
+    const upstreamResponse = {
+      jsonrpc: "2.0",
+      id: 999,
+      error: { code: -32001, message: "Unauthorized: unrelated request" },
+    };
+    const { response, obsBodies } =
+      await requestForwardedToolCall(upstreamResponse);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(JSON.stringify(upstreamResponse));
+    expect(
+      obsBodies.filter(
+        (body) => body.eventName === "mcp.tool_call.completed",
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("passes through missing-id JSON bodies and notifications without terminal completion", async () => {
+    const upstreamResponses = [
+      {
+        jsonrpc: "2.0",
+        error: { code: -32001, message: "Unauthorized: missing id" },
+      },
+      {
+        jsonrpc: "2.0",
+        method: "notifications/progress",
+        params: { progress: 1 },
+      },
+    ];
+
+    for (const upstreamResponse of upstreamResponses) {
+      const { response, obsBodies } =
+        await requestForwardedToolCall(upstreamResponse);
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(JSON.stringify(upstreamResponse));
+      expect(
+        obsBodies.filter(
+          (body) => body.eventName === "mcp.tool_call.completed",
+        ),
+      ).toHaveLength(0);
+    }
+  });
+
   test("emits failed completed event when HTTP 200 contains JSON-RPC error", async () => {
     const { response, obsBodies } = await requestForwardedToolCall({
       jsonrpc: "2.0",
