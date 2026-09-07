@@ -2784,6 +2784,85 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     expect(text).not.toContain("reconnect");
   });
 
+  test("streamable HTTP 200 Unauthorized JSON-RPC returns actionable reauthorization", async () => {
+    const mcpId = "toolbox-stream-jsonrpc-unauthorized";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      {
+        secretStore: new InMemoryWritableStore(),
+        publicGatewayUrl: "https://gateway.example.com",
+      },
+    );
+
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          error: { code: -32001, message: "Unauthorized: token expired" },
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const response = await proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    const body = (await response.json()) as {
+      jsonrpc?: string;
+      id?: number | null;
+      result?: {
+        diagnosticCode?: string;
+        content?: { text: string }[];
+        isError?: boolean;
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { isError: true, diagnosticCode: "needs_reauth" },
+    });
+    const loginPayload = JSON.parse(body.result?.content?.[0]?.text ?? "{}");
+    expect(loginPayload).toMatchObject({
+      status: "login_required",
+      url: expect.stringContaining(
+        "https://gateway.example.com/mcp/oauth/start?token=",
+      ),
+      message: expect.stringContaining("show the user this login link"),
+    });
+  });
+
   test("worker tool calls preserve upstream JSON-RPC forbidden responses", async () => {
     const proxy = new McpProxy(
       createConfigSource({

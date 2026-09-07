@@ -404,13 +404,17 @@ function resultPreviewFromJsonRpcError(
   };
 }
 
-function toolNameFromJsonRpcToolCall(bodyText: string): string | undefined {
+function jsonRpcToolCallFromRequest(
+  bodyText: string,
+): { id: unknown; name: string } | undefined {
   try {
     const parsed = JSON.parse(bodyText);
     if (Array.isArray(parsed)) return undefined;
     if (parsed?.method !== "tools/call") return undefined;
     const name = parsed.params?.name;
-    return typeof name === "string" && name.trim() ? name.trim() : undefined;
+    return typeof name === "string" && name.trim()
+      ? { id: parsed.id, name: name.trim() }
+      : undefined;
   } catch {
     return undefined;
   }
@@ -4254,10 +4258,11 @@ export class McpProxy {
       });
       return new Response("Request body too large", { status: 413 });
     }
-    const forwardedToolName =
+    const forwardedToolCall =
       c.req.method === "POST"
-        ? toolNameFromJsonRpcToolCall(bodyText)
+        ? jsonRpcToolCallFromRequest(bodyText)
         : undefined;
+    const forwardedToolName = forwardedToolCall?.name;
     const toolCallStartedAt = Date.now();
     let forwardedToolCallObsCompleted = false;
     const emitForwardedToolCallCompleted = (
@@ -4564,6 +4569,70 @@ export class McpProxy {
     const forwardedToolCallInspection = shouldInspectForwardedToolCallResponse
       ? await inspectForwardedToolCallResponseForObs(response.clone())
       : null;
+    if (
+      response.ok &&
+      authContext &&
+      forwardedToolCallInspection?.resultOrError instanceof McpJsonRpcError &&
+      this.authDiagnosticCodeFromMessage(
+        forwardedToolCallInspection.resultOrError.message,
+      ) === "upstream_unauthorized" &&
+      isMessageOnlyReauthSignal(
+        forwardedToolCallInspection.resultOrError.message,
+      )
+    ) {
+      const payload = await this.handleUpstream401({
+        mcpId,
+        agentId,
+        userId: authContext.userId,
+        scopeKey: scopeKey ?? authContext.userId,
+        httpServer,
+        wwwAuthenticate: response.headers.get("www-authenticate"),
+        platform: authContext.platform ?? "",
+        channelId: authContext.channelId,
+        conversationId: authContext.conversationId,
+        teamId: authContext.teamId,
+        connectionId: authContext.connectionId,
+        deviceAuthFallback: false,
+      });
+      const connectUrl = payload
+        ? undefined
+        : buildMcpConnectUrl({
+            publicGatewayUrl: this.publicGatewayUrl,
+            agentId,
+            mcpId,
+            userId: authContext.userId,
+            organizationId: getOrgId(),
+            logContext: "streamable tools/call",
+          });
+      const finalPayload = payload ?? {
+        status: "login_required" as const,
+        ...(connectUrl ? { url: connectUrl } : {}),
+        message: connectUrl
+          ? `Authentication is required for ${mcpId}. STOP calling tools and show the user this login link. Do NOT retry this tool call — wait for the user to complete login first.`
+          : `Authentication is required for ${mcpId}. Tell the user to reconnect it at ${WORKBENCH_CONNECTIONS_HINT} before retrying.`,
+      };
+      const result = {
+        content: [{ type: "text", text: JSON.stringify(finalPayload) }],
+        isError: true,
+        diagnosticCode: "needs_reauth",
+      };
+      await response.body?.cancel().catch(() => {
+        /* noop */
+      });
+      emitForwardedToolCallCompleted(
+        "failed",
+        {
+          http_status: response.status,
+          ...forwardedToolCallInspection.metadata,
+          result_preview: resultPreviewFromValue(result),
+        },
+        forwardedToolCallInspection.resultOrError,
+      );
+      return c.json(
+        { jsonrpc: "2.0", id: forwardedToolCall?.id ?? null, result },
+        200,
+      );
+    }
     const body = this.wrapStreamableResponseBody(response.body, mcpId, agentId);
     emitForwardedToolCallCompleted(
       forwardedToolCallInspection?.status ?? (response.ok ? "ok" : "failed"),
