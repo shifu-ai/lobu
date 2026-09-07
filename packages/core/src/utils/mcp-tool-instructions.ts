@@ -15,7 +15,11 @@ export interface McpStatus {
   requiresAuth: boolean;
   requiresInput: boolean;
   authenticated: boolean;
-  authStatus?: "not_authenticated" | "authenticated" | "needs_reauth" | "degraded";
+  authStatus?:
+    | "not_authenticated"
+    | "authenticated"
+    | "needs_reauth"
+    | "degraded";
   authFailureReason?: string;
   authRefreshStatus?: number;
   authRefreshUpstreamError?: string;

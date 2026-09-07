@@ -682,7 +682,8 @@ describe("summariseAuthStart / summariseAuthCheck", () => {
         message: "Reconnect the connector.",
         login: {
           verificationUri: "https://gateway.example.com/connect/mcp-token",
-          verificationUriComplete: "https://gateway.example.com/connect/mcp-token",
+          verificationUriComplete:
+            "https://gateway.example.com/connect/mcp-token",
           expiresIn: 900,
         },
         reason: "upstream_rejected",
@@ -699,7 +700,8 @@ describe("summariseAuthStart / summariseAuthCheck", () => {
       message: "Reconnect the connector.",
       login: {
         verificationUri: "https://gateway.example.com/connect/mcp-token",
-        verificationUriComplete: "https://gateway.example.com/connect/mcp-token",
+        verificationUriComplete:
+          "https://gateway.example.com/connect/mcp-token",
         expiresIn: 900,
       },
       verification_url: "https://gateway.example.com/connect/mcp-token",
