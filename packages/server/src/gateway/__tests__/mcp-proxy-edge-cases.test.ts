@@ -2648,6 +2648,216 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     expect(text).not.toContain("login");
   });
 
+  test("worker tool calls surface a transient refresh failure without login guidance", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-worker-refresh-transient/credential",
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-worker-refresh-transient": {
+          id: "toolbox-worker-refresh-transient",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("upstream says token expired", { status: 401 });
+    };
+
+    const response = await proxy.getApp().request(
+      "/toolbox-worker-refresh-transient/tools/meeting_search",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${agent1Token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query: "course" }),
+      },
+    );
+    const body = await response.json();
+    const text = body.content.map((part: { text: string }) => part.text).join(" ").toLowerCase();
+
+    expect(response.status).toBe(200);
+    expect(body.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(text).not.toContain("login_required");
+    expect(text).not.toContain("_login");
+    expect(text).not.toContain("reconnect");
+  });
+
+  test("streamable worker calls surface a transient refresh failure without reconnect guidance", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-stream-refresh-transient/credential",
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-stream-refresh-transient": {
+          id: "toolbox-stream-refresh-transient",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const request = JSON.parse(String(init?.body ?? "{}")) as { method?: string; id?: number };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("upstream says token expired", { status: 401 });
+    };
+
+    const response = await proxy.getApp().request("/toolbox-stream-refresh-transient", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    const body = await response.json();
+    const result = body.result as {
+      diagnosticCode?: string;
+      content: { text: string }[];
+    };
+    const text = result.content.map((part) => part.text).join(" ").toLowerCase();
+
+    expect(response.status).toBe(200);
+    expect(result.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(text).not.toContain("login_required");
+    expect(text).not.toContain("reconnect");
+  });
+
+  test("worker tool calls preserve upstream JSON-RPC forbidden responses", async () => {
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-worker-jsonrpc-forbidden": {
+          id: "toolbox-worker-jsonrpc-forbidden",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32003, message: "Forbidden" },
+        }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      );
+
+    const response = await proxy.getApp().request(
+      "/toolbox-worker-jsonrpc-forbidden/tools/meeting_search",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${agent1Token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query: "course" }),
+      },
+    );
+    const body = await response.json();
+    const text = body.content.map((part: { text: string }) => part.text).join(" ").toLowerCase();
+
+    expect(response.status).toBe(200);
+    expect(body.diagnosticCode).toBe("upstream_forbidden");
+    expect(text).toContain("403");
+    expect(text).not.toContain("login");
+    expect(text).not.toContain("reconnect");
+  });
+
+  test("worker tool calls preserve plain upstream forbidden responses", async () => {
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-worker-plain-forbidden": {
+          id: "toolbox-worker-plain-forbidden",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+    globalThis.fetch = async () => new Response("Forbidden", { status: 403 });
+
+    const response = await proxy.getApp().request(
+      "/toolbox-worker-plain-forbidden/tools/meeting_search",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${agent1Token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query: "course" }),
+      },
+    );
+    const body = await response.json();
+    const text = body.content.map((part: { text: string }) => part.text).join(" ").toLowerCase();
+
+    expect(response.status).toBe(200);
+    expect(body.diagnosticCode).toBe("upstream_forbidden");
+    expect(text).toContain("403");
+    expect(text).not.toContain("login");
+    expect(text).not.toContain("reconnect");
+  });
+
   test("surfaces transient tools/list refresh failure as degraded without reconnect guidance", async () => {
     const secretStore = new InMemoryWritableStore();
     await secretStore.put(

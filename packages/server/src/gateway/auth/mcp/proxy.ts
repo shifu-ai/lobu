@@ -614,6 +614,10 @@ function diagnosticCodeForRefreshFailure(
   return failure.permanent ? "needs_reauth" : "oauth_refresh_failed";
 }
 
+function transientRefreshFailureMessage(mcpId: string): string {
+  return `Credential refresh for the "${mcpId}" connector is temporarily unavailable. Try again later.`;
+}
+
 function isMessageOnlyReauthSignal(message: string): boolean {
   return /\b(unauthori[sz]ed|unauthenticated|invalid_grant|reauth(?:enticate|entication)?|authentication required|authorization required|tokens?\s+(?:expired|revoked)|expired\s+(?:token|authorization|credential|grant))\b/i.test(
     message,
@@ -2519,6 +2523,21 @@ export class McpProxy {
     if (!httpServer) {
       return c.json({ error: `MCP server '${mcpId}' not found` }, 404);
     }
+    if (await this.ssrfBlockResponse(httpServer, mcpId, agentId)) {
+      return c.json(
+        {
+          content: [
+            {
+              type: "text",
+              text: "Upstream URL resolves to a blocked internal network.",
+            },
+          ],
+          isError: true,
+          diagnosticCode: "connector_unavailable",
+        },
+        403,
+      );
+    }
     const channelId = auth.tokenData.channelId || "";
     const scopeKey = this.computeScopeKey(
       httpServer,
@@ -2818,6 +2837,32 @@ export class McpProxy {
         },
       });
 
+      const refreshFailure = this.refreshFailureForResponseOrRecent(
+        response,
+        agentId,
+        scopeKey,
+        mcpId,
+      );
+      const refreshDiagnostic = diagnosticCodeForRefreshFailure(refreshFailure);
+      if (refreshDiagnostic === "oauth_refresh_failed") {
+        const result = {
+          content: [
+            { type: "text", text: transientRefreshFailureMessage(mcpId) },
+          ],
+          isError: true,
+          diagnosticCode: refreshDiagnostic,
+        };
+        emitToolCallCompleted(
+          "failed",
+          {
+            http_status: response.status,
+            result_preview: resultPreviewFromValue(result),
+          },
+          new McpHttpStatusError(response.status, result.content[0].text),
+        );
+        return c.json(result, 200);
+      }
+
       // Detect HTTP 401 + WWW-Authenticate → start MCP OAuth 2.1 auth-code flow.
       // This path runs before JSON-RPC parsing because most compliant MCP
       // servers (Sentry, etc.) return 401 at the transport layer, not a
@@ -2848,6 +2893,7 @@ export class McpProxy {
             },
           ],
           isError: true,
+          diagnosticCode: refreshDiagnostic ?? "needs_reauth",
         };
         emitToolCallCompleted(
           "failed",
@@ -2868,12 +2914,16 @@ export class McpProxy {
               },
             ],
             isError: true,
+            diagnosticCode: refreshDiagnostic ?? "needs_reauth",
           },
           200,
         );
       }
 
-      let data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;
+      let data =
+        response.ok || response.status === 404
+          ? ((await parseJsonRpcResponse(response)) as JsonRpcResponse)
+          : undefined;
 
       // Re-initialize session and retry on stale-session errors.
       //
@@ -2938,10 +2988,13 @@ export class McpProxy {
             retry: true,
           },
         });
-        data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;
+        data =
+          response.ok || response.status === 404
+            ? ((await parseJsonRpcResponse(response)) as JsonRpcResponse)
+            : undefined;
       }
 
-      if (!response.ok && !data?.error) {
+      if (!response.ok) {
         if (response.status >= 500) {
           this.recordServerFailure(
             healthKey,
@@ -2952,7 +3005,14 @@ export class McpProxy {
           );
         }
         const result = {
-          content: [],
+          content: [
+            {
+              type: "text",
+              text: `Upstream returned HTTP ${response.status}${
+                data?.error?.message ? `: ${data.error.message}` : "."
+              }`,
+            },
+          ],
           isError: true,
           diagnosticCode: diagnosticCodeForHttpStatus(response.status),
         };
@@ -2966,11 +3026,12 @@ export class McpProxy {
         );
         return c.json(
           {
-            content: [],
+            content: result.content,
             isError: true,
-            error: `Upstream returned HTTP ${response.status}`,
+            diagnosticCode: result.diagnosticCode,
+            error: result.content[0].text,
           },
-          502,
+          response.status === 403 ? 200 : 502,
         );
       }
 
@@ -2984,8 +3045,9 @@ export class McpProxy {
           error: data.error,
         });
 
-        // Detect auth errors — auto-start device-code auth flow
-        if (/unauthorized|unauthenticated|forbidden/i.test(errorMsg)) {
+        // HTTP status has already been handled above. JSON-RPC auth messages
+        // only imply reauthentication when the transport itself succeeded.
+        if (isMessageOnlyReauthSignal(errorMsg)) {
           const autoAuthResult = await this.tryAutoDeviceAuth(
             mcpId,
             agentId,
@@ -3014,6 +3076,7 @@ export class McpProxy {
               },
             ],
             isError: true,
+            diagnosticCode: "needs_reauth",
           };
           emitToolCallCompleted(
             "failed",
@@ -3034,6 +3097,7 @@ export class McpProxy {
                 },
               ],
               isError: true,
+              diagnosticCode: "needs_reauth",
             },
             200,
           );
@@ -3890,6 +3954,18 @@ export class McpProxy {
     return this.refreshFailuresByResponse.get(response);
   }
 
+  private refreshFailureForResponseOrRecent(
+    response: Response,
+    agentId: string,
+    userId: string | undefined,
+    mcpId: string,
+  ): CredentialRefreshFailure | undefined {
+    return (
+      this.refreshFailureForResponse(response) ??
+      this.takeRefreshFailure(agentId, userId, mcpId)
+    );
+  }
+
   private async resolveCredentialToken(
     agentId: string,
     userId: string,
@@ -4313,6 +4389,32 @@ export class McpProxy {
       throw error;
     }
 
+    const refreshFailure = this.refreshFailureForResponseOrRecent(
+      response,
+      agentId,
+      scopeKey,
+      mcpId,
+    );
+    const refreshDiagnostic = diagnosticCodeForRefreshFailure(refreshFailure);
+    if (refreshDiagnostic === "oauth_refresh_failed") {
+      const result = {
+        content: [
+          { type: "text", text: transientRefreshFailureMessage(mcpId) },
+        ],
+        isError: true,
+        diagnosticCode: refreshDiagnostic,
+      };
+      emitForwardedToolCallCompleted(
+        "failed",
+        {
+          http_status: response.status,
+          result_preview: resultPreviewFromValue(result),
+        },
+        new McpHttpStatusError(response.status, result.content[0].text),
+      );
+      return c.json({ jsonrpc: "2.0", id: null, result }, 200);
+    }
+
     // Detect HTTP 401 + WWW-Authenticate → start MCP OAuth 2.1 auth-code flow.
     if (response.status === 401 && authContext) {
       const payload = await this.handleUpstream401({
@@ -4352,6 +4454,7 @@ export class McpProxy {
           result: {
             content: [{ type: "text", text: JSON.stringify(finalPayload) }],
             isError: true,
+            diagnosticCode: refreshDiagnostic ?? "needs_reauth",
           },
         },
         200,
