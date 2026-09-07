@@ -451,6 +451,112 @@ describe("WorkerGateway session context", () => {
 		});
 	});
 
+	test("propagates degraded zero-tool discovery diagnostics into MCP status", async () => {
+		class FreshCredentialStore implements WritableSecretStore {
+			async get(ref: SecretRef): Promise<string | null> {
+				if (orgContext.getStore()?.organizationId !== "org-a") return null;
+				if (
+					ref !==
+					("secret://mcp-auth%2Fagent-1%2Fuser-1%2Fshifu-toolbox%2Fcredential" as SecretRef)
+				) {
+					return null;
+				}
+				return JSON.stringify({
+					accessToken: "fresh-access-token",
+					refreshToken: "refresh-token",
+					expiresAt: Date.now() + 10 * 60_000,
+					clientId: "client-id",
+					tokenUrl: "https://auth.example.test/token",
+				});
+			}
+			async put(): Promise<SecretRef> {
+				throw new Error("not used");
+			}
+			async delete(): Promise<void> {
+				throw new Error("not used");
+			}
+			async list(): Promise<SecretListEntry[]> {
+				return [];
+			}
+		}
+
+		const gateway = new WorkerGateway(
+			{ send: async () => undefined } as any,
+			"https://gateway.example.com",
+			{
+				getWorkerConfig: async () => ({ mcpServers: {} }),
+			} as any,
+			{
+				getSessionContext: async () => ({
+					agentInstructions: "",
+					platformInstructions: "",
+					networkInstructions: "",
+					skillsInstructions: "",
+					mcpStatus: [
+						{
+							id: "shifu-toolbox",
+							name: "ShiFu Toolbox",
+							requiresAuth: true,
+							requiresInput: false,
+							upstreamOrigin: "https://mcp.shifu-ai.org",
+							configSource: "agent",
+							configDigest: "initial-agent-digest",
+						},
+					],
+				}),
+			} as any,
+			{
+				fetchToolsForMcp: async () => ({
+					tools: [],
+					status: "degraded",
+					diagnosticCode: "auth_required_zero_tools",
+					instructions: "Tool discovery returned zero tools.",
+					provenance: {
+						upstreamOrigin: "https://mcp.shifu-ai.org",
+						configSource: "agent",
+						configDigest: "discovery-digest",
+					},
+				}),
+			} as any,
+			undefined,
+			undefined,
+			new FreshCredentialStore(),
+			createFakeConnectionStore(),
+		);
+
+		const token = generateWorkerToken("user-1", "conv-1", "worker-a", {
+			channelId: "channel-1",
+			agentId: "agent-1",
+			organizationId: "org-a",
+		});
+
+		const response = await gateway.getApp().request("/session-context", {
+			headers: {
+				authorization: `Bearer ${token}`,
+				host: "gateway.example.com",
+			},
+		});
+		const body = (await response.json()) as {
+			mcpStatus: Array<{
+				id: string;
+				authenticated: boolean;
+				authStatus?: string;
+				diagnosticCode?: string;
+			}>;
+		};
+
+		expect(response.status).toBe(200);
+		expect(body.mcpStatus[0]).toMatchObject({
+			id: "shifu-toolbox",
+			authenticated: false,
+			authStatus: "degraded",
+			diagnosticCode: "auth_required_zero_tools",
+			upstreamOrigin: "https://mcp.shifu-ai.org",
+			configSource: "agent",
+			configDigest: "discovery-digest",
+		});
+	});
+
 	test("exposes ready materialized personal-agent connectors as toolboxPersonalAgentTools", async () => {
 		fakeConnections.set(
 			"toolbox-mcp:org-1:user-1:agent-1:google_workspace",

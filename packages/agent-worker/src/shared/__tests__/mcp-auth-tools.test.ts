@@ -123,6 +123,40 @@ describe("startMcpLogin message copy", () => {
 			"https://gw.example.com/mcp/oauth/start?token=reauth",
 		);
 	});
+
+	test("degraded preflight status with a login payload does not return direct reauth copy", async () => {
+		stubGateway(
+			{
+				userCode: "SHOULD-NOT-START",
+				verificationUri: "https://idp.example.com/device",
+				expiresIn: 600,
+			},
+			{
+				authenticated: false,
+				status: "degraded",
+				reason: "upstream_unavailable",
+				login: {
+					flow: "auth_code",
+					verificationUri:
+						"https://gw.example.com/mcp/oauth/start?token=degraded",
+					verificationUriComplete:
+						"https://gw.example.com/mcp/oauth/start?token=degraded",
+					expiresIn: 900,
+				},
+			},
+		);
+
+		const parsed = parseResult(
+			await startMcpLogin(GW, { mcpId: "shifu-toolbox" }),
+		);
+
+		expect(parsed.status).toBe("degraded");
+		expect(parsed.authenticated).toBe(false);
+		expect(parsed.verification_url).toBeUndefined();
+		expect(parsed.message).toContain("cannot be confirmed right now");
+		expect(parsed.message).not.toContain("needs to be refreshed");
+		expect(parsed.message).not.toContain("reconnect it before retrying");
+	});
 });
 
 describe("checkMcpLogin auth truth", () => {
@@ -154,13 +188,20 @@ describe("checkMcpLogin auth truth", () => {
 		);
 	});
 
-	test("transient degraded status does not tell the user they definitely need to reconnect", async () => {
+	test("transient degraded status with a login payload does not tell the user they definitely need to reconnect", async () => {
 		stubGateway(
 			{ status: "pending" },
 			{
 				authenticated: false,
 				status: "degraded",
 				reason: "upstream_error",
+				login: {
+					flow: "auth_code",
+					verificationUri: "https://gw.example.com/mcp/oauth/start?token=check",
+					verificationUriComplete:
+						"https://gw.example.com/mcp/oauth/start?token=check",
+					expiresIn: 900,
+				},
 			},
 		);
 

@@ -2591,6 +2591,8 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     );
 
     expect(result.tools).toEqual([]);
+    expect(result.status).toBe("degraded");
+    expect(result.diagnosticCode).toBe("auth_required_zero_tools");
     expect(result.instructions).toContain("empty-oauth-mcp");
     expect(result.instructions?.toLowerCase()).toContain("degraded");
     expect(result.instructions?.toLowerCase()).toContain("reauthorization");
@@ -2649,6 +2651,8 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
 
     expect(toolsListCalls).toBe(2);
     expect(result.tools).toEqual([]);
+    expect(result.status).toBe("degraded");
+    expect(result.diagnosticCode).toBe("auth_required_zero_tools");
     expect(result.instructions).toContain("empty-oauth-retry-mcp");
     expect(result.instructions?.toLowerCase()).toContain("degraded");
     expect(result.instructions?.toLowerCase()).toContain("reauthorization");

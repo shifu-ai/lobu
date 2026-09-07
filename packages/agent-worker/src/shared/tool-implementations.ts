@@ -834,8 +834,9 @@ function mcpAuthReauthResult(
     return null;
   }
 
-  const verificationUrl = mcpAuthLoginUrl(status);
-  const message = verificationUrl
+  const exposeLogin = status.status === "needs_reauth";
+  const verificationUrl = exposeLogin ? mcpAuthLoginUrl(status) : "";
+  const message = exposeLogin && verificationUrl
     ? `Authentication needs to be refreshed for ${mcpId}. Send this authorization link to the user as a plain text message: ${verificationUrl}`
     : status.status === "needs_reauth"
       ? `Authentication needs to be refreshed for ${mcpId}. Ask the user to reconnect it before retrying.`
@@ -847,11 +848,11 @@ function mcpAuthReauthResult(
       authenticated: false,
       reason: status.reason,
       upstream_error: status.upstreamError,
-      flow: status.login?.flow,
+      flow: exposeLogin ? status.login?.flow : undefined,
       verification_url: verificationUrl || undefined,
-      verification_uri: status.login?.verificationUri,
-      user_code: status.login?.userCode || "",
-      expires_in_seconds: status.login?.expiresIn,
+      verification_uri: exposeLogin ? status.login?.verificationUri : undefined,
+      user_code: exposeLogin ? status.login?.userCode || "" : "",
+      expires_in_seconds: exposeLogin ? status.login?.expiresIn : undefined,
       message,
     })
   );

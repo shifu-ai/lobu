@@ -724,6 +724,7 @@ export class WorkerGateway {
 			authFailureReason?: string;
 			authRefreshStatus?: number;
 			authRefreshUpstreamError?: string;
+			diagnosticCode?: string;
 			configured: boolean;
 			upstreamOrigin: string;
 			configSource: "global" | "agent" | "derived";
@@ -1514,6 +1515,13 @@ export class WorkerGateway {
 						configDigest: string;
 					}
 				>();
+				const discoveryAuthDiagnostics = new Map<
+					string,
+					{
+						authStatus: "needs_reauth" | "degraded";
+						diagnosticCode?: string;
+					}
+				>();
 				if (this.mcpProxy && enrichedMcpStatus.length > 0) {
 					const toolResults = await Promise.allSettled(
 						enrichedMcpStatus.map(async (mcp) => {
@@ -1536,6 +1544,18 @@ export class WorkerGateway {
 									result.value.provenance,
 								);
 							}
+							if (
+								result.value.status === "needs_reauth" ||
+								result.value.status === "degraded"
+							) {
+								discoveryAuthDiagnostics.set(result.value.mcpId, {
+									authStatus: result.value.status,
+									diagnosticCode:
+										typeof result.value.diagnosticCode === "string"
+											? result.value.diagnosticCode
+											: undefined,
+								});
+							}
 							if (result.value.tools && result.value.tools.length > 0) {
 								mcpTools[result.value.mcpId] = result.value.tools;
 							}
@@ -1557,8 +1577,9 @@ export class WorkerGateway {
 					// can be stale if an agent config changes during session bootstrap.
 					runtimeMcpStatus = enrichedMcpStatus.map((mcp) => {
 						const provenance = discoveryProvenance.get(mcp.id);
+						const discoveryAuth = discoveryAuthDiagnostics.get(mcp.id);
 						const { upstreamOrigin, configSource, configDigest, ...status } = mcp;
-						return provenance
+						const runtimeStatus = provenance
 							? { ...status, ...provenance }
 							: {
 									...status,
@@ -1566,6 +1587,16 @@ export class WorkerGateway {
 									configSource: "derived" as const,
 									configDigest: "",
 								};
+						return discoveryAuth
+							? {
+									...runtimeStatus,
+									authenticated: false,
+									authStatus: discoveryAuth.authStatus,
+									...(discoveryAuth.diagnosticCode
+										? { diagnosticCode: discoveryAuth.diagnosticCode }
+										: {}),
+								}
+							: runtimeStatus;
 					});
 				}
 
