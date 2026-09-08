@@ -73,7 +73,7 @@ test("清理 crash 遺留的 Codex 暫存憑證目錄，保留工作產物與近
 
 const binary = process.env.SUBAGENT_TEST_CODEX_BINARY;
 test.skipIf(!binary)("官方 app-server 支援公開文件的 host-managed login，執行程序沒有 refresh token", async () => {
-  const options = { binary: binary!, stateRoot: root, path: "/usr/bin:/bin:/opt/homebrew/bin" };
+  const options = { binary: binary!, stateRoot: root, path: "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin" };
   const account = await prepareCodexAccount(options, { organizationId: "test", userId: "external-auth" });
   const jwt = [Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url"),
     Buffer.from(JSON.stringify({ sub: "fixture", email: "fixture@example.invalid", exp: Math.floor(Date.now()/1000)+3600,
@@ -90,7 +90,7 @@ test.skipIf(!binary)("官方 app-server 支援公開文件的 host-managed login
   } finally { await client.stop(); }
 }, 30_000);
 test.skipIf(!binary)("官方 Codex App Server 在全新隔離帳號完成 handshake 且未登入", async () => {
-  const options = { binary: binary!, stateRoot: root, path: "/usr/bin:/bin:/opt/homebrew/bin" };
+  const options = { binary: binary!, stateRoot: root, path: "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin" };
   const account = await prepareCodexAccount(options, { organizationId: "test", userId: "handshake" });
   const client = new CodexAppServerClient({ binary: binary!, cwd: root, env: account.env });
   try {
@@ -101,7 +101,7 @@ test.skipIf(!binary)("官方 Codex App Server 在全新隔離帳號完成 handsh
 }, 30_000);
 
 test.skipIf(!binary)("官方 Codex sandbox 可讀本任務檔案但不能讀另一帳號目錄", async () => {
-  const options = { binary: binary!, stateRoot: root, path: "/usr/bin:/bin:/opt/homebrew/bin" };
+  const options = { binary: binary!, stateRoot: root, path: "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin" };
   const account = await prepareCodexAccount(options, { organizationId: "test", userId: "sandbox" });
   const workspace = join(root, "sandbox-work");
   await mkdir(workspace);
@@ -126,7 +126,7 @@ test.skipIf(!binary)("官方 Codex sandbox 可讀本任務檔案但不能讀另�
 }, 30_000);
 
 test.skipIf(!binary)("未登入的 executor 明確回報需要連接，不能借用主機登入", async () => {
-  const execute = createCodexExecutor({ binary: binary!, stateRoot: root, path: "/usr/bin:/bin:/opt/homebrew/bin" });
+  const execute = createCodexExecutor({ binary: binary!, stateRoot: root, path: "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin" });
   const task: SubagentTask = {
     id: "00000000-0000-4000-8000-000000000001", organizationId: "test", userId: "disconnected", agentId: "agent",
     parentConversationId: "parent", parentRunId: "1", childConversationId: "child", backend: "codex",
