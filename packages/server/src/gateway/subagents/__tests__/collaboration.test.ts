@@ -559,7 +559,9 @@ test.skipIf(process.env.SUBAGENT_TEST_INTERACTIVE_LOGIN !== "1")("真實官方�
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     await login;
-    expect((await auth.get(owner, flow.id))?.status).toBe("connected");
+    const finalFlow = await auth.get(owner, flow.id);
+    console.log(JSON.stringify({ event: "official_device_login_completed", status: finalFlow?.status, errorCode: finalFlow?.errorCode }));
+    expect(finalFlow?.status).toBe("connected");
     const execute = createCodexExecutor(options);
     const tasks = await Promise.all(["A", "B"].map(label => store.spawn(owner, {
       ...input(), title: `真實 Codex 連接測試 ${label}`, timeoutSeconds: 180,
@@ -584,3 +586,30 @@ test.skipIf(process.env.SUBAGENT_TEST_INTERACTIVE_LOGIN !== "1")("真實官方�
     await rm(directory, { recursive: true, force: true });
   }
 }, 850_000);
+
+
+test("官方登入拒絕只保存固定診斷碼，不保存 provider 的敏感錯誤文字", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "shifu-codex-rejected-"));
+  try {
+    const binary = join(directory, "fixture-codex");
+    await writeFile(binary, `#!${process.execPath}
+const send = value => process.stdout.write(JSON.stringify(value)+'\\n');
+require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+  const m=JSON.parse(line);
+  if(m.method==='initialize') send({id:m.id,result:{}});
+  if(m.method==='account/login/start') {
+    send({id:m.id,result:{loginId:'fixture-login',userCode:'FIXTURE',verificationUrl:'https://auth.openai.com/codex/device'}});
+    send({method:'account/login/completed',params:{loginId:'fixture-login',success:false,error:'secret-token-must-not-leak'}});
+  }
+});
+`, { mode: 0o700 });
+    const auth = new CodexAuthStore(sql as unknown as DbClient);
+    const owner = { organizationId: "rejected-org", userId: "rejected-user" };
+    const flow = (await auth.claim((await auth.start(owner)).id))!;
+    await runCodexLogin(auth, flow, { binary, stateRoot: directory, path: "/usr/bin:/bin" });
+    const saved = (await auth.get(owner, flow.id))!;
+    expect(saved.status).toBe("failed");
+    expect(saved.errorCode).toBe("codex_auth_provider_rejected");
+    expect(JSON.stringify(saved)).not.toContain("secret-token-must-not-leak");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

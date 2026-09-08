@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { DbClient } from "../../db/client";
 import { CodexCredentialStore, type CodexAccountScope } from "./codex-credentials";
 
+export type CodexAuthFailureCode = "codex_login_failed" | "codex_auth_provider_rejected" |
+  "codex_auth_lease_lost" | "codex_auth_storage_unavailable" | "codex_auth_expired" |
+  "codex_rpc_timeout" | "codex_rpc_rejected" | "codex_process_closed" |
+  "codex_invalid_login_response" | "codex_invalid_auth";
+
 export interface CodexAuthFlow extends CodexAccountScope {
   id: string; accountEpoch: number; generation: number;
   status: "queued" | "awaiting_user" | "connected" | "failed" | "expired" | "cancelled";
@@ -103,8 +108,8 @@ export class CodexAuthStore {
     });
   }
 
-  async fail(flow: CodexAuthFlow): Promise<void> {
-    await this.sql`UPDATE subagent_codex_auth_flows SET status='failed',error_code='codex_login_failed',
+  async fail(flow: CodexAuthFlow, code: CodexAuthFailureCode = "codex_login_failed"): Promise<void> {
+    await this.sql`UPDATE subagent_codex_auth_flows SET status='failed',error_code=${code},
       user_code=NULL,lease_until=NULL,updated_at=now() WHERE id=${flow.id} AND generation=${flow.generation} AND status='awaiting_user'`;
   }
 }
