@@ -40,7 +40,7 @@ export function createUnsignedLobuBuildReceipt(input) {
   ) {
     throw new Error("invalid protected workflow identity");
   }
-  const provides = ["agent-release.readiness.v1"];
+  const provides = ["agent-release.readiness.v1", "agent.subagents.v1"];
   const buildIdentityDigest = `sha256:${createHash("sha256")
     .update(
       canonical({

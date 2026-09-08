@@ -35,7 +35,7 @@ describe("unsigned app image build receipt", () => {
       ].sort(),
     );
     expect(receipt).not.toHaveProperty("capabilities");
-    expect(receipt.provides).toEqual(["agent-release.readiness.v1"]);
+    expect(receipt.provides).toEqual(["agent-release.readiness.v1", "agent.subagents.v1"]);
     expect(receipt.buildTime).toBe("2026-07-15T00:00:00.000Z");
     expect(receipt.expiresAt).toBe("2026-07-17T01:00:00.000Z");
     expect(() =>
