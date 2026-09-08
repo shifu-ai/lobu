@@ -3,7 +3,18 @@
 # ===========================================
 # Hono server that runs the gateway in-process and serves the web frontend.
 
-FROM node:22-slim AS builder
+# Pin source, dependencies, and the same system Python as the runtime image.
+FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS gitmind-cli
+COPY --from=ghcr.io/astral-sh/uv:0.9.27@sha256:143b40f4ab56a780f43377604702107b5a35f83a4453daf1e4be691358718a6a /uv /usr/local/bin/uv
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+ADD --checksum=sha256:9ef2981738d6a1dffaf293cfe9587424a34764f79f90ddddc23b5d03440df8bc \
+    https://github.com/shifuairesearch/gitmind-cli/archive/4b525a71fd4fb2bcaf621c15ffa00bdda3ccd3dd.tar.gz /tmp/gitmind.tar.gz
+WORKDIR /usr/local/lib/gitmind
+RUN tar -xzf /tmp/gitmind.tar.gz --strip-components=1 \
+    && uv sync --locked --no-dev --no-editable --python /usr/bin/python3
+
+FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS builder
 
 WORKDIR /app
 
@@ -126,7 +137,7 @@ RUN if [ "$SKIP_WEB_BUILD" = "false" ] && [ -f packages/owletto/package.json ]; 
 # ===========================================
 # Runtime
 # ===========================================
-FROM node:22-slim AS runtime
+FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS runtime
 
 WORKDIR /app
 
@@ -135,7 +146,7 @@ ARG BUN_VERSION=1.3.5
 # curl for health checks, dbmate for migrations, bun for tsx-equivalent, Chromium deps for connectors.
 # Source-built sharp links libvips dynamically, so retain the runtime library.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates unzip \
+      curl ca-certificates unzip python3 bubblewrap \
       libvips42 \
       libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libdbus-1-3 \
       libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
@@ -147,6 +158,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chmod +x /usr/local/bin/bun
 
 ENV PATH="/usr/local/bin:${PATH}"
+
+# Agent workers run as subprocesses in this app image (the connector worker
+# image is a separate runtime). Keep the venv at its original absolute path.
+COPY --from=gitmind-cli /usr/local/lib/gitmind/.venv /usr/local/lib/gitmind/.venv
+RUN ln -s /usr/local/lib/gitmind/.venv/bin/gitmind /usr/local/bin/gitmind
+COPY docker/app/gitmind-smoke.py /usr/local/lib/gitmind/smoke.py
+RUN --network=none python3 /usr/local/lib/gitmind/smoke.py
 
 # Copy installed deps + source from builder
 COPY --from=builder /app/node_modules ./node_modules
@@ -162,6 +180,8 @@ COPY --from=builder /app/packages/embeddings ./packages/embeddings
 COPY --from=builder /app/packages/connector-worker ./packages/connector-worker
 COPY --from=builder /app/packages/server ./packages/server
 COPY --from=builder /app/packages/owletto ./packages/owletto
+
+COPY docker/app/gitmind-worker-smoke.ts /app/gitmind-worker-smoke.ts
 
 # Database migrations
 COPY db/migrations ./db/migrations

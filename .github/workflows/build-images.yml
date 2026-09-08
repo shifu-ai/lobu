@@ -164,6 +164,21 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Verify GitMind in published app image without credentials or network
+        run: |
+          docker run --rm --network=none --entrypoint python3 \
+            ghcr.io/${{ env.IMAGE_NAME_APP }}@${{ steps.push-app.outputs.digest }} \
+            /usr/local/lib/gitmind/smoke.py
+
+      - name: Verify GitMind through the worker sandbox
+        run: |
+          docker run --rm --network=none \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            --security-opt systempaths=unconfined \
+            --entrypoint bun \
+            ghcr.io/${{ env.IMAGE_NAME_APP }}@${{ steps.push-app.outputs.digest }} \
+            /app/gitmind-worker-smoke.ts
+
       - name: Write bounded app image receipt
         env:
           IMAGE_DIGEST: ${{ steps.push-app.outputs.digest }}

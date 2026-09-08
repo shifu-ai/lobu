@@ -63,6 +63,40 @@ describe("createEmbeddedBashOps", () => {
   });
 });
 
+describe("GitMind CLI discovery", () => {
+	test.each([
+		false,
+		true,
+	])("respects the existing exec opt-in when sandbox is unavailable: %s", async (optIn) => {
+		const workspace = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), "lobu-gitmind-")),
+		);
+		tempDirs.push(workspace);
+		const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "lobu-gitmind-bin-"));
+		tempDirs.push(binDir);
+		const cli = path.join(binDir, "gitmind");
+		fs.writeFileSync(cli, '#!/bin/sh\nprintf "gitmind-worker-smoke"\n');
+		fs.chmodSync(cli, 0o755);
+		process.env.PATH = `${binDir}:${process.env.PATH ?? ""}`;
+		process.env.LOBU_EXEC_SANDBOX = "off";
+		if (optIn) process.env.LOBU_ALLOW_UNSANDBOXED_EXEC = "1";
+		else delete process.env.LOBU_ALLOW_UNSANDBOXED_EXEC;
+		const ops = await createEmbeddedBashOps({ workspaceDir: workspace });
+		const chunks: string[] = [];
+		const result = await ops.exec("gitmind doctor --json", "/", {
+			onData: (chunk) => chunks.push(chunk.toString()),
+			timeout: 5,
+		});
+		if (optIn) {
+			expect(result.exitCode).toBe(0);
+			expect(chunks.join("")).toContain("gitmind-worker-smoke");
+		} else {
+			expect(result.exitCode).not.toBe(0);
+			expect(chunks.join("")).not.toContain("gitmind-worker-smoke");
+		}
+	});
+});
+
 describe("buildBinaryInvocation", () => {
   test("runs node shebang scripts through node", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lobu-lobu-"));

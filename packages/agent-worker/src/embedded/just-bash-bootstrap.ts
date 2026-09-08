@@ -139,7 +139,7 @@ const UNSANDBOXED_INTERPRETERS = new Set<string>([
 /**
  * Discover binaries to register as custom commands:
  * 1. All executables from /nix/store/ PATH directories
- * 2. Known CLI tools (lobu) from anywhere on PATH
+ * 2. Known CLI tools (lobu, gitmind) from anywhere on PATH
  *
  * UNSANDBOXED_INTERPRETERS are filtered out unless the spawned worker has
  * LOBU_ALLOW_UNSANDBOXED_EXEC=1 in its env (set explicitly per-agent for
@@ -174,7 +174,7 @@ function discoverBinaries(): Map<string, string> {
   }
 
   // Discover known CLI tools from full PATH
-  for (const name of ["lobu"]) {
+  for (const name of ["lobu", "gitmind"]) {
     if (binaries.has(name)) continue;
     if (!isAllowed(name)) continue;
     for (const dir of pathDirs) {
