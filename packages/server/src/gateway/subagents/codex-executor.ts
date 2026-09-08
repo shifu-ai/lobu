@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { CodexAppServerClient } from "./codex-client";
 import type { CodexCredentialStore } from "./codex-credentials";
@@ -119,9 +119,8 @@ export function createCodexExecutor(options: CodexRuntimeOptions): SubagentExecu
         const turn = event.turn as { status?: string } | undefined;
         if (turn?.status !== "completed" || !summary.trim()) throw new Error("codex_turn_failed");
         if (!(await options.credentials!.isCurrent(task, credential!.epoch))) throw new Error("codex_needs_connection");
-        await writeFile(join(workspace, "result.md"), summary, { mode: 0o600 });
         await client.stop();
-        const artifacts = options.artifacts ? await options.artifacts.collect(task, workspace)
+        const artifacts = options.artifacts ? await options.artifacts.collect(task, workspace, summary)
           : [{ path: "result.md", mediaType: "text/markdown", size: Buffer.byteLength(summary) }];
         if (!(await options.credentials!.isCurrent(task, credential!.epoch))) throw new Error("codex_needs_connection");
         return { summary, artifacts };

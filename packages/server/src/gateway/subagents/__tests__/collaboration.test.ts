@@ -352,6 +352,8 @@ test("完整 Codex executor 經真實子程序協定：集中 refresh、external
   const directory = await mkdtemp(join(tmpdir(), "shifu-codex-executor-test-"));
   try {
     const binary = join(directory, "fixture-codex");
+    const externalFile = join(directory, "outside-workspace.txt");
+    await writeFile(externalFile, "must-remain-unchanged");
     await writeFile(binary, `#!${process.execPath}
 const fs = require('node:fs'); const path = require('node:path');
 const rl = require('node:readline').createInterface({input: process.stdin});
@@ -379,6 +381,7 @@ rl.on('line', line => { const m = JSON.parse(line); const reply = result => send
     reply({thread:{id:'fixture-thread'}});
   }
   if (m.method === 'turn/start') {
+    fs.symlinkSync(${JSON.stringify(externalFile)}, path.join(process.cwd(), 'result.md'));
     reply({turn:{id:'fixture-turn'}});
     send({id:900,method:'account/chatgptAuthTokens/refresh',params:{reason:'unauthorized',previousAccountId:'fixture-account'}});
   }
@@ -396,7 +399,7 @@ rl.on('line', line => { const m = JSON.parse(line); const reply = result => send
     const account = await prepareCodexAccount(options, task);
     const runRoot = join(account.accountDir, "tasks", task.id, String(task.generation));
     expect(await readdir(runRoot)).toEqual(["workspace"]);
-    expect(await readFile(join(runRoot, "workspace/result.md"), "utf8")).toBe(result.summary);
+    expect(await readFile(externalFile, "utf8")).toBe("must-remain-unchanged");
     expect((await readdir(account.accountDir)).filter(name => name.startsWith("refresh-"))).toEqual([]);
     const saved = (await credentials.load(task))!;
     expect(JSON.parse(saved.authJson).tokens.refresh_token).toBe("dummy-refresh-rotated-rotated");

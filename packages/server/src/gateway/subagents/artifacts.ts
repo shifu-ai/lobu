@@ -10,14 +10,22 @@ const MAX_TOTAL = 10 * 1024 * 1024;
 export class SubagentArtifactStore {
   constructor(private readonly sql: DbClient) {}
   /** Call only after the child has stopped, so it cannot replace a parent directory during collection. */
-  async collect(task: SubagentTask, workspace: string): Promise<SubagentResult["artifacts"]> {
+  async collect(task: SubagentTask, workspace: string, summary?: string): Promise<SubagentResult["artifacts"]> {
     const root = await realpath(workspace);
     const files: Array<{ id: string; path: string; bytes: Buffer }> = [];
     let total = 0;
     let entries = 0;
+    // Gateway summaries go directly to the ledger, never through a child-controlled path.
+    if (summary !== undefined) {
+      const bytes = Buffer.from(summary);
+      if (bytes.length > MAX_FILE) throw new Error("subagent_artifact_limit");
+      files.push({ id: randomUUID(), path: "result.md", bytes });
+      total = bytes.length;
+    }
     const walk = async (directory: string, depth: number) => {
       if (depth > 12) throw new Error("subagent_artifact_limit");
       for await (const entry of await opendir(directory)) {
+        if (summary !== undefined && depth === 0 && entry.name === "result.md") continue;
         if (++entries > 1000) throw new Error("subagent_artifact_limit");
         if ([".git", "node_modules", "conversation.jsonl"].includes(entry.name) || entry.isSymbolicLink()) continue;
         const path = join(directory, entry.name);
