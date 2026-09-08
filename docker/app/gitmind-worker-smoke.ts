@@ -6,7 +6,9 @@ import { probeSandboxStrategy } from "./packages/agent-worker/src/embedded/exec-
 import { createEmbeddedBashOps } from "./packages/agent-worker/src/embedded/just-bash-bootstrap";
 
 // This file is copied to /app so imports resolve exactly as in the worker.
-const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "gitmind-worker-")));
+const workspace = fs.realpathSync(
+  fs.mkdtempSync(path.join(os.tmpdir(), "gitmind-worker-"))
+);
 try {
   delete process.env.GITMIND_TOKEN;
   delete process.env.LOBU_ALLOW_UNSANDBOXED_EXEC;
@@ -23,7 +25,9 @@ try {
   assert.equal(status.auth.available, false);
   assert.equal(status.endpoint.reachable, false);
   assert.ok(status.error.startsWith("missing auth"));
-  console.log(JSON.stringify({ installed: true, sandbox: "bwrap", authenticated: false }));
+  console.log(
+    JSON.stringify({ installed: true, sandbox: "bwrap", authenticated: false })
+  );
 } finally {
   fs.rmSync(workspace, { recursive: true, force: true });
 }
