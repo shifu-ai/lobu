@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ReleaseCapabilityClaim } from "@lobu/core";
+import type { ReleaseCapabilityClaim, WorkerTokenData } from "@lobu/core";
 import { z } from "zod";
 
 export const SUBAGENT_CAPABILITY = "agent.subagents.v1";
@@ -10,7 +10,23 @@ export const spawnSubagentSchema = z.object({
   prompt: z.string().trim().min(1).refine((value) => Buffer.byteLength(value) <= 65536),
   idempotencyKey: z.string().trim().min(1).max(200),
   timeoutSeconds: z.number().int().min(10).max(1800).default(600),
-}).strict();
+  allowedTools: z.array(z.object({ mcpId: z.string().min(1).max(200), name: z.string().min(1).max(200) }).strict()).max(16).default([]),
+}).strict().refine((input) => input.backend === "lobu" || input.allowedTools.length === 0);
+
+export interface SubagentDelegatedTool {
+  mcpId: string;
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+  identity: { upstreamOrigin: string; configSource: "global" | "agent" | "derived"; configDigest: string };
+}
+
+export interface SubagentDelegation {
+  tools: SubagentDelegatedTool[];
+  executionMode?: WorkerTokenData["executionMode"];
+  courseToolScope?: WorkerTokenData["courseToolScope"];
+  channelId?: string;
+}
 
 export type SpawnSubagentInput = z.input<typeof spawnSubagentSchema>;
 export type SubagentBackend = "codex" | "lobu";
@@ -36,6 +52,7 @@ export interface SubagentTask extends SubagentScope {
   /** Current dispatcher runs row; supplied only by the queue consumer. */
   executionRunId?: number;
   authorization?: ReleaseCapabilityClaim | null;
+  delegation?: SubagentDelegation | null;
   backend: SubagentBackend;
   title: string;
   prompt: string;

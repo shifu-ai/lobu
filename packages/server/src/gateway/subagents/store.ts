@@ -5,6 +5,7 @@ import {
   requestDigest, spawnSubagentSchema, validateResult,
   type SpawnSubagentInput, type SubagentScope, type SubagentTask,
   type SubagentResult, type SubagentDelivery,
+  type SubagentDelegation,
 } from "./types";
 
 interface TaskRow {
@@ -12,6 +13,7 @@ interface TaskRow {
   parent_conversation_id: string; parent_run_id: string; child_conversation_id: string;
   parent_message_id: string | null;
   authorization_claim: ReleaseCapabilityClaim | null;
+  delegation_context: SubagentDelegation | null;
   request_digest: string; backend: SubagentTask["backend"]; title: string; prompt: string;
   status: SubagentTask["status"]; generation: number; deadline_at: Date | string;
   result: SubagentResult | null; error_code: string | null; delivery_generation: number;
@@ -20,6 +22,7 @@ interface TaskRow {
 function map(row: TaskRow): SubagentTask {
   return {
     authorization: row.authorization_claim,
+    delegation: row.delegation_context,
     id: row.id, organizationId: row.organization_id, userId: row.user_id, agentId: row.agent_id,
     parentConversationId: row.parent_conversation_id, parentRunId: row.parent_run_id,
     ...(row.parent_message_id ? { parentMessageId: row.parent_message_id } : {}),
@@ -38,8 +41,11 @@ export class SubagentStore {
     if (![this.maxConcurrent, this.maxChildren].every((n) => Number.isSafeInteger(n) && n > 0 && n <= 100)) throw new Error("invalid_subagent_limits");
   }
 
-  async spawn(scope: SubagentScope, input: SpawnSubagentInput, authorization: ReleaseCapabilityClaim | null = null): Promise<SubagentTask> {
+  async spawn(scope: SubagentScope, input: SpawnSubagentInput, authorization: ReleaseCapabilityClaim | null = null,
+    delegation: SubagentDelegation | null = null): Promise<SubagentTask> {
     const request = spawnSubagentSchema.parse(input);
+    if (request.allowedTools.length !== (delegation?.tools.length ?? 0) || request.allowedTools.some((ref, i) =>
+      ref.mcpId !== delegation?.tools[i]?.mcpId || ref.name !== delegation?.tools[i]?.name)) throw new Error("subagent_tool_scope_required");
     if (Object.values(scope).some((value) => typeof value !== "string" || !value.trim())) throw new Error("invalid_subagent_scope");
     return this.sql.begin(async (sql) => {
       await this.lockOwner(sql, scope);
@@ -62,13 +68,21 @@ export class SubagentStore {
       const id = randomUUID();
       const [row] = await sql<TaskRow>`INSERT INTO subagent_tasks
         (id, organization_id, user_id, agent_id, parent_conversation_id, parent_run_id, parent_message_id,
-         idempotency_key, request_digest, authorization_claim, backend, title, prompt, child_conversation_id, deadline_at)
+         idempotency_key, request_digest, authorization_claim, delegation_context, backend, title, prompt, child_conversation_id, deadline_at)
         VALUES (${id}, ${scope.organizationId}, ${scope.userId}, ${scope.agentId},
           ${scope.parentConversationId}, ${scope.parentRunId}, ${scope.parentMessageId ?? null}, ${request.idempotencyKey},
-          ${requestDigest(request)}, ${sql.json(authorization)}, ${request.backend}, ${request.title}, ${request.prompt},
+          ${requestDigest(request)}, ${sql.json(authorization)}, ${sql.json(delegation)}, ${request.backend}, ${request.title}, ${request.prompt},
           ${`subagent:${id}`}, now() + ${request.timeoutSeconds} * interval '1 second') RETURNING *`;
       return map(row!);
     });
+  }
+
+  async getRunningChild(scope: { organizationId: string; userId: string; agentId: string; conversationId: string; messageId: string }): Promise<SubagentTask | null> {
+    const [row] = await this.sql<TaskRow>`SELECT * FROM subagent_tasks WHERE organization_id=${scope.organizationId}
+      AND user_id=${scope.userId} AND agent_id=${scope.agentId} AND child_conversation_id=${scope.conversationId}
+      AND ('subagent:' || id::text || ':' || generation::text)=${scope.messageId}
+      AND status='running' AND lease_until>now() AND deadline_at>now()`;
+    return row ? map(row) : null;
   }
 
   async get(scope: SubagentScope, id: string): Promise<SubagentTask | null> {

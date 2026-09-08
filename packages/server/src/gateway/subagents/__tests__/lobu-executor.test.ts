@@ -144,3 +144,55 @@ test("實際 Lobu worker 經 provider proxy 分析，只送委派材料且不提
     expect(await readFile(join(sessions[0]!.workingDirectory!, "result.md"), "utf8")).toBe(result.summary);
   } finally { server.stop(true); }
 }, 15000);
+
+test("實際 Lobu worker 完成查詢工具往返，模型要求未委派工具時不送往 gateway", async () => {
+  for (const requestedTool of ["delegated_0", "spawn_subagent"]) {
+    let inferenceCount = 0;
+    const toolRequests: unknown[] = [];
+    const inputs: any[] = [];
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname.endsWith("/worker/session-context")) return Response.json({
+        userId: task.userId, agentId: task.agentId, platformInstructions: "父私密資料", networkInstructions: "", mcpStatus: [],
+        providerConfig: { defaultProvider: "openai", defaultModel: "openai/subagent-fixture-model",
+          providerBaseUrlMappings: { OPENAI_BASE_URL: `${url.origin}/lobu/api/proxy/openai/v1` } },
+      });
+      if (url.pathname === "/internal/subagents/delegated-tools") {
+        if (request.method === "GET") return Response.json({ tools: [{ name: "delegated_0", description: "查詢課程資料",
+          inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false } }] });
+        toolRequests.push(await request.json());
+        const claims = verifyWorkerToken(request.headers.get("authorization")!.slice(7))!;
+        expect(claims.courseToolScope?.courseEntityId).toBe("course-fixture");
+        expect(claims.releaseState?.status).toBe("enrolled_inactive");
+        return Response.json({ content: [{ type: "text", text: "來源：課程資料；已確認日期。" }], isError: false });
+      }
+      if (url.pathname.endsWith("/chat/completions")) {
+        inputs.push(await request.json());
+        const first = inferenceCount++ === 0;
+        const delta = first ? { role: "assistant", tool_calls: [{ index: 0, id: "call-query", type: "function",
+          function: { name: requestedTool, arguments: '{"query":"課程"}' } }] } : { role: "assistant", content: "完成查詢判讀。" };
+        const chunks = [
+          { id: "fixture", object: "chat.completion.chunk", created: 1, model: "subagent-fixture-model", choices: [{ index: 0, delta, finish_reason: null }] },
+          { id: "fixture", object: "chat.completion.chunk", created: 1, model: "subagent-fixture-model", choices: [{ index: 0, delta: {}, finish_reason: first ? "tool_calls" : "stop" }],
+            usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 } },
+        ];
+        return new Response(chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+      }
+      return new Response("not found", { status: 404 });
+    } });
+    try {
+      const executor = createLobuExecutor({ stateRoot: join(root, `tool-worker-${requestedTool}`), dispatcherUrl: server.url.origin,
+        sessionManager: { setSession: async () => {} } as unknown as ISessionManager });
+      const result = await executor({ ...task, delegation: { tools: [{ mcpId: "course", name: "read",
+        identity: { upstreamOrigin: "https://fixture.invalid", configSource: "agent", configDigest: "fixture" } }],
+        courseToolScope: { ownerUserId: task.userId, agentId: task.agentId, courseEntityId: "course-fixture" } } }, new AbortController().signal);
+      expect(result.summary).toBe("完成查詢判讀。");
+      expect(inferenceCount).toBe(2);
+      expect(toolRequests).toEqual(requestedTool === "delegated_0" ? [{ index: 0, args: { query: "課程" } }] : []);
+      expect(inputs[0].tools.map((tool: any) => tool.function.name)).toEqual(["delegated_0"]);
+      const secondInput = JSON.stringify(inputs[1].messages);
+      expect(secondInput).toContain(requestedTool === "delegated_0" ? "已確認日期" : "此查詢未完成");
+      expect(secondInput).not.toContain("父私密資料");
+    } finally { server.stop(true); }
+  }
+}, 20000);

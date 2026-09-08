@@ -56,12 +56,24 @@ export function createSubagentTools(params: {
       name: "spawn_subagent",
       label: "委派子任務",
       description:
-        "把有明確目標及輸入資料的子任務委派給 Codex 或 Lobu，立即回傳 task id。多次呼叫可並行。子代理只處理提供的資料，不會自動繼承整段對話或外部寫入權。用 wait_subagents 收取結果，再由你整合回覆使用者。能力未開通或未連接帳號時應如實說明。",
+        "把有明確目標及輸入資料的子任務委派給 Codex 或 Lobu，立即回傳 task id。多次呼叫可並行。Lobu 可用 allowedTools 指定現有 MCP 的精確 mcpId/name，只接受目前政策允許的唯讀工具；Codex 不接受此欄位的非空清單。子代理不會自動繼承整段對話或外部寫入權。用 wait_subagents 收取結果，再由你整合回覆使用者。能力未開通或未連接帳號時應如實說明。",
       parameters: Type.Object(
         {
           backend: Type.Union([Type.Literal("codex"), Type.Literal("lobu")]),
           title: Type.String({ minLength: 1, maxLength: 200 }),
           prompt: Type.String({ minLength: 1, maxLength: 65536 }),
+          allowedTools: Type.Optional(
+            Type.Array(
+              Type.Object(
+                {
+                  mcpId: Type.String({ minLength: 1, maxLength: 200 }),
+                  name: Type.String({ minLength: 1, maxLength: 200 }),
+                },
+                { additionalProperties: false }
+              ),
+              { maxItems: 16 }
+            )
+          ),
           timeoutSeconds: Type.Optional(
             Type.Integer({ minimum: 10, maximum: 1800 })
           ),

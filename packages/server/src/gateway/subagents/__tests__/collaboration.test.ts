@@ -14,6 +14,8 @@ import type { QueueProducer } from "../../infrastructure/queue/queue-producer";
 import { dispatchSubagent, deliverSubagentCompletion } from "../dispatcher";
 import type { SubagentScope } from "../types";
 import { createSubagentRoutes } from "../routes";
+import { createSubagentToolDelegate } from "../delegated-tools";
+import type { McpProxy } from "../../auth/mcp/proxy";
 import { createSubagentTools } from "../../../../../agent-worker/src/openclaw/subagent-tools";
 import { CodexAuthStore } from "../codex-auth-store";
 import { runCodexLogin } from "../codex-auth-runner";
@@ -70,6 +72,55 @@ function token(userId = "user-1", active = true, tokenKind: "run" | "session" = 
 }
 
 describe("子代理的持久化協作路徑", () => {
+  test("子 run API 只接受本次委派工具，取消或撤銷 capability 後停止呼叫", async () => {
+    let active = true;
+    let calls = 0;
+    const delegate = createSubagentToolDelegate({
+      describeDelegatedReadTool: async () => ({ mcpId: "course", name: "read", inputSchema: { type: "object" },
+        identity: { upstreamOrigin: "https://fixture.invalid", configSource: "agent", configDigest: "fixture" } }),
+      callToolWithApproval: async () => { calls++; return { status: "executed", content: [{ type: "text", text: "資料" }], isError: false }; },
+    } as unknown as McpProxy);
+    const app = createSubagentRoutes(store, undefined, delegate, async () => active);
+    const response = await app.request("/internal/subagents", { method: "POST", headers: { authorization: `Bearer ${token()}`,
+      "content-type": "application/json" }, body: JSON.stringify({ ...input(), backend: "lobu", allowedTools: [{ mcpId: "course", name: "read" }] }) });
+    expect(response.status).toBe(202);
+    const { task } = await response.json();
+    const running = (await store.claim(task.id))!;
+    const childToken = generateWorkerToken("user-1", task.childConversationId, "child", { organizationId: "org-1", agentId: "agent-1",
+      channelId: "api_user-1", runId: 123, tokenKind: "run", messageId: `subagent:${task.id}:${running.generation}`,
+      releaseState: { status: "legacy_unenrolled" } });
+    const request = (body: unknown, authorization = childToken) => app.request("/internal/subagents/delegated-tools", {
+      method: "POST", headers: { authorization: `Bearer ${authorization}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+    const inventory = await app.request("/internal/subagents/delegated-tools", { headers: { authorization: `Bearer ${childToken}` } });
+    expect((await inventory.json()).tools[0].name).toBe("delegated_0");
+    expect((await request({ index: 0, args: {} }, token())).status).toBe(403);
+    expect((await request({ index: 0, args: {}, userId: "other" })).status).toBe(400);
+    expect((await request({ index: 1, args: {} })).status).toBe(403);
+    expect((await request({ index: 0, args: {} })).status).toBe(200);
+    expect(calls).toBe(1);
+    active = false;
+    expect((await request({ index: 0, args: {} })).status).toBe(403);
+    active = true;
+    await store.cancel({ ...scope, parentRunId: "100" }, task.id);
+    expect((await request({ index: 0, args: {} })).status).toBe(403);
+    expect(calls).toBe(1);
+  });
+  test("工具委派與受信任課程範圍跨 store 保存，取消後不能取得執行資格", async () => {
+    const delegated = { tools: [{ mcpId: "course", name: "read", description: "查詢", inputSchema: { type: "object" },
+      identity: { upstreamOrigin: "https://fixture.invalid", configSource: "agent" as const, configDigest: "fixture" } }],
+      courseToolScope: { ownerUserId: scope.userId, agentId: scope.agentId, courseEntityId: "course-1" }, channelId: "api_user-1" };
+    const task = await store.spawn(scope, { ...input(), backend: "lobu", allowedTools: [{ mcpId: "course", name: "read" }] }, null, delegated);
+    const running = (await store.claim(task.id))!;
+    const recovered = new SubagentStore(sql as unknown as DbClient);
+    expect((await recovered.get(scope, task.id))!.delegation).toEqual(delegated);
+    const child = { organizationId: scope.organizationId, agentId: scope.agentId, userId: scope.userId,
+      conversationId: task.childConversationId, messageId: `subagent:${task.id}:${running.generation}` };
+    expect((await recovered.getRunningChild(child))?.id).toBe(task.id);
+    expect(await recovered.getRunningChild({ ...child, messageId: `subagent:${task.id}:0` })).toBeNull();
+    expect(await recovered.getRunningChild({ ...child, userId: "other" })).toBeNull();
+    await store.cancel(scope, task.id);
+    expect(await recovered.getRunningChild(child)).toBeNull();
+  });
   test("真實 worker token API → database → executor → parent outbox", async () => {
     const app = createSubagentRoutes(store);
     const response = await app.request("/internal/subagents", {

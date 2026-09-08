@@ -5,6 +5,9 @@ import { z } from "zod";
 import { authenticateWorker } from "../routes/internal/middleware";
 import type { WorkerContext } from "../routes/internal/types";
 import type { SubagentStore } from "./store";
+import type { SubagentToolDelegate } from "./delegated-tools";
+import { isSubagentAuthorizationActive } from "./authorization";
+import type { SubagentTask } from "./types";
 import { SUBAGENT_CAPABILITY, spawnSubagentSchema, subagentTaskView, type SubagentScope } from "./types";
 
 const taskIdSchema = z.string().uuid();
@@ -26,7 +29,8 @@ export function maySpawnSubagent(worker: WorkerTokenData, now = Date.now()): boo
     state.claim.capabilityIds.includes(SUBAGENT_CAPABILITY);
 }
 
-export function createSubagentRoutes(store: SubagentStore, onCreated?: (id: string) => Promise<unknown>): Hono<WorkerContext> {
+export function createSubagentRoutes(store: SubagentStore, onCreated?: (id: string) => Promise<unknown>,
+  toolDelegate?: SubagentToolDelegate, authorize: (task: SubagentTask) => Promise<boolean> = isSubagentAuthorizationActive): Hono<WorkerContext> {
   const app = new Hono<WorkerContext>();
   app.use("/internal/subagents/*", authenticateWorker);
   app.use("/internal/subagents", authenticateWorker);
@@ -38,7 +42,10 @@ export function createSubagentRoutes(store: SubagentStore, onCreated?: (id: stri
     const request = spawnSubagentSchema.safeParse(await c.req.json().catch(() => null));
     if (!request.success) return c.json({ error: "invalid_subagent_request" }, 400);
     try {
-      const task = await store.spawn(scope, request.data, worker.releaseState?.status === "active" ? worker.releaseState.claim : null);
+      if (request.data.allowedTools.length && !toolDelegate) return c.json({ error: "subagent_tools_unavailable" }, 503);
+      const delegation = request.data.allowedTools.length ? await toolDelegate!.resolve(worker,
+        c.req.header("authorization")!.slice(7), request.data.allowedTools) : null;
+      const task = await store.spawn(scope, request.data, worker.releaseState?.status === "active" ? worker.releaseState.claim : null, delegation);
       // Persistence is the acceptance boundary. Reconciliation retries a failed fast dispatch.
       await onCreated?.(task.id).catch(() => {});
       return c.json({ task: subagentTaskView(task) }, 202);
@@ -47,8 +54,38 @@ export function createSubagentRoutes(store: SubagentStore, onCreated?: (id: stri
       const code = error instanceof Error ? error.message : "";
       if (["idempotency_conflict", "subagent_child_limit"].includes(code)) return c.json({ error: code }, 409);
       if (code === "subagent_recursion_denied") return c.json({ error: code }, 403);
+      if (code.startsWith("subagent_tool_")) return c.json({ error: code }, 403);
       return c.json({ error: "subagent_unavailable" }, 503);
     }
+  });
+  const activeChild = async (worker: WorkerTokenData) => {
+    if (worker.tokenKind !== "run" || !worker.organizationId || !worker.agentId || !worker.conversationId || !worker.messageId ||
+      !Number.isSafeInteger(worker.runId) || worker.runId! <= 0) return null;
+    const task = await store.getRunningChild({ organizationId: worker.organizationId, agentId: worker.agentId,
+      userId: worker.userId, conversationId: worker.conversationId, messageId: worker.messageId });
+    return task && await authorize(task) ? task : null;
+  };
+  app.get("/internal/subagents/delegated-tools", async (c) => {
+    const task = await activeChild(c.get("worker") as WorkerTokenData);
+    if (!task) return c.json({ error: "subagent_execution_inactive" }, 403);
+    return c.json({ tools: (task.delegation?.tools ?? []).map((tool, index) => ({ name: `delegated_${index}`,
+      description: `${tool.mcpId}/${tool.name}: ${tool.description ?? ""}`, inputSchema: tool.inputSchema ?? { type: "object" } })) });
+  });
+  app.post("/internal/subagents/delegated-tools", async (c) => {
+    const worker = c.get("worker") as WorkerTokenData;
+    const task = await activeChild(worker);
+    if (!task || !toolDelegate) return c.json({ error: "subagent_execution_inactive" }, 403);
+    const text = await c.req.text();
+    if (Buffer.byteLength(text) > 65536) return c.json({ error: "subagent_tool_input_too_large" }, 400);
+    const request = z.object({ index: z.number().int().min(0).max(15), args: z.record(z.string(), z.unknown()) }).strict()
+      .safeParse((() => { try { return JSON.parse(text); } catch { return null; } })());
+    if (!request.success) return c.json({ error: "invalid_subagent_tool_request" }, 400);
+    try {
+      const result = await toolDelegate.call(task, worker, c.req.header("authorization")!.slice(7), request.data.index, request.data.args,
+        async () => (await activeChild(worker))?.generation === task.generation);
+      if (Buffer.byteLength(JSON.stringify(result)) > 131072) return c.json({ error: "subagent_tool_result_too_large" }, 413);
+      return c.json(result);
+    } catch { return c.json({ error: "subagent_tool_unavailable_or_scope_changed" }, 403); }
   });
   app.get("/internal/subagents", async (c) => {
     const scope = scopeFromWorker(c.get("worker") as WorkerTokenData);

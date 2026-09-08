@@ -35,6 +35,8 @@ export function createLobuExecutor(options: {
       channelId, agentId: task.agentId, organizationId: task.organizationId,
       platform: "api", sessionKey: task.userId, tokenKind: "run", runId: task.executionRunId,
       messageId: `subagent:${task.id}:${task.generation}`,
+      ...(task.delegation?.executionMode ? { executionMode: task.delegation.executionMode } : {}),
+      ...(task.delegation?.courseToolScope ? { courseToolScope: task.delegation.courseToolScope } : {}),
       // Deliberately do not inherit the parent's release capabilities.
       releaseState: { status: "enrolled_inactive", environment: task.authorization?.environment ?? "production", reason: "capability_expired" },
     });
@@ -84,7 +86,8 @@ export function createLobuExecutor(options: {
         if (failed || signal.aborted || code !== 0 || !result?.trim() || Buffer.byteLength(result) > 200000) reject(new Error("lobu_subagent_failed"));
         else resolve(result);
       });
-      child.stdin.end(JSON.stringify({ prompt: task.prompt, agentId: task.agentId, userId: task.userId }));
+      child.stdin.end(JSON.stringify({ prompt: task.prompt, agentId: task.agentId, userId: task.userId,
+        ...(task.delegation?.tools.length ? { delegatedTools: true } : {}) }));
       if (signal.aborted) terminate();
     });
     const artifacts = options.artifacts ? await options.artifacts.collect(task, workspace)

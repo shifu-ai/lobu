@@ -12,6 +12,7 @@ CREATE TABLE public.subagent_tasks (
   idempotency_key text NOT NULL,
   request_digest text NOT NULL,
   authorization_claim jsonb,
+  delegation_context jsonb CHECK (octet_length(delegation_context::text) <= 131072),
   backend text NOT NULL CHECK (backend IN ('codex', 'lobu')),
   title text NOT NULL,
   prompt text NOT NULL,
