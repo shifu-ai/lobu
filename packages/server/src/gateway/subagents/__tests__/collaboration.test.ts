@@ -7,6 +7,9 @@ import { generateWorkerToken } from "@lobu/core";
 import { startEmbeddedBackend, type EmbeddedBackend } from "../../../__tests__/setup/embedded-postgres-backend";
 import { closeDbSingleton, PROD_PG_VALUE_OPTIONS, type DbClient } from "../../../db/client";
 import { SubagentStore } from "../store";
+import { createSubagentParentDelivery } from "../parent-delivery";
+import type { ISessionManager } from "../../session";
+import type { QueueProducer } from "../../infrastructure/queue/queue-producer";
 import { dispatchSubagent, deliverSubagentCompletion } from "../dispatcher";
 import type { SubagentScope } from "../types";
 import { createSubagentRoutes } from "../routes";
@@ -82,6 +85,52 @@ describe("子代理的持久化協作路徑", () => {
     const deliveries: string[] = [];
     await deliverSubagentCompletion(store, task.id, async (delivery) => { deliveries.push(delivery.parentConversationId); });
     expect(deliveries).toEqual(["parent-1"]);
+  });
+
+  test("完成通知經實際 enqueue 回到原對話，拒絕入隊前 session 被替換", async () => {
+    const parent = { ...scope, conversationId: scope.parentConversationId,
+      messageId: "parent-enqueue-message" };
+    await sql`INSERT INTO runs (id,status,queue_name,action_input,organization_id)
+      VALUES (910001,'completed','message',${sql.json(parent)},'org-1')`;
+    const task = await store.spawn({ ...scope, parentRunId: "910001" }, input());
+    const claim = (await store.claim(task.id))!;
+    await dispatchSubagent(store, claim, {
+      codex: async () => ({ summary: "UNTRUSTED_CHILD_RESULT", artifacts: [] }),
+    }, async () => true);
+    const session = { agentId: scope.agentId, userId: scope.userId,
+      organizationId: scope.organizationId, conversationId: scope.parentConversationId };
+    let replaced = false;
+    let touches = 0;
+    type EnqueueArgs = Parameters<QueueProducer["enqueueMessage"]>;
+    const enqueued: Array<{ payload: EnqueueArgs[0]; options: EnqueueArgs[1] }> = [];
+    const deliver = createSubagentParentDelivery({ sql: sql as unknown as DbClient,
+      sessionManager: {
+        getSessionStrict: async () => session,
+        getSession: async () => replaced ? { ...session, userId: "other-user" } : session,
+        touchSession: async () => { touches++; },
+      } as unknown as ISessionManager,
+      queueProducer: { enqueueMessage: async (payload: EnqueueArgs[0], options: EnqueueArgs[1]) => {
+        enqueued.push({ payload, options }); return "queue-job";
+      } } as unknown as QueueProducer,
+    });
+    replaced = true;
+    await expect(deliverSubagentCompletion(store, task.id, deliver)).rejects.toThrow("Thread scope changed");
+    expect(enqueued).toHaveLength(0);
+    expect(touches).toBe(0);
+    await sql`UPDATE subagent_tasks SET delivery_lease_until = now() - interval '1 second' WHERE id = ${task.id}`;
+    replaced = false;
+    await deliverSubagentCompletion(store, task.id, deliver);
+    expect(enqueued).toHaveLength(1);
+    const { payload, options } = enqueued[0]!;
+    expect(payload).toMatchObject({ agentId: scope.agentId, userId: scope.userId,
+      organizationId: scope.organizationId, conversationId: scope.parentConversationId,
+      platformMetadata: { source: "subagent-completion" } });
+    expect(options).toEqual({ singletonKey: payload.messageId, durableSingleton: true });
+    expect(payload.messageText).toContain(task.id);
+    expect(payload.messageText).not.toContain("UNTRUSTED_CHILD_RESULT");
+    expect(payload.releaseState).toBeUndefined();
+    await deliverSubagentCompletion(store, task.id, deliver);
+    expect(enqueued).toHaveLength(1);
   });
 
   test("API 拒絕缺少 claim、session token、偽造身分與匿名呼叫", async () => {

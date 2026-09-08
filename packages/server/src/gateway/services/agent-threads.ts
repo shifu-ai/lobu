@@ -123,6 +123,8 @@ export interface EnqueueAgentMessageArgs {
 	messageId?: string;
 	queueSingletonKey?: string;
 	durableQueueSingleton?: boolean;
+	/** Trusted caller scope, checked against the exact session used to build the payload. */
+	expectedSessionScope?: { agentId: string; userId: string; organizationId: string };
 	/** Free-form source tag for log lines / platformMetadata. */
 	source?: string;
 	scheduledCourseContext?: MessagePayload["scheduledCourseContext"];
@@ -153,6 +155,13 @@ export async function enqueueAgentMessage(
 	const session = await sessionManager.getSession(threadId);
 	if (!session) {
 		throw new Error(`Thread ${threadId} not found`);
+	}
+
+	const expected = args.expectedSessionScope;
+	if (expected && (session.agentId !== expected.agentId ||
+		session.userId !== expected.userId || session.organizationId !== expected.organizationId ||
+		(session.conversationId || threadId) !== threadId)) {
+		throw new Error("Thread scope changed");
 	}
 
 	await sessionManager.touchSession(threadId);
