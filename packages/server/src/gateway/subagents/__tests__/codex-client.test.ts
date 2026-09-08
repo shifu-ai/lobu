@@ -27,6 +27,33 @@ test("程序提前退出時 RPC 立即失敗", async () => {
   finally { client.close(); }
 });
 
+test("stop 清除同組背景程序，即使 app-server 已回應終止並先退出", async () => {
+  const pidFile = join(root, "rpc-descendant.pid");
+  const entry = join(root, "rpc-descendant.cjs");
+  await writeFile(entry, `const {spawn}=require('node:child_process');
+    const child=spawn(process.execPath,['-e', ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); process.on('SIGTERM',()=>{}); setInterval(()=>{},100);`)}],{stdio:'ignore'});
+    child.unref(); process.on('SIGTERM',()=>process.exit(0)); setInterval(()=>{},100);`);
+  const client = new CodexAppServerClient({ binary: process.execPath, args: [entry], cwd: root, env: { PATH: "/usr/bin:/bin" } });
+  let pid: number | undefined;
+  try {
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      try { pid = Number(await readFile(pidFile, "utf8")); break; } catch { await Bun.sleep(20); }
+    }
+    expect(pid).toBeGreaterThan(0);
+    await client.stop();
+    let alive = true;
+    const cleanupDeadline = Date.now() + 2500;
+    while (alive && Date.now() < cleanupDeadline) {
+      try { process.kill(pid!, 0); await Bun.sleep(25); } catch { alive = false; }
+    }
+    expect(alive).toBe(false);
+  } finally {
+    await client.stop();
+    if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* 已清除。 */ } }
+  }
+}, 8000);
+
 test("清理 crash 遺留的 Codex 暫存憑證目錄，保留工作產物與近期登入", async () => {
   const account = join(root, "accounts", "f".repeat(64));
   const stale = join(account, "refresh-stale"); const recent = join(account, "refresh-recent");

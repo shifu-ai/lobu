@@ -39,7 +39,12 @@ export class CodexAppServerClient {
     this.child.stderr.resume();
     this.child.stdin.on("error", () => this.close());
     this.child.on("error", () => this.close());
-    this.child.on("close", () => { this.resolveStopped(); this.finish(); if (this.killTimer) clearTimeout(this.killTimer); });
+    this.child.on("close", () => {
+      // app-server 先退出時，仍可能留下同組背景程序；不可只撤掉升級終止計時器。
+      this.killProcessGroup("SIGKILL");
+      this.resolveStopped(); this.finish();
+      if (this.killTimer) clearTimeout(this.killTimer);
+    });
   }
 
   async initialize(): Promise<void> {
@@ -89,15 +94,16 @@ export class CodexAppServerClient {
   close(): void {
     if (this.closed) return;
     this.finish();
-    const kill = (signal: NodeJS.Signals) => {
-      try {
-        if (this.child.pid && process.platform !== "win32") process.kill(-this.child.pid, signal);
-        else this.child.kill(signal);
-      } catch { /* 已結束的 process group 無需再處理。 */ }
-    };
-    kill("SIGTERM");
-    this.killTimer = setTimeout(() => kill("SIGKILL"), 1000);
+    this.killProcessGroup("SIGTERM");
+    this.killTimer = setTimeout(() => this.killProcessGroup("SIGKILL"), 1000);
     this.killTimer.unref();
+  }
+
+  private killProcessGroup(signal: NodeJS.Signals): void {
+    try {
+      if (this.child.pid && process.platform !== "win32") process.kill(-this.child.pid, signal);
+      else this.child.kill(signal);
+    } catch { /* 已結束的 process group 無需再處理。 */ }
   }
 
   private finish(): void {

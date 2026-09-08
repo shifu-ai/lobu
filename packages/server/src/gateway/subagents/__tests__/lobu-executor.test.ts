@@ -71,6 +71,38 @@ test("Lobu 子代理不能使用缺少 queue run 的派工身分", async () => {
   await expect(executor({ ...task, executionRunId: undefined }, new AbortController().signal)).rejects.toThrow("lobu_subagent_invalid_dispatch");
 });
 
+test("取消後即使 worker 先退出，也會清除拒絕 SIGTERM 的背景程序", async () => {
+  const entry = join(root, "descendant-parent.cjs");
+  const pidFile = join(root, "descendant.pid");
+  await writeFile(entry, `const {spawn}=require('node:child_process');
+    const child=spawn(process.execPath,['-e', ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); process.on('SIGTERM',()=>{}); setInterval(()=>{},100);`)}],{stdio:'ignore'});
+    child.unref(); process.on('SIGTERM',()=>process.exit(0)); setInterval(()=>{},100);`);
+  const executor = createLobuExecutor({ stateRoot: join(root, "descendant-state"), dispatcherUrl: "http://127.0.0.1:8787",
+    sessionManager: { setSession: async () => {} } as unknown as ISessionManager, workerEntry: entry });
+  const controller = new AbortController();
+  const outcome = executor(task, controller.signal).then(() => "completed", () => "cancelled");
+  let pid: number | undefined;
+  try {
+    const readyDeadline = Date.now() + 3000;
+    while (Date.now() < readyDeadline) {
+      try { pid = Number(await readFile(pidFile, "utf8")); break; } catch { await Bun.sleep(20); }
+    }
+    expect(pid).toBeGreaterThan(0);
+    controller.abort();
+    expect(await outcome).toBe("cancelled");
+    let alive = true;
+    const cleanupDeadline = Date.now() + 2500;
+    while (alive && Date.now() < cleanupDeadline) {
+      try { process.kill(pid!, 0); await Bun.sleep(25); } catch { alive = false; }
+    }
+    expect(alive).toBe(false);
+  } finally {
+    controller.abort();
+    if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* 已清除。 */ } }
+    await outcome;
+  }
+}, 8000);
+
 test("實際 Lobu worker 經 provider proxy 分析，只送委派材料且不提供工具", async () => {
   const requests: Array<{ path: string; body: any; authorization: string | null }> = [];
   const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {

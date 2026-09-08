@@ -78,6 +78,8 @@ export function createLobuExecutor(options: {
       child.once("error", () => { failed = true; });
       child.once("close", (code) => {
         signal.removeEventListener("abort", terminate);
+        // Worker 結束不代表同組的背景程序已結束；先清除整組，才能撤掉強制終止計時器。
+        if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* 整組已退出。 */ } }
         if (killTimer) clearTimeout(killTimer);
         if (failed || signal.aborted || code !== 0 || !result?.trim() || Buffer.byteLength(result) > 200000) reject(new Error("lobu_subagent_failed"));
         else resolve(result);
