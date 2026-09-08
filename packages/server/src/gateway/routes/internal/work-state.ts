@@ -181,11 +181,14 @@ export function createWorkStateRoutes(
         channelId,
         conversationId: worker.conversationId,
         userId: worker.userId,
+        agentId: worker.agentId,
+        organizationId: worker.organizationId,
         teamId: worker.teamId,
         platform: "api",
         platformMetadata: {
           sourcePlatform,
           sourceChannel: parsed.channel,
+          sourceRunId: worker.runId,
         },
         timestamp: Date.now(),
         customEvent: {

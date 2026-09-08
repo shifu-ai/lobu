@@ -536,12 +536,15 @@ export class RunsQueue implements IMessageQueue {
   async work<T>(
     queueName: string,
     handler: JobHandler<T>,
-    options?: { startPaused?: boolean }
+    options?: { startPaused?: boolean; concurrency?: number }
   ): Promise<void> {
     if (!this.isConnected) throw new Error("RunsQueue not started");
     if (this.shuttingDown) {
       throw new Error("RunsQueue is shutting down; refusing new work");
     }
+
+    const concurrency = options?.concurrency ?? DEFAULT_WORKER_CONCURRENCY;
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 32) throw new Error("Invalid queue concurrency");
 
     // Replace any existing worker for this queue.
     const existing = this.workers.get(queueName);
@@ -559,7 +562,7 @@ export class RunsQueue implements IMessageQueue {
       queueName,
       runType,
       handler: handler as JobHandler<unknown>,
-      concurrency: DEFAULT_WORKER_CONCURRENCY,
+      concurrency,
       paused: options?.startPaused ?? false,
       stopped: false,
       active: 0,

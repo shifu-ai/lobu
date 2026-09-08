@@ -473,6 +473,7 @@ export async function initLobuGateway(): Promise<Hono | null> {
     lobuApp.route(
       '/api/provisioning',
       createProvisioningRoutes({
+        subagentQueue: coreServices.getQueue(),
         mcpConfigService: coreServices.getMcpConfigService(),
         secretStore: coreServices.getSecretStore(),
         publicGatewayUrl: coreServices.getPublicGatewayUrl(),
