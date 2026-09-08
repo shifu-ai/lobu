@@ -1,8 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  applyMcpToolFilter,
 	createLogger,
-	emitAgentObsEvent,
 	generateWorkerToken,
 	type GuardrailRegistry,
 	type McpToolFilter,
@@ -10,6 +8,8 @@ import {
 	verifyWorkerToken,
 } from "@lobu/core";
 import { isReservedAutomationToolName } from "../../../../../core/src/constants";
+import { emitAgentObsEvent } from "../../../../../core/src/observability/shifu-agent-obs.js";
+import { applyMcpToolFilter } from "../../../../../core/src/utils/mcp-tool-filter.js";
 import type { Context } from "hono";
 import { Hono } from "hono";
 
@@ -28,7 +28,6 @@ import {
   type CredentialRefreshFailure,
   getStableCredentialBindingId,
   getStoredCredential,
-  refreshCredential,
   refreshCredentialDetailed,
   startDeviceAuth,
   tryCompletePendingDeviceAuth,
@@ -126,6 +125,12 @@ export interface McpDiscoveryProvenance {
 export interface McpDiscoveryResult {
   tools: McpTool[];
   instructions?: string;
+  status?: "degraded" | "needs_reauth";
+  diagnosticCode?:
+    | "auth_required_zero_tools"
+    | "oauth_refresh_failed"
+    | "upstream_unauthorized"
+    | "upstream_forbidden";
   provenance?: McpDiscoveryProvenance;
 }
 
@@ -227,6 +232,48 @@ function safeUrlHost(value: string): string | undefined {
   return safeHost(value) || undefined;
 }
 
+const HOP_BY_HOP_RESPONSE_HEADERS = [
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+] as const;
+
+const UPSTREAM_CREDENTIAL_RESPONSE_HEADERS = [
+  "set-cookie",
+  "set-cookie2",
+] as const;
+
+function proxyResponseHeaders(upstreamHeaders: Headers): Headers {
+  const headers = new Headers(upstreamHeaders);
+  const connectionHeaders = headers
+    .get("connection")
+    ?.split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  for (const name of connectionHeaders ?? []) headers.delete(name);
+  for (const name of HOP_BY_HOP_RESPONSE_HEADERS) headers.delete(name);
+  for (const name of UPSTREAM_CREDENTIAL_RESPONSE_HEADERS) headers.delete(name);
+  return headers;
+}
+
+function stripTransformedRepresentationHeaders(headers: Headers): void {
+  for (const name of [
+    "content-length",
+    "content-encoding",
+    "etag",
+    "content-digest",
+    "digest",
+    "content-md5",
+  ]) {
+    headers.delete(name);
+  }
+}
+
 function safeObjectKeys(value: unknown): string[] {
   return value && typeof value === "object" && !Array.isArray(value)
     ? Object.keys(value).sort()
@@ -279,7 +326,10 @@ function mcpObsErrorSignal(error: unknown): string {
 function classifyMcpObsError(error: unknown): string {
   const signal = mcpObsErrorSignal(error);
   const diagnosticCode = signal.toLowerCase().replace(/[-\s]+/g, "_");
-  if (/401|403|unauthorized|forbidden|oauth|token/i.test(signal)) {
+  if (/403|forbidden/i.test(signal)) {
+    return "upstream_forbidden";
+  }
+  if (/401|unauthorized|oauth|token/i.test(signal)) {
     return "needs_reauth";
   }
   if (
@@ -396,13 +446,23 @@ function resultPreviewFromJsonRpcError(
   };
 }
 
-function toolNameFromJsonRpcToolCall(bodyText: string): string | undefined {
+function jsonRpcToolCallFromRequest(
+  bodyText: string,
+): { id: unknown; name: string } | undefined {
   try {
-    const parsed = JSON.parse(bodyText);
+    const parsed = JSON.parse(bodyText) as unknown;
+    if (!parsed || typeof parsed !== "object") return undefined;
     if (Array.isArray(parsed)) return undefined;
-    if (parsed?.method !== "tools/call") return undefined;
-    const name = parsed.params?.name;
-    return typeof name === "string" && name.trim() ? name.trim() : undefined;
+    const request = parsed as Record<string, unknown>;
+    if (request.method !== "tools/call") return undefined;
+    const params = request.params;
+    const name =
+      params && typeof params === "object" && !Array.isArray(params)
+        ? (params as Record<string, unknown>).name
+        : undefined;
+    return typeof name === "string" && name.trim()
+      ? { id: request.id, name: name.trim() }
+      : undefined;
   } catch {
     return undefined;
   }
@@ -508,7 +568,7 @@ async function parseJsonRpcResponse(response: Response): Promise<any> {
 }
 
 function parseJsonRpcResponseText(contentType: string, text: string): any {
-  if (contentType.includes("text/event-stream")) {
+  if (contentType.toLowerCase().includes("text/event-stream")) {
     // SSE frames: sequence of `event:`/`data:` lines separated by blank lines.
     // For request/response JSON-RPC we expect the last `data:` payload to be
     // the JSON-RPC response object.
@@ -560,6 +620,131 @@ class McpJsonRpcError extends Error {
   }
 }
 
+function jsonRpcTerminalFromSseEvent(eventText: string): JsonRpcResponse | null {
+  const dataLines: string[] = [];
+  for (const line of eventText.split(/\r\n|\r|\n/)) {
+    if (line === "data") {
+      dataLines.push("");
+    } else if (line.startsWith("data:")) {
+      const value = line.slice(5);
+      dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
+    }
+  }
+  if (dataLines.length === 0) return null;
+
+  try {
+    const data = JSON.parse(dataLines.join("\n")) as JsonRpcResponse;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+    if (!Object.hasOwn(data, "id")) return null;
+    if (!Object.hasOwn(data, "result") && !Object.hasOwn(data, "error")) {
+      return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function replaceSseDataFields(eventText: string, replacement: string): string {
+  let replaced = false;
+  return eventText.replace(
+    /(^|[\r\n])(data(?::[^\r\n]*)?)(?=\r\n|\r|\n|$)/g,
+    (_match, lineStart: string) => {
+      const value = replaced ? "" : ` ${replacement}`;
+      replaced = true;
+      return `${lineStart}data:${value}`;
+    },
+  );
+}
+
+type SseEventBoundaryScanState = {
+  offset: number;
+  consecutiveLineEndings: number;
+  previousWasCarriageReturn?: boolean;
+};
+
+export function scanSseEventBoundary(
+  text: string,
+  state: SseEventBoundaryScanState,
+): {
+  eventEnd: number;
+  inspectedCharacters: number;
+  state: SseEventBoundaryScanState;
+} {
+  let { offset, consecutiveLineEndings } = state;
+  let previousWasCarriageReturn =
+    state.previousWasCarriageReturn ?? false;
+  let inspectedCharacters = 0;
+
+  if (
+    consecutiveLineEndings >= 2 &&
+    !(previousWasCarriageReturn && text[offset] === "\n")
+  ) {
+    return { eventEnd: offset, inspectedCharacters, state };
+  }
+
+  while (offset < text.length) {
+    const character = text[offset];
+    inspectedCharacters += 1;
+
+    if (previousWasCarriageReturn) {
+      previousWasCarriageReturn = false;
+      if (character === "\n") {
+        offset += 1;
+        if (consecutiveLineEndings >= 2) {
+          return {
+            eventEnd: offset,
+            inspectedCharacters,
+            state: {
+              offset,
+              consecutiveLineEndings,
+              previousWasCarriageReturn,
+            },
+          };
+        }
+        continue;
+      }
+    }
+
+    if (character === "\r") {
+      consecutiveLineEndings += 1;
+      previousWasCarriageReturn = true;
+    } else if (character === "\n") {
+      consecutiveLineEndings += 1;
+    } else {
+      consecutiveLineEndings = 0;
+    }
+    offset += 1;
+
+    if (consecutiveLineEndings >= 2) {
+      if (previousWasCarriageReturn && text[offset] === "\n") {
+        inspectedCharacters += 1;
+        previousWasCarriageReturn = false;
+        offset += 1;
+      }
+      return {
+        eventEnd: offset,
+        inspectedCharacters,
+        state: {
+          offset,
+          consecutiveLineEndings,
+          previousWasCarriageReturn,
+        },
+      };
+    }
+  }
+
+  return {
+    eventEnd: -1,
+    inspectedCharacters,
+    state: {
+      offset,
+      consecutiveLineEndings,
+      previousWasCarriageReturn,
+    },
+  };
+}
+
 class McpDiscoveryAuthError extends Error {
   constructor(
     public readonly diagnosticCode:
@@ -569,6 +754,15 @@ class McpDiscoveryAuthError extends Error {
   ) {
     super(message);
     this.name = "McpDiscoveryAuthError";
+  }
+}
+
+class McpDiscoveryRefreshError extends Error {
+  readonly diagnosticCode = "oauth_refresh_failed";
+
+  constructor() {
+    super("MCP credential refresh is temporarily unavailable");
+    this.name = "McpDiscoveryRefreshError";
   }
 }
 
@@ -588,6 +782,23 @@ function diagnosticCodeForHttpStatus(status: number): string {
   if (status === 403) return "upstream_forbidden";
   if (status === 429) return "upstream_rate_limited";
   return "connector_unavailable";
+}
+
+function diagnosticCodeForRefreshFailure(
+  failure: CredentialRefreshFailure | undefined,
+): "needs_reauth" | "oauth_refresh_failed" | undefined {
+  if (!failure) return undefined;
+  return failure.permanent ? "needs_reauth" : "oauth_refresh_failed";
+}
+
+function transientRefreshFailureMessage(mcpId: string): string {
+  return `Credential refresh for the "${mcpId}" connector is temporarily unavailable. Try again later.`;
+}
+
+function isMessageOnlyReauthSignal(message: string): boolean {
+  return /\b(unauthori[sz]ed|unauthenticated|invalid_grant|reauth(?:enticate|entication)?|authentication required|authorization required|tokens?\s+(?:expired|revoked)|expired\s+(?:token|authorization|credential|grant))\b/i.test(
+    message,
+  );
 }
 
 function safeMcpToolDiagnosticCode(value: unknown): string | undefined {
@@ -616,56 +827,98 @@ type ForwardedToolCallObsInspection = {
   resultOrError?: unknown;
 };
 
+function unavailableForwardedToolCallObsInspection(
+  httpStatus: number,
+  streamedResponse: boolean,
+): ForwardedToolCallObsInspection {
+  return {
+    status: "failed",
+    metadata: {
+      inspection_status: "unavailable",
+      result_preview: {
+        inspection_unavailable: true,
+        matching_terminal: false,
+        streamed_response: streamedResponse,
+        http_status: httpStatus,
+      },
+    },
+    resultOrError: new Error(
+      "MCP tool response ended without an inspectable matching JSON-RPC terminal",
+    ),
+  };
+}
+
+function inspectJsonRpcTerminalForObs(
+  data: JsonRpcResponse,
+): ForwardedToolCallObsInspection {
+  if (data.error) {
+    const message =
+      data.error.message ||
+      (typeof data.error === "string" ? data.error : "Upstream error");
+    return {
+      status: "failed",
+      metadata: {
+        jsonrpc_error_code: data.error.code,
+        result_preview: resultPreviewFromJsonRpcError(data.error),
+      },
+      resultOrError: new McpJsonRpcError(data.error.code, message),
+    };
+  }
+
+  if (data.result?.isError) {
+    return {
+      status: "failed",
+      metadata: {
+        result_preview: resultPreviewFromValue(data.result),
+        ...(diagnosticCodeFromToolResult(data.result)
+          ? { diagnostic_code: diagnosticCodeFromToolResult(data.result) }
+          : {}),
+      },
+      resultOrError: data.result,
+    };
+  }
+
+  return { status: "ok", metadata: {} };
+}
+
 async function inspectForwardedToolCallResponseForObs(
   response: Response,
+  requestId: unknown,
 ): Promise<ForwardedToolCallObsInspection | null> {
-  const contentType = response.headers.get("content-type") || "";
-  if (
-    !contentType.includes("application/json") &&
-    !contentType.includes("text/event-stream")
-  ) {
+  const contentType = (
+    response.headers.get("content-type") || ""
+  ).toLowerCase();
+  if (!contentType.includes("application/json")) {
     return null;
   }
 
   try {
     const bodyText = await readResponseTextForObs(response);
     if (!bodyText) return null;
-    const data = parseJsonRpcResponseText(
+    const parsed = parseJsonRpcResponseText(
       contentType,
       bodyText,
-    ) as JsonRpcResponse;
-    if (data?.error) {
-      const errorMsg =
-        data.error.message ||
-        (typeof data.error === "string" ? data.error : "Upstream error");
-      return {
-        status: "failed",
-        metadata: {
-          jsonrpc_error_code: data.error.code,
-          result_preview: resultPreviewFromJsonRpcError(data.error),
-        },
-        resultOrError: new McpJsonRpcError(data.error.code, errorMsg),
-      };
+    ) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
     }
-
-    const result = data?.result;
-    if (result?.isError) {
-      return {
-        status: "failed",
-        metadata: {
-          result_preview: resultPreviewFromValue(result),
-          ...(diagnosticCodeFromToolResult(result)
-            ? { diagnostic_code: diagnosticCodeFromToolResult(result) }
-            : {}),
-        },
-        resultOrError: result,
-      };
+    const responseRecord = parsed as Record<string, unknown>;
+    if (
+      !Object.hasOwn(responseRecord, "id") ||
+      responseRecord.id !== requestId
+    ) {
+      return null;
     }
+    if (
+      !Object.hasOwn(responseRecord, "result") &&
+      !Object.hasOwn(responseRecord, "error")
+    ) {
+      return null;
+    }
+    return inspectJsonRpcTerminalForObs(parsed as JsonRpcResponse);
   } catch {
     return null;
   }
-
-  return null;
 }
 
 async function readResponseTextForObs(
@@ -1443,6 +1696,26 @@ export class McpProxy {
         lastResponseStatus = response.status;
       }
 
+      const refreshFailure = this.refreshFailureForResponse(response);
+      if (refreshFailure) {
+        const result = this.credentialRefreshFailureResult({
+          failure: refreshFailure,
+          agentId,
+          userId,
+          mcpId,
+          organizationId: options?.organizationId,
+        });
+        emitToolCallCompleted(
+          "failed",
+          {
+            http_status: response.status,
+            result_preview: resultPreviewFromValue(result),
+          },
+          new McpHttpStatusError(response.status, result.content[0].text),
+        );
+        return result;
+      }
+
       if (!response.ok) {
         const text = await response.text();
         if (response.status >= 500) {
@@ -1461,6 +1734,7 @@ export class McpProxy {
           userId,
           mcpId,
           organizationId: options?.organizationId,
+          refreshFailure,
         });
         const result = {
           content: [
@@ -1472,6 +1746,7 @@ export class McpProxy {
           isError: true,
           diagnosticCode:
             httpReauth?.diagnosticCode ??
+            diagnosticCodeForRefreshFailure(refreshFailure) ??
             diagnosticCodeForHttpStatus(response.status),
         };
         emitToolCallCompleted(
@@ -1494,6 +1769,7 @@ export class McpProxy {
           isError: true,
           diagnosticCode:
             httpReauth?.diagnosticCode ??
+            diagnosticCodeForRefreshFailure(refreshFailure) ??
             diagnosticCodeForHttpStatus(response.status),
         };
       }
@@ -1638,6 +1914,16 @@ export class McpProxy {
     const listStartedAt = Date.now();
     const userId = tokenData?.userId;
     let toolsListObsCompleted = false;
+    let discoveryRefreshFailure: CredentialRefreshFailure | undefined;
+    const captureDiscoveryRefreshFailure = (
+      responseOrError: unknown,
+    ): CredentialRefreshFailure | undefined => {
+      const resolution = this.credentialResolutionFor(responseOrError);
+      if (resolution.completed) {
+        discoveryRefreshFailure = resolution.failure;
+      }
+      return resolution.failure;
+    };
     const emitToolsListCompleted = (
       status: "ok" | "failed",
       metadata: Record<string, unknown>,
@@ -1652,9 +1938,7 @@ export class McpProxy {
       // the token endpoint said — that is what separates a revoked grant from
       // a lost refresh race.
       const refreshFailure =
-        status === "failed"
-          ? this.takeRefreshFailure(agentId, userId, mcpId)
-          : undefined;
+        status === "failed" ? discoveryRefreshFailure : undefined;
       emitMcpObsEvent({
         trace,
         eventName: "mcp.tools_list.completed",
@@ -1716,15 +2000,50 @@ export class McpProxy {
       // (CONNECT_LINK_TOKEN_TTL_MS) while a session's instructions outlive
       // that, and an expired link is worse than none. The live link is minted
       // on the tools/call path instead, at the moment it is needed.
+      if (diagnosticCode === "upstream_forbidden") {
+        return bindDiscoveryProvenance({
+          tools: [],
+          status: "degraded",
+          diagnosticCode,
+          instructions:
+            `The "${mcpId}" connector is configured for this user but upstream returned forbidden, ` +
+            `so none of its tools are available right now. This is NOT the same as the user ` +
+            `not having the service — do not claim the capability is missing. Ask an administrator ` +
+            `to review connector permissions or scopes before retrying.`,
+        });
+      }
       return bindDiscoveryProvenance({
         tools: [],
+        status: "needs_reauth",
+        diagnosticCode,
         instructions:
           `The "${mcpId}" connector is configured for this user but its authorization is ` +
-          `currently ${diagnosticCode === "upstream_forbidden" ? "insufficient" : "expired"}, ` +
+          `currently expired, ` +
           `so none of its tools are available right now. This is NOT the same as the user ` +
           `not having the service — do not claim the capability is missing. If the user asks ` +
           `for something this connector would handle, tell them it needs reconnecting at ` +
           `${WORKBENCH_CONNECTIONS_HINT}.`,
+      });
+    };
+
+    const emitDiscoveryTransientRefreshFailure = (upstreamHost?: string) => {
+      emitToolsListCompleted(
+        "failed",
+        {
+          cache_status: "miss",
+          tool_count: 0,
+          ...(upstreamHost ? { upstream_host: upstreamHost } : {}),
+          diagnostic_code: "oauth_refresh_failed",
+        },
+        new McpDiscoveryRefreshError(),
+      );
+      return bindDiscoveryProvenance({
+        tools: [],
+        status: "degraded",
+        diagnosticCode: "oauth_refresh_failed",
+        instructions:
+          `The "${mcpId}" connector is temporarily unavailable while its credentials are refreshed. ` +
+          "Try again later.",
       });
     };
 
@@ -1780,6 +2099,32 @@ export class McpProxy {
     const bindDiscoveryProvenance = (
       result: Omit<McpDiscoveryResult, "provenance">,
     ): McpDiscoveryResult => ({ ...result, provenance: discoveryProvenance });
+    const emitAuthRequiredZeroTools = (
+      hasInstructions: boolean,
+      metadata?: Record<string, unknown>,
+    ) => {
+      emitToolsListCompleted(
+        "failed",
+        {
+          cache_status: "miss",
+          tool_count: 0,
+          has_instructions: hasInstructions,
+          upstream_host: safeHost(httpServer.upstreamUrl),
+          diagnostic_code: "auth_required_zero_tools",
+          ...metadata,
+        },
+        new Error("Auth-required MCP discovered zero tools"),
+      );
+      return bindDiscoveryProvenance({
+        tools: [],
+        status: "degraded",
+        diagnosticCode: "auth_required_zero_tools",
+        instructions:
+          `The "${mcpId}" connector is configured and auth-required, but tool discovery ` +
+          `returned zero tools. Treat this connector as degraded and likely requiring ` +
+          `reauthorization before telling the user the capability is unavailable.`,
+      });
+    };
     emitMcpObsEvent({
       trace,
       eventName: "mcp.server.discovered",
@@ -1900,11 +2245,27 @@ export class McpProxy {
           scopeKey,
           workerToken,
         );
+        const initRefreshFailure =
+          captureDiscoveryRefreshFailure(initResponse);
 
         // Tool discovery runs before the agent has a chance to call anything.
         // If the server demands OAuth, kick off the auth-code flow here so the
         // "Connect X" link reaches the user up-front.
         if (initResponse.status === 401) {
+          const refreshDiagnostic = diagnosticCodeForRefreshFailure(
+            initRefreshFailure,
+          );
+          if (refreshDiagnostic === "oauth_refresh_failed") {
+            await initResponse.body?.cancel().catch(() => {
+              /* noop */
+            });
+            if (options?.surfaceErrors) {
+              throw new McpDiscoveryRefreshError();
+            }
+            return emitDiscoveryTransientRefreshFailure(
+              safeHost(httpServer.upstreamUrl),
+            );
+          }
           const wwwAuth = initResponse.headers.get("www-authenticate");
           await initResponse.body?.cancel().catch(() => {
             /* noop */
@@ -1953,14 +2314,16 @@ export class McpProxy {
         }
 
         // Step 2: Send initialized notification (required by MCP spec)
-        await this.sendInitializedNotification(
+        const initializedResponse = await this.sendInitializedNotification(
           httpServer,
           agentId,
           mcpId,
           scopeKey,
           workerToken,
         );
+        captureDiscoveryRefreshFailure(initializedResponse);
       } catch (initError) {
+        captureDiscoveryRefreshFailure(initError);
         if (
           options?.surfaceErrors &&
           initError instanceof McpDiscoveryAuthError
@@ -1991,8 +2354,24 @@ export class McpProxy {
         scopeKey,
         workerToken,
       );
+      const responseRefreshFailure =
+        captureDiscoveryRefreshFailure(response);
 
       if (response.status === 401) {
+        const refreshDiagnostic = diagnosticCodeForRefreshFailure(
+          responseRefreshFailure,
+        );
+        if (refreshDiagnostic === "oauth_refresh_failed") {
+          await response.body?.cancel().catch(() => {
+            /* noop */
+          });
+          if (options?.surfaceErrors) {
+            throw new McpDiscoveryRefreshError();
+          }
+          return emitDiscoveryTransientRefreshFailure(
+            safeHost(httpServer.upstreamUrl),
+          );
+        }
         const wwwAuth = response.headers.get("www-authenticate");
         await response.body?.cancel().catch(() => {
           /* noop */
@@ -2050,6 +2429,13 @@ export class McpProxy {
       }
       const tools: McpTool[] = data?.result?.tools || [];
       const filteredTools = applyMcpToolFilter(tools, httpServer.toolFilter);
+      if (
+        filteredTools.length === 0 &&
+        !httpServer.internal &&
+        httpServer.oauth
+      ) {
+        return emitAuthRequiredZeroTools(Boolean(instructions));
+      }
       this.serverHealth.recordSuccess(healthKey);
 
       const serverInfo: CachedMcpServer = {
@@ -2082,6 +2468,7 @@ export class McpProxy {
 
       return bindDiscoveryProvenance(serverInfo);
     } catch (error) {
+      captureDiscoveryRefreshFailure(error);
       logger.warn("Failed to fetch tools for MCP, retrying once", {
         mcpId,
         error: error instanceof Error ? error.message : String(error),
@@ -2106,7 +2493,23 @@ export class McpProxy {
           scopeKey,
           workerToken,
         );
+        const retryRefreshFailure =
+          captureDiscoveryRefreshFailure(retryResponse);
         if (retryResponse.status === 401) {
+          const refreshDiagnostic = diagnosticCodeForRefreshFailure(
+            retryRefreshFailure,
+          );
+          if (refreshDiagnostic === "oauth_refresh_failed") {
+            await retryResponse.body?.cancel().catch(() => {
+              /* noop */
+            });
+            if (options?.surfaceErrors) {
+              throw new McpDiscoveryRefreshError();
+            }
+            return emitDiscoveryTransientRefreshFailure(
+              safeHost(httpServer.upstreamUrl),
+            );
+          }
           const wwwAuth = retryResponse.headers.get("www-authenticate");
           await retryResponse.body?.cancel().catch(() => {
             /* noop */
@@ -2168,6 +2571,13 @@ export class McpProxy {
           retryTools,
           httpServer.toolFilter,
         );
+        if (
+          filteredRetryTools.length === 0 &&
+          !httpServer.internal &&
+          httpServer.oauth
+        ) {
+          return emitAuthRequiredZeroTools(false, { retry_succeeded: true });
+        }
         this.serverHealth.recordSuccess(healthKey);
         const serverInfo: CachedMcpServer = {
           tools: filteredRetryTools,
@@ -2203,6 +2613,7 @@ export class McpProxy {
         });
         return bindDiscoveryProvenance(serverInfo);
       } catch (retryError) {
+        captureDiscoveryRefreshFailure(retryError);
         logger.error("Retry also failed for MCP tool fetch", {
           mcpId,
           error:
@@ -2367,6 +2778,21 @@ export class McpProxy {
     const httpServer = await this.configService.getHttpServer(mcpId, agentId);
     if (!httpServer) {
       return c.json({ error: `MCP server '${mcpId}' not found` }, 404);
+    }
+    if (await this.ssrfBlockResponse(httpServer, mcpId, agentId)) {
+      return c.json(
+        {
+          content: [
+            {
+              type: "text",
+              text: "Upstream URL resolves to a blocked internal network.",
+            },
+          ],
+          isError: true,
+          diagnosticCode: "connector_unavailable",
+        },
+        403,
+      );
     }
     const channelId = auth.tokenData.channelId || "";
     const scopeKey = this.computeScopeKey(
@@ -2667,6 +3093,26 @@ export class McpProxy {
         },
       });
 
+      const refreshFailure = this.refreshFailureForResponse(response);
+      if (refreshFailure) {
+        const result = this.credentialRefreshFailureResult({
+          failure: refreshFailure,
+          agentId,
+          userId: requesterUserId,
+          mcpId,
+          organizationId: auth.tokenData.organizationId,
+        });
+        emitToolCallCompleted(
+          "failed",
+          {
+            http_status: response.status,
+            result_preview: resultPreviewFromValue(result),
+          },
+          new McpHttpStatusError(response.status, result.content[0].text),
+        );
+        return c.json(result, 200);
+      }
+
       // Detect HTTP 401 + WWW-Authenticate → start MCP OAuth 2.1 auth-code flow.
       // This path runs before JSON-RPC parsing because most compliant MCP
       // servers (Sentry, etc.) return 401 at the transport layer, not a
@@ -2697,6 +3143,7 @@ export class McpProxy {
             },
           ],
           isError: true,
+          diagnosticCode: "needs_reauth",
         };
         emitToolCallCompleted(
           "failed",
@@ -2717,12 +3164,16 @@ export class McpProxy {
               },
             ],
             isError: true,
+            diagnosticCode: "needs_reauth",
           },
           200,
         );
       }
 
-      let data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;
+      let data =
+        response.ok || response.status === 404
+          ? ((await parseJsonRpcResponse(response)) as JsonRpcResponse)
+          : undefined;
 
       // Re-initialize session and retry on stale-session errors.
       //
@@ -2787,10 +3238,33 @@ export class McpProxy {
             retry: true,
           },
         });
-        data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;
+        const retryRefreshFailure =
+          this.refreshFailureForResponse(response);
+        if (retryRefreshFailure) {
+          const result = this.credentialRefreshFailureResult({
+            failure: retryRefreshFailure,
+            agentId,
+            userId: requesterUserId,
+            mcpId,
+            organizationId: auth.tokenData.organizationId,
+          });
+          emitToolCallCompleted(
+            "failed",
+            {
+              http_status: response.status,
+              result_preview: resultPreviewFromValue(result),
+            },
+            new McpHttpStatusError(response.status, result.content[0].text),
+          );
+          return c.json(result, 200);
+        }
+        data =
+          response.ok || response.status === 404
+            ? ((await parseJsonRpcResponse(response)) as JsonRpcResponse)
+            : undefined;
       }
 
-      if (!response.ok && !data?.error) {
+      if (!response.ok) {
         if (response.status >= 500) {
           this.recordServerFailure(
             healthKey,
@@ -2801,7 +3275,14 @@ export class McpProxy {
           );
         }
         const result = {
-          content: [],
+          content: [
+            {
+              type: "text",
+              text: `Upstream returned HTTP ${response.status}${
+                data?.error?.message ? `: ${data.error.message}` : "."
+              }`,
+            },
+          ],
           isError: true,
           diagnosticCode: diagnosticCodeForHttpStatus(response.status),
         };
@@ -2815,11 +3296,12 @@ export class McpProxy {
         );
         return c.json(
           {
-            content: [],
+            content: result.content,
             isError: true,
-            error: `Upstream returned HTTP ${response.status}`,
+            diagnosticCode: result.diagnosticCode,
+            error: result.content[0].text,
           },
-          502,
+          response.status === 403 ? 200 : 502,
         );
       }
 
@@ -2833,8 +3315,9 @@ export class McpProxy {
           error: data.error,
         });
 
-        // Detect auth errors — auto-start device-code auth flow
-        if (/unauthorized|unauthenticated|forbidden/i.test(errorMsg)) {
+        // HTTP status has already been handled above. JSON-RPC auth messages
+        // only imply reauthentication when the transport itself succeeded.
+        if (isMessageOnlyReauthSignal(errorMsg)) {
           const autoAuthResult = await this.tryAutoDeviceAuth(
             mcpId,
             agentId,
@@ -2863,6 +3346,7 @@ export class McpProxy {
               },
             ],
             isError: true,
+            diagnosticCode: "needs_reauth",
           };
           emitToolCallCompleted(
             "failed",
@@ -2883,6 +3367,7 @@ export class McpProxy {
                 },
               ],
               isError: true,
+              diagnosticCode: "needs_reauth",
             },
             200,
           );
@@ -3603,45 +4088,12 @@ export class McpProxy {
     return headers;
   }
 
-  /**
-   * Most recent credential-refresh failure per (agent, user, mcp).
-   *
-   * `classifyMcpObsError` can only pattern-match the error string, so every
-   * 401 becomes `needs_reauth` whether the grant was revoked or we merely lost
-   * a refresh race. This carries the real reason across to the discovery event.
-   * Diagnostic only, best-effort: entries are consumed once and expire.
-   */
-  private readonly recentRefreshFailures = new Map<
-    string,
-    { failure: CredentialRefreshFailure; at: number }
-  >();
-
-  private static readonly REFRESH_FAILURE_TTL_MS = 60_000;
-
-  private refreshFailureKey(
-    agentId: string,
-    userId: string,
-    mcpId: string,
-  ): string {
-    return `${agentId}:${userId}:${mcpId}`;
-  }
-
-  /** Consume the recorded reason, if it is recent enough to belong to this attempt. */
-  private takeRefreshFailure(
-    agentId: string | undefined,
-    userId: string | undefined,
-    mcpId: string,
-  ): CredentialRefreshFailure | undefined {
-    if (!agentId || !userId) return undefined;
-    const key = this.refreshFailureKey(agentId, userId, mcpId);
-    const entry = this.recentRefreshFailures.get(key);
-    if (!entry) return undefined;
-    this.recentRefreshFailures.delete(key);
-    if (Date.now() - entry.at > McpProxy.REFRESH_FAILURE_TTL_MS) {
-      return undefined;
-    }
-    return entry.failure;
-  }
+  private readonly refreshFailuresByResponse =
+    new WeakMap<Response, CredentialRefreshFailure>();
+  private readonly responsesWithCredentialResolution = new WeakSet<Response>();
+  private readonly refreshFailuresByError =
+    new WeakMap<object, CredentialRefreshFailure>();
+  private readonly errorsWithCredentialResolution = new WeakSet<object>();
 
   /**
    * Describe a tool failure in terms the agent can act on.
@@ -3665,13 +4117,29 @@ export class McpProxy {
     userId: string;
     mcpId: string;
     organizationId?: string;
+    refreshFailure?: CredentialRefreshFailure;
   }): { text: string; diagnosticCode: string } | null {
+    if (params.refreshFailure && !params.refreshFailure.permanent) return null;
+
     const errorMessage =
       params.error instanceof Error
         ? params.error.message
         : String(params.error ?? "");
+    const messageOnlyReauth =
+      !params.refreshFailure &&
+      params.httpStatus !== undefined &&
+      params.httpStatus >= 200 &&
+      params.httpStatus < 300 &&
+      isMessageOnlyReauthSignal(errorMessage);
+    if (
+      !params.refreshFailure &&
+      params.httpStatus !== 401 &&
+      !messageOnlyReauth
+    ) {
+      return null;
+    }
     const classification = classifyToolCallFailure({
-      httpStatus: params.httpStatus,
+      httpStatus: messageOnlyReauth ? undefined : params.httpStatus,
       errorMessage,
     });
     if (classification !== "needs_reauth") return null;
@@ -3684,24 +4152,166 @@ export class McpProxy {
       organizationId: params.organizationId,
       logContext: "tools/call",
     });
+    const refreshDiagnostic = this.describeRefreshFailure(params.refreshFailure);
+    const diagnosticText = refreshDiagnostic
+      ? ` Refresh failure: ${refreshDiagnostic}.`
+      : "";
 
     // The link is best-effort (needs publicGatewayUrl + a signing key). Say the
     // authorization expired either way — "reconnect in the workbench" is still
     // actionable, and silence is what caused this to go unnoticed for weeks.
     const text = connectUrl
       ? `Authorization for the "${params.mcpId}" connector has expired, so this tool cannot run. ` +
-        `Tell the user to reconnect by opening this link, then wait for them to confirm before retrying: ${connectUrl}`
+        `Tell the user to reconnect by opening this link, then wait for them to confirm before retrying: ${connectUrl}${diagnosticText}`
       : `Authorization for the "${params.mcpId}" connector has expired, so this tool cannot run. ` +
-        `Tell the user to reconnect it at ${WORKBENCH_CONNECTIONS_HINT}, then wait for them to confirm before retrying.`;
+        `Tell the user to reconnect it at ${WORKBENCH_CONNECTIONS_HINT}, then wait for them to confirm before retrying.${diagnosticText}`;
 
     return { text, diagnosticCode: "needs_reauth" };
+  }
+
+  private credentialRefreshFailureResult(params: {
+    failure: CredentialRefreshFailure;
+    agentId: string;
+    userId: string;
+    mcpId: string;
+    organizationId?: string;
+  }): {
+    content: { type: "text"; text: string }[];
+    isError: true;
+    diagnosticCode: "needs_reauth" | "oauth_refresh_failed";
+  } {
+    if (!params.failure.permanent) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: transientRefreshFailureMessage(params.mcpId),
+          },
+        ],
+        isError: true,
+        diagnosticCode: "oauth_refresh_failed",
+      };
+    }
+
+    const reauth = this.describeReauthFailure({
+      error: new Error("Stored credential refresh failed permanently"),
+      httpStatus: 401,
+      agentId: params.agentId,
+      userId: params.userId,
+      mcpId: params.mcpId,
+      organizationId: params.organizationId,
+      refreshFailure: params.failure,
+    });
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            reauth?.text ??
+            `Authorization for the "${params.mcpId}" connector has expired. Reconnect it at ${WORKBENCH_CONNECTIONS_HINT} before retrying.`,
+        },
+      ],
+      isError: true,
+      diagnosticCode: "needs_reauth",
+    };
+  }
+
+  private describeRefreshFailure(
+    failure: CredentialRefreshFailure | undefined,
+  ): string | null {
+    if (!failure) return null;
+    const parts = [
+      failure.reason,
+      failure.upstreamError,
+      typeof failure.status === "number" ? `HTTP ${failure.status}` : undefined,
+      `permanent=${failure.permanent}`,
+    ].filter((part): part is string => Boolean(part));
+
+    return parts.length > 0 ? parts.join(", ") : null;
+  }
+
+  private refreshFailureForResponse(
+    response: Response,
+  ): CredentialRefreshFailure | undefined {
+    return this.refreshFailuresByResponse.get(response);
+  }
+
+  private credentialResolutionFor(value: unknown): {
+    completed: boolean;
+    failure?: CredentialRefreshFailure;
+  } {
+    if (value instanceof Response) {
+      return {
+        completed: this.responsesWithCredentialResolution.has(value),
+        failure: this.refreshFailuresByResponse.get(value),
+      };
+    }
+    if (typeof value === "object" && value !== null) {
+      return {
+        completed: this.errorsWithCredentialResolution.has(value),
+        failure: this.refreshFailuresByError.get(value),
+      };
+    }
+    return { completed: false };
+  }
+
+  private attributeCredentialResolution(
+    response: Response,
+    failure?: CredentialRefreshFailure,
+  ): void {
+    this.responsesWithCredentialResolution.add(response);
+    if (failure) this.refreshFailuresByResponse.set(response, failure);
+  }
+
+  private credentialRefreshFailureResponse(
+    failure: CredentialRefreshFailure,
+  ): Response {
+    const response = new Response(
+      JSON.stringify({
+        error: "unauthorized",
+        error_description: "The stored credential could not be refreshed.",
+        refresh_failure_reason: failure.reason,
+        refresh_failure_permanent: failure.permanent,
+        ...(failure.status
+          ? { refresh_upstream_status: failure.status }
+          : {}),
+        ...(failure.upstreamError
+          ? { refresh_upstream_error: failure.upstreamError }
+          : {}),
+        ...(failure.upstreamErrorDescription
+          ? {
+              refresh_upstream_error_description:
+                failure.upstreamErrorDescription,
+            }
+          : {}),
+      }),
+      {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+    this.attributeCredentialResolution(response, failure);
+    return response;
+  }
+
+  private attributeCredentialResolutionError(
+    error: unknown,
+    failure?: CredentialRefreshFailure,
+  ): void {
+    if (typeof error === "object" && error !== null) {
+      this.errorsWithCredentialResolution.add(error);
+      if (failure) this.refreshFailuresByError.set(error, failure);
+    }
   }
 
   private async resolveCredentialToken(
     agentId: string,
     userId: string,
     mcpId: string,
-  ): Promise<string | null> {
+  ): Promise<{
+    accessToken: string | null;
+    failure?: CredentialRefreshFailure;
+  }> {
     const credential = await getStoredCredential(
       this.secretStore,
       agentId,
@@ -3710,17 +4320,18 @@ export class McpProxy {
     );
     if (!credential) {
       // No stored credential — check if there's a pending device-auth to complete
-      return tryCompletePendingDeviceAuth(
+      const token = await tryCompletePendingDeviceAuth(
         this.secretStore,
         agentId,
         userId,
         mcpId,
       );
+      return { accessToken: token };
     }
 
     // Check if token is still valid (5 minute buffer)
     if (credential.expiresAt > Date.now() + 5 * 60 * 1000) {
-      return credential.accessToken;
+      return { accessToken: credential.accessToken };
     }
 
     // Token expired or expiring soon — refresh
@@ -3731,13 +4342,8 @@ export class McpProxy {
       mcpId,
       credential,
     );
-    if (failure) {
-      this.recentRefreshFailures.set(
-        this.refreshFailureKey(agentId, userId, mcpId),
-        { failure, at: Date.now() },
-      );
-    }
-    return refreshed?.accessToken ?? null;
+    const token = refreshed?.accessToken ?? null;
+    return { accessToken: token, failure };
   }
 
   /**
@@ -3762,15 +4368,35 @@ export class McpProxy {
     // the worker JWT directly; forcing a second OAuth login would block
     // unattended watcher runs. Non-internal MCPs use per-user credentials.
     let credentialToken: string | undefined;
+    let credentialResolutionFailure: CredentialRefreshFailure | undefined;
     if (httpServer.internal) {
       credentialToken = directAuthToken;
     } else if (scopeKey) {
-      const token = await this.resolveCredentialToken(agentId, scopeKey, mcpId);
-      if (token) credentialToken = token;
+      const resolution = await this.resolveCredentialToken(
+        agentId,
+        scopeKey,
+        mcpId,
+      );
+      if (resolution.accessToken) credentialToken = resolution.accessToken;
+      credentialResolutionFailure = resolution.failure;
     }
 
     const ssrfBlock = await this.ssrfBlockResponse(httpServer, mcpId, agentId);
-    if (ssrfBlock) return ssrfBlock;
+    if (ssrfBlock) {
+      if (scopeKey && !httpServer.internal) {
+        this.attributeCredentialResolution(
+          ssrfBlock,
+          credentialResolutionFailure,
+        );
+      }
+      return ssrfBlock;
+    }
+
+    if (!credentialToken && credentialResolutionFailure) {
+      return this.credentialRefreshFailureResponse(
+        credentialResolutionFailure,
+      );
+    }
 
     const headers = this.buildUpstreamHeaders(
       sessionId,
@@ -3784,27 +4410,39 @@ export class McpProxy {
       }
     }
 
-    const response = await fetch(httpServer.upstreamUrl, {
-      method,
-      headers,
-      body: body || undefined,
-      signal: upstreamTimeoutSignal(method),
-    });
+    let response: Response;
+    try {
+      response = await fetch(httpServer.upstreamUrl, {
+        method,
+        headers,
+        body: body || undefined,
+        signal: upstreamTimeoutSignal(method),
+      });
+    } catch (error) {
+      this.attributeCredentialResolutionError(
+        error,
+        credentialResolutionFailure,
+      );
+      throw error;
+    }
+    if (scopeKey && !httpServer.internal) {
+      this.attributeCredentialResolution(response, credentialResolutionFailure);
+    }
 
     if (response.status === 401 && scopeKey && !httpServer.internal) {
       await response.body?.cancel().catch(() => {
         /* noop */
       });
-      const refreshedToken = await this.refreshCredentialToken(
+      const refreshResult = await this.refreshCredentialToken(
         agentId,
         scopeKey,
         mcpId,
       );
-      if (refreshedToken) {
+      if (refreshResult.accessToken) {
         const retryHeaders = this.buildUpstreamHeaders(
           sessionId,
           httpServer.headers,
-          refreshedToken,
+          refreshResult.accessToken,
           false,
         );
         if (extraHeaders) {
@@ -3813,12 +4451,19 @@ export class McpProxy {
           }
         }
 
-        const retryResponse = await fetch(httpServer.upstreamUrl, {
-          method,
-          headers: retryHeaders,
-          body: body || undefined,
-          signal: upstreamTimeoutSignal(method),
-        });
+        let retryResponse: Response;
+        try {
+          retryResponse = await fetch(httpServer.upstreamUrl, {
+            method,
+            headers: retryHeaders,
+            body: body || undefined,
+            signal: upstreamTimeoutSignal(method),
+          });
+        } catch (error) {
+          this.attributeCredentialResolutionError(error);
+          throw error;
+        }
+        this.attributeCredentialResolution(retryResponse);
         const retrySessionId = retryResponse.headers.get("Mcp-Session-Id");
         if (retrySessionId) {
           this.setSession(sessionKey, retrySessionId);
@@ -3832,7 +4477,13 @@ export class McpProxy {
       // catch-all then reports as `connector_unavailable`, destroying the fact
       // that this was an authorization failure. Return a fresh, readable 401
       // instead so callers can act on the status.
-      return new Response(
+      const refreshFailure =
+        refreshResult.failure ?? credentialResolutionFailure;
+
+      if (refreshFailure) {
+        return this.credentialRefreshFailureResponse(refreshFailure);
+      }
+      const failureResponse = new Response(
         JSON.stringify({
           error: "unauthorized",
           error_description:
@@ -3843,6 +4494,8 @@ export class McpProxy {
           headers: { "Content-Type": "application/json" },
         },
       );
+      this.attributeCredentialResolution(failureResponse);
+      return failureResponse;
     }
 
     // Track session
@@ -3858,23 +4511,27 @@ export class McpProxy {
     agentId: string,
     scopeKey: string,
     mcpId: string,
-  ): Promise<string | null> {
+  ): Promise<{
+    accessToken: string | null;
+    failure?: CredentialRefreshFailure;
+  }> {
     const credential = await getStoredCredential(
       this.secretStore,
       agentId,
       scopeKey,
       mcpId,
     );
-    if (!credential) return null;
+    if (!credential) return { accessToken: null };
 
-    const refreshed = await refreshCredential(
+    const { credential: refreshed, failure } = await refreshCredentialDetailed(
       this.secretStore,
       agentId,
       scopeKey,
       mcpId,
       credential,
     );
-    return refreshed?.accessToken ?? null;
+    const accessToken = refreshed?.accessToken ?? null;
+    return { accessToken, failure };
   }
 
   /**
@@ -3950,10 +4607,11 @@ export class McpProxy {
       });
       return new Response("Request body too large", { status: 413 });
     }
-    const forwardedToolName =
+    const forwardedToolCall =
       c.req.method === "POST"
-        ? toolNameFromJsonRpcToolCall(bodyText)
+        ? jsonRpcToolCallFromRequest(bodyText)
         : undefined;
+    const forwardedToolName = forwardedToolCall?.name;
     const toolCallStartedAt = Date.now();
     let forwardedToolCallObsCompleted = false;
     const emitForwardedToolCallCompleted = (
@@ -3987,11 +4645,17 @@ export class McpProxy {
     // second OAuth login would block unattended watcher runs. Non-internal
     // MCPs use per-user credentials.
     let credentialToken: string | undefined;
+    let credentialResolutionFailure: CredentialRefreshFailure | undefined;
     if (httpServer.internal) {
       credentialToken = authContext?.workerToken;
     } else if (scopeKey) {
-      const token = await this.resolveCredentialToken(agentId, scopeKey, mcpId);
-      if (token) credentialToken = token;
+      const resolution = await this.resolveCredentialToken(
+        agentId,
+        scopeKey,
+        mcpId,
+      );
+      if (resolution.accessToken) credentialToken = resolution.accessToken;
+      credentialResolutionFailure = resolution.failure;
     }
 
     const pause = this.serverHealth.getPause(healthKey);
@@ -4018,6 +4682,32 @@ export class McpProxy {
         c,
         -32000,
         `MCP server '${mcpId}' is temporarily paused after repeated failures.`,
+      );
+    }
+
+    if (credentialResolutionFailure) {
+      const result = this.credentialRefreshFailureResult({
+        failure: credentialResolutionFailure,
+        agentId,
+        userId: authContext?.userId ?? scopeKey ?? "",
+        mcpId,
+        organizationId: getOrgId(),
+      });
+      emitForwardedToolCallCompleted(
+        "failed",
+        {
+          http_status: 401,
+          result_preview: resultPreviewFromValue(result),
+        },
+        new McpHttpStatusError(401, result.content[0].text),
+      );
+      return c.json(
+        {
+          jsonrpc: "2.0",
+          id: forwardedToolCall?.id ?? null,
+          result,
+        },
+        200,
       );
     }
 
@@ -4063,6 +4753,9 @@ export class McpProxy {
         body: bodyText || undefined,
         signal: upstreamTimeoutSignal(c.req.method),
       });
+      if (scopeKey && !httpServer.internal) {
+        this.attributeCredentialResolution(response, credentialResolutionFailure);
+      }
     } catch (error) {
       this.recordServerFailure(
         healthKey,
@@ -4083,6 +4776,33 @@ export class McpProxy {
         error,
       );
       throw error;
+    }
+
+    const refreshFailure = this.refreshFailureForResponse(response);
+    const refreshDiagnostic = diagnosticCodeForRefreshFailure(refreshFailure);
+    if (
+      refreshDiagnostic === "oauth_refresh_failed" &&
+      response.status !== 403
+    ) {
+      const result = {
+        content: [
+          { type: "text", text: transientRefreshFailureMessage(mcpId) },
+        ],
+        isError: true,
+        diagnosticCode: refreshDiagnostic,
+      };
+      emitForwardedToolCallCompleted(
+        "failed",
+        {
+          http_status: response.status,
+          result_preview: resultPreviewFromValue(result),
+        },
+        new McpHttpStatusError(response.status, result.content[0].text),
+      );
+      return c.json(
+        { jsonrpc: "2.0", id: forwardedToolCall?.id ?? null, result },
+        200,
+      );
     }
 
     // Detect HTTP 401 + WWW-Authenticate → start MCP OAuth 2.1 auth-code flow.
@@ -4120,10 +4840,11 @@ export class McpProxy {
       return c.json(
         {
           jsonrpc: "2.0",
-          id: null,
+          id: forwardedToolCall?.id ?? null,
           result: {
             content: [{ type: "text", text: JSON.stringify(finalPayload) }],
             isError: true,
+            diagnosticCode: refreshDiagnostic ?? "needs_reauth",
           },
         },
         200,
@@ -4167,6 +4888,12 @@ export class McpProxy {
             // Retry path is POST-only (guarded above) — always bounded.
             signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS),
           });
+          if (scopeKey && !httpServer.internal) {
+            this.attributeCredentialResolution(
+              response,
+              credentialResolutionFailure,
+            );
+          }
         } catch (error) {
           this.recordServerFailure(
             healthKey,
@@ -4219,42 +4946,397 @@ export class McpProxy {
       });
     }
 
-    const responseHeaders = new Headers();
     const contentType = response.headers.get("content-type");
-    if (contentType) {
-      responseHeaders.set("Content-Type", contentType);
-    }
+    const normalizedContentType = contentType?.toLowerCase();
+    const responseHeaders = proxyResponseHeaders(response.headers);
     if (newSessionId) {
       responseHeaders.set("Mcp-Session-Id", newSessionId);
     }
+    const isEventStream =
+      normalizedContentType?.includes("text/event-stream") ?? false;
 
     const shouldInspectForwardedToolCallResponse =
-      forwardedToolName && !contentType?.includes("text/event-stream");
+      forwardedToolName && normalizedContentType?.includes("application/json");
     const forwardedToolCallInspection = shouldInspectForwardedToolCallResponse
-      ? await inspectForwardedToolCallResponseForObs(response.clone())
+      ? await inspectForwardedToolCallResponseForObs(
+          response.clone(),
+          forwardedToolCall.id,
+        )
       : null;
-    const body = this.wrapStreamableResponseBody(response.body, mcpId, agentId);
-    emitForwardedToolCallCompleted(
-      forwardedToolCallInspection?.status ?? (response.ok ? "ok" : "failed"),
-      forwardedToolCallInspection
-        ? {
-            http_status: response.status,
-            ...forwardedToolCallInspection.metadata,
-          }
-        : {
-            http_status: response.status,
-            result_preview: {
-              streamed_response: true,
+    if (
+      response.ok &&
+      authContext &&
+      forwardedToolCallInspection?.resultOrError instanceof McpJsonRpcError &&
+      this.authDiagnosticCodeFromMessage(
+        forwardedToolCallInspection.resultOrError.message,
+      ) === "upstream_unauthorized" &&
+      isMessageOnlyReauthSignal(
+        forwardedToolCallInspection.resultOrError.message,
+      )
+    ) {
+      const result = await this.buildForwardedReauthResult({
+        mcpId,
+        agentId,
+        scopeKey: scopeKey ?? authContext.userId,
+        httpServer,
+        authContext,
+        wwwAuthenticate: response.headers.get("www-authenticate"),
+        organizationId: getOrgId(),
+      });
+      await response.body?.cancel().catch(() => {
+        /* noop */
+      });
+      emitForwardedToolCallCompleted(
+        "failed",
+        {
+          http_status: response.status,
+          ...forwardedToolCallInspection.metadata,
+          result_preview: resultPreviewFromValue(result),
+        },
+        forwardedToolCallInspection.resultOrError,
+      );
+      const replacement = JSON.stringify({
+        jsonrpc: "2.0",
+        id: forwardedToolCall?.id ?? null,
+        result,
+      });
+      stripTransformedRepresentationHeaders(responseHeaders);
+      return new Response(replacement, {
+        status: 200,
+        headers: responseHeaders,
+      });
+    }
+
+    let body = response.body;
+    if (isEventStream && forwardedToolCall) {
+      const organizationId = getOrgId();
+      const wwwAuthenticate = response.headers.get("www-authenticate");
+      body = this.wrapSseReauthResponseBody(
+        body,
+        forwardedToolCall.id,
+        response.ok && authContext
+          ? () =>
+              orgContext.run({ organizationId }, () =>
+                this.buildForwardedReauthResult({
+                  mcpId,
+                  agentId,
+                  scopeKey: scopeKey ?? authContext.userId,
+                  httpServer,
+                  authContext,
+                  wwwAuthenticate,
+                  organizationId,
+                }),
+              )
+          : undefined,
+        (inspection) =>
+          emitForwardedToolCallCompleted(
+            inspection.status,
+            {
               http_status: response.status,
+              ...inspection.metadata,
+              ...(inspection.status === "ok"
+                ? {
+                    result_preview: {
+                      streamed_response: true,
+                      http_status: response.status,
+                    },
+                  }
+                : {}),
             },
-          },
-      forwardedToolCallInspection?.resultOrError ??
-        (response.ok ? undefined : new McpHttpStatusError(response.status)),
-    );
+            inspection.resultOrError,
+          ),
+        () => {
+          const inspection = unavailableForwardedToolCallObsInspection(
+            response.status,
+            true,
+          );
+          emitForwardedToolCallCompleted(
+            inspection.status,
+            {
+              http_status: response.status,
+              ...inspection.metadata,
+            },
+            inspection.resultOrError,
+          );
+        },
+      );
+      stripTransformedRepresentationHeaders(responseHeaders);
+    }
+    body = this.wrapStreamableResponseBody(body, mcpId, agentId);
+    if (!isEventStream && forwardedToolName) {
+      const completion =
+        response.ok &&
+        (!shouldInspectForwardedToolCallResponse ||
+          !forwardedToolCallInspection)
+          ? unavailableForwardedToolCallObsInspection(response.status, false)
+          : forwardedToolCallInspection;
+      emitForwardedToolCallCompleted(
+        completion?.status ?? (response.ok ? "ok" : "failed"),
+        completion
+          ? {
+              http_status: response.status,
+              ...completion.metadata,
+              ...(completion.status === "ok"
+                ? {
+                    result_preview: {
+                      streamed_response: true,
+                      http_status: response.status,
+                    },
+                  }
+                : {}),
+            }
+          : {
+              http_status: response.status,
+              result_preview: {
+                streamed_response: true,
+                http_status: response.status,
+              },
+            },
+        completion?.resultOrError ??
+          (response.ok ? undefined : new McpHttpStatusError(response.status)),
+      );
+    }
 
     return new Response(body, {
       status: response.status,
       headers: responseHeaders,
+    });
+  }
+
+  private async buildForwardedReauthResult(params: {
+    mcpId: string;
+    agentId: string;
+    scopeKey: string;
+    httpServer: HttpMcpServerConfig;
+    authContext: {
+      userId: string;
+      platform?: string;
+      channelId: string;
+      conversationId: string;
+      teamId?: string;
+      connectionId?: string;
+    };
+    wwwAuthenticate: string | null;
+    organizationId: string;
+  }) {
+    const payload = await this.handleUpstream401({
+      mcpId: params.mcpId,
+      agentId: params.agentId,
+      userId: params.authContext.userId,
+      scopeKey: params.scopeKey,
+      httpServer: params.httpServer,
+      wwwAuthenticate: params.wwwAuthenticate,
+      platform: params.authContext.platform ?? "",
+      channelId: params.authContext.channelId,
+      conversationId: params.authContext.conversationId,
+      teamId: params.authContext.teamId,
+      connectionId: params.authContext.connectionId,
+      deviceAuthFallback: false,
+    });
+    const connectUrl = payload
+      ? undefined
+      : buildMcpConnectUrl({
+          publicGatewayUrl: this.publicGatewayUrl,
+          agentId: params.agentId,
+          mcpId: params.mcpId,
+          userId: params.authContext.userId,
+          organizationId: params.organizationId,
+          logContext: "streamable tools/call",
+        });
+    const finalPayload = payload ?? {
+      status: "login_required" as const,
+      ...(connectUrl ? { url: connectUrl } : {}),
+      message: connectUrl
+        ? `Authentication is required for ${params.mcpId}. STOP calling tools and show the user this login link. Do NOT retry this tool call — wait for the user to complete login first.`
+        : `Authentication is required for ${params.mcpId}. Tell the user to reconnect it at ${WORKBENCH_CONNECTIONS_HINT} before retrying.`,
+    };
+    return {
+      content: [{ type: "text", text: JSON.stringify(finalPayload) }],
+      isError: true,
+      diagnosticCode: "needs_reauth",
+    };
+  }
+
+  private wrapSseReauthResponseBody(
+    body: ReadableStream<Uint8Array> | null,
+    requestId: unknown,
+    buildResult:
+      | (() => Promise<{
+          content: { type: string; text: string }[];
+          isError: boolean;
+          diagnosticCode: string;
+        }>)
+      | undefined,
+    onMatchingTerminal: (inspection: ForwardedToolCallObsInspection) => void,
+    onEndWithoutMatchingTerminal: () => void,
+  ): ReadableStream<Uint8Array> | null {
+    if (!body) {
+      onEndWithoutMatchingTerminal();
+      return body;
+    }
+
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    let buffer = "";
+    let bufferedByteLength = 0;
+    let scanState: SseEventBoundaryScanState = {
+      offset: 0,
+      consecutiveLineEndings: 0,
+    };
+    let passthroughOversizedEvent = false;
+    let matchedTerminal = false;
+
+    const emit = async (
+      text: string,
+      controller: TransformStreamDefaultController<Uint8Array>,
+    ) => {
+      if (!text) return;
+      let remaining = text;
+      while (remaining) {
+        if (passthroughOversizedEvent) {
+          const scanResult = scanSseEventBoundary(remaining, scanState);
+          const { eventEnd } = scanResult;
+          if (eventEnd < 0) {
+            controller.enqueue(encoder.encode(remaining));
+            scanState = { ...scanResult.state, offset: 0 };
+            return;
+          }
+
+          controller.enqueue(encoder.encode(remaining.slice(0, eventEnd)));
+          remaining = remaining.slice(eventEnd);
+          passthroughOversizedEvent = false;
+          scanState = {
+            offset: 0,
+            consecutiveLineEndings: 0,
+            previousWasCarriageReturn:
+              scanResult.state.previousWasCarriageReturn,
+          };
+          continue;
+        }
+
+        const byteCapacity =
+          OBS_RESPONSE_INSPECT_MAX_BYTES - bufferedByteLength + 1;
+        const destination = new Uint8Array(
+          Math.min(byteCapacity, Math.max(4, remaining.length * 3)),
+        );
+        const encoded = encoder.encodeInto(remaining, destination);
+        if (encoded.read === 0) {
+          passthroughOversizedEvent = true;
+          controller.enqueue(encoder.encode(buffer));
+          buffer = "";
+          bufferedByteLength = 0;
+          scanState = { ...scanState, offset: 0 };
+          continue;
+        }
+
+        buffer += remaining.slice(0, encoded.read);
+        remaining = remaining.slice(encoded.read);
+        bufferedByteLength += encoded.written;
+
+        while (true) {
+          const scanResult = scanSseEventBoundary(buffer, scanState);
+          scanState = scanResult.state;
+          const { eventEnd } = scanResult;
+          if (eventEnd < 0) break;
+          const eventText = buffer.slice(0, eventEnd);
+          const encodedEvent = encoder.encode(eventText);
+          buffer = buffer.slice(eventEnd);
+          bufferedByteLength -= encodedEvent.byteLength;
+          scanState = {
+            offset: 0,
+            consecutiveLineEndings: 0,
+            previousWasCarriageReturn:
+              scanResult.state.previousWasCarriageReturn,
+          };
+
+          if (encodedEvent.byteLength > OBS_RESPONSE_INSPECT_MAX_BYTES) {
+            controller.enqueue(encodedEvent);
+            continue;
+          }
+
+          const terminal = jsonRpcTerminalFromSseEvent(eventText);
+          if (!terminal || terminal.id !== requestId || matchedTerminal) {
+            controller.enqueue(encodedEvent);
+            continue;
+          }
+
+          matchedTerminal = true;
+          const inspection = inspectJsonRpcTerminalForObs(terminal);
+          const error = inspection.resultOrError;
+          if (
+            buildResult &&
+            error instanceof McpJsonRpcError &&
+            this.authDiagnosticCodeFromMessage(error.message) ===
+              "upstream_unauthorized" &&
+            isMessageOnlyReauthSignal(error.message)
+          ) {
+            const result = await buildResult();
+            onMatchingTerminal({
+              ...inspection,
+              metadata: {
+                ...inspection.metadata,
+                result_preview: resultPreviewFromValue(result),
+              },
+            });
+            controller.enqueue(
+              encoder.encode(
+                replaceSseDataFields(
+                  eventText,
+                  JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: terminal.id,
+                    result,
+                  }),
+                ),
+              ),
+            );
+          } else {
+            onMatchingTerminal(inspection);
+            controller.enqueue(encodedEvent);
+          }
+        }
+
+        if (bufferedByteLength > OBS_RESPONSE_INSPECT_MAX_BYTES) {
+          passthroughOversizedEvent = true;
+          controller.enqueue(encoder.encode(buffer));
+          buffer = "";
+          bufferedByteLength = 0;
+          scanState = { ...scanState, offset: 0 };
+        }
+      }
+    };
+
+    const transformedBody = body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform: async (chunk, controller) => {
+          await emit(decoder.decode(chunk, { stream: true }), controller);
+        },
+        flush: async (controller) => {
+          await emit(decoder.decode(), controller);
+          if (buffer) controller.enqueue(encoder.encode(buffer));
+          if (!matchedTerminal) onEndWithoutMatchingTerminal();
+        },
+      }),
+    );
+    const reader = transformedBody.getReader();
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            controller.close();
+          } else {
+            controller.enqueue(value);
+          }
+        } catch (error) {
+          if (!matchedTerminal) onEndWithoutMatchingTerminal();
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        if (!matchedTerminal) onEndWithoutMatchingTerminal();
+        await reader.cancel(reason);
+      },
     });
   }
 
@@ -4396,8 +5478,8 @@ export class McpProxy {
     mcpId: string,
     scopeKey?: string,
     directAuthToken?: string,
-  ): Promise<void> {
-    await this.sendUpstreamRequest(
+  ): Promise<Response> {
+    return this.sendUpstreamRequest(
       httpServer,
       agentId,
       mcpId,
@@ -4405,9 +5487,7 @@ export class McpProxy {
       INITIALIZED_NOTIFICATION_BODY,
       scopeKey,
       directAuthToken,
-    ).catch(() => {
-      /* noop */
-    });
+    );
   }
 
   /**
@@ -4439,7 +5519,9 @@ export class McpProxy {
       mcpId,
       scopeKey,
       directAuthToken,
-    );
+    ).catch(() => {
+      /* best effort */
+    });
 
     logger.info("Re-initialized MCP session", { mcpId, agentId });
   }

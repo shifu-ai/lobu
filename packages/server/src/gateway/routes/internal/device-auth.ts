@@ -336,6 +336,13 @@ export type CredentialRefreshResult = {
   contended?: boolean;
 };
 
+export type StoredCredentialAuthState = {
+  authenticated: boolean;
+  status: "not_authenticated" | "authenticated" | "needs_reauth" | "degraded";
+  credential: StoredCredential | null;
+  failure?: CredentialRefreshFailure;
+};
+
 /** Matches the freshness buffer callers apply before deciding to refresh. */
 const REFRESH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 
@@ -370,6 +377,53 @@ function parseOAuthError(text: string): {
   }
 }
 
+export async function resolveStoredCredentialAuthState(
+  secretStore: WritableSecretStore,
+  agentId: string,
+  userId: string,
+  mcpId: string,
+): Promise<StoredCredentialAuthState> {
+  const credential = await getStoredCredential(
+    secretStore,
+    agentId,
+    userId,
+    mcpId,
+  );
+  if (!credential) {
+    return {
+      authenticated: false,
+      status: "not_authenticated",
+      credential: null,
+    };
+  }
+
+  if (credential.expiresAt > Date.now() + REFRESH_EXPIRY_BUFFER_MS) {
+    return { authenticated: true, status: "authenticated", credential };
+  }
+
+  const { credential: refreshed, failure } = await refreshCredentialDetailed(
+    secretStore,
+    agentId,
+    userId,
+    mcpId,
+    credential,
+  );
+  if (refreshed && !failure) {
+    return {
+      authenticated: true,
+      status: "authenticated",
+      credential: refreshed,
+    };
+  }
+
+  return {
+    authenticated: false,
+    status: failure?.permanent ? "needs_reauth" : "degraded",
+    credential: null,
+    failure,
+  };
+}
+
 /**
  * Refresh an MCP credential, reporting *why* it failed.
  *
@@ -396,52 +450,42 @@ export async function refreshCredentialDetailed(
   if (!acquired) {
     // Another request is refreshing — wait briefly and re-read.
     //
-    // The wait is far shorter than a token-endpoint round trip, so the re-read
-    // can still return the same expired credential we were called to replace.
-    // Report that explicitly instead of handing back a credential the caller
-    // will send upstream and get a 401 for.
-    await new Promise((r) => setTimeout(r, 150));
-    const reread = await getStoredCredential(
-      secretStore,
+    // Do not return a stale credential after waiting: callers would send that
+    // token upstream even though this path already knows it is expired.
+    let reread: StoredCredential | null = null;
+    for (let attempt = 0; attempt < 7; attempt++) {
+      await new Promise((r) => setTimeout(r, 150));
+      reread = await getStoredCredential(secretStore, agentId, userId, mcpId);
+
+      if (!reread) {
+        logger.warn("Token refresh contended, credential missing on re-read", {
+          agentId,
+          userId,
+          mcpId,
+        });
+        return {
+          credential: null,
+          contended: true,
+          failure: { reason: "lock_contended_missing", permanent: false },
+        };
+      }
+
+      if (reread.expiresAt > Date.now() + REFRESH_EXPIRY_BUFFER_MS) {
+        return { credential: reread, contended: true };
+      }
+    }
+
+    logger.warn("Token refresh contended, re-read credential still stale", {
       agentId,
       userId,
       mcpId,
-    );
-
-    if (!reread) {
-      logger.warn("Token refresh contended, credential missing on re-read", {
-        agentId,
-        userId,
-        mcpId,
-      });
-      return {
-        credential: null,
-        contended: true,
-        failure: { reason: "lock_contended_missing", permanent: false },
-      };
-    }
-
-    const stillStale =
-      reread.expiresAt <= Date.now() + REFRESH_EXPIRY_BUFFER_MS;
-
-    if (stillStale) {
-      logger.warn("Token refresh contended, re-read credential still stale", {
-        agentId,
-        userId,
-        mcpId,
-        expiresInMs: reread.expiresAt - Date.now(),
-      });
-      // Deliberately still hand back the stale credential: this change is
-      // diagnostic only, and withholding it here would alter the failure mix
-      // we are trying to measure. `failure` records that we knowingly did so.
-      return {
-        credential: reread,
-        contended: true,
-        failure: { reason: "lock_contended_stale", permanent: false },
-      };
-    }
-
-    return { credential: reread, contended: true };
+      expiresInMs: reread ? reread.expiresAt - Date.now() : undefined,
+    });
+    return {
+      credential: null,
+      contended: true,
+      failure: { reason: "lock_contended_stale", permanent: false },
+    };
   }
 
   try {
@@ -498,6 +542,21 @@ export async function refreshCredentialDetailed(
         response.status < 500 &&
         (upstreamError === undefined ||
           PERMANENT_OAUTH_ERRORS.has(upstreamError));
+      if (permanent) {
+        const latest = await getStoredCredential(
+          secretStore,
+          agentId,
+          userId,
+          mcpId,
+        );
+        if (latest && latest.expiresAt > Date.now() + REFRESH_EXPIRY_BUFFER_MS) {
+          logger.info(
+            "Token refresh rejected but a fresh credential was already stored",
+            { agentId, userId, mcpId },
+          );
+          return { credential: latest };
+        }
+      }
       logger.error("Token refresh failed", {
         status: response.status,
         upstreamError,
@@ -1052,13 +1111,59 @@ export function createDeviceAuthRoutes(
     const agentId = worker.agentId || worker.userId;
     const userId = worker.userId;
 
-    const credential = await getStoredCredential(
+    const authState = await resolveStoredCredentialAuthState(
       config.secretStore,
       agentId,
       userId,
       mcpId,
     );
-    return c.json({ authenticated: !!credential });
+    if (authState.status === "not_authenticated") {
+      return c.json({ authenticated: false, status: "not_authenticated" });
+    }
+
+    if (authState.authenticated) {
+      return c.json({ authenticated: true, status: "authenticated" });
+    }
+
+    const connectUrl =
+      authState.status === "needs_reauth"
+        ? buildMcpConnectUrl({
+            publicGatewayUrl: config.publicGatewayUrl,
+            agentId,
+            mcpId,
+            userId,
+            organizationId: worker.organizationId,
+            logContext: "device-auth/status",
+          })
+        : undefined;
+    const login = connectUrl
+      ? {
+          flow: "auth_code" as const,
+          verificationUri: connectUrl,
+          verificationUriComplete: connectUrl,
+          expiresIn: Math.floor(CONNECT_LINK_TOKEN_TTL_MS / 1000),
+        }
+      : undefined;
+
+    return c.json({
+      authenticated: false,
+      status: authState.status,
+      reason: authState.failure?.reason ?? "refresh_failed",
+      permanent: authState.failure?.permanent ?? false,
+      ...(authState.failure?.status
+        ? { refreshStatus: authState.failure.status }
+        : {}),
+      ...(authState.failure?.upstreamError
+        ? { upstreamError: authState.failure.upstreamError }
+        : {}),
+      ...(authState.failure?.upstreamErrorDescription
+        ? {
+            upstreamErrorDescription:
+              authState.failure.upstreamErrorDescription,
+          }
+        : {}),
+      ...(login ? { login } : {}),
+    });
   });
 
   // DELETE /internal/device-auth/credential?mcpId=lobu

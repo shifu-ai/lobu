@@ -820,7 +820,7 @@ describe("McpProxy", () => {
       }
     });
 
-    test("non-surface discovery stays soft when tools/list returns 401 or 403", async () => {
+    test("non-surface discovery returns soft diagnostics when tools/list returns 401 or 403", async () => {
       for (const status of [401, 403]) {
         const configSource = createMockConfigSource({
           "test-mcp": TEST_SERVER,
@@ -848,12 +848,25 @@ describe("McpProxy", () => {
 
         expect(result).toEqual({
           tools: [],
+          status: status === 401 ? "needs_reauth" : "degraded",
+          diagnosticCode:
+            status === 401 ? "upstream_unauthorized" : "upstream_forbidden",
+          instructions: expect.any(String),
           provenance: {
             upstreamOrigin: "http://upstream:9000",
             configSource: "agent",
             configDigest: expect.any(String),
           },
         });
+        const instructions = result.instructions ?? "";
+        if (status === 401) {
+          expect(instructions.toLowerCase()).toContain("reconnect");
+          expect(instructions).toContain("ShiFu Agent Workbench");
+        } else {
+          expect(instructions.toLowerCase()).toContain("administrator");
+          expect(instructions.toLowerCase()).toContain("permissions or scopes");
+          expect(instructions.toLowerCase()).not.toContain("reconnect");
+        }
       }
     });
 
@@ -961,7 +974,7 @@ describe("McpProxy", () => {
       }
     });
 
-    test("non-surface discovery stays soft for auth-style JSON-RPC tools/list errors", async () => {
+    test("non-surface discovery returns soft reauth diagnostics for unauthorized JSON-RPC tools/list errors", async () => {
       const configSource = createMockConfigSource({
         "test-mcp": TEST_SERVER,
       });
@@ -988,12 +1001,18 @@ describe("McpProxy", () => {
 
       expect(result).toEqual({
         tools: [],
+        status: "needs_reauth",
+        diagnosticCode: "upstream_unauthorized",
+        instructions: expect.any(String),
         provenance: {
           upstreamOrigin: "http://upstream:9000",
           configSource: "agent",
           configDigest: expect.any(String),
         },
       });
+      const instructions = result.instructions ?? "";
+      expect(instructions.toLowerCase()).toContain("reconnect");
+      expect(instructions).toContain("ShiFu Agent Workbench");
     });
 
     test("surfaceErrors throws for invalid tools/list JSON bodies", async () => {

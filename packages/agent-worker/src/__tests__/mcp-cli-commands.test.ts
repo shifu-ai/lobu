@@ -674,6 +674,43 @@ describe("summariseAuthStart / summariseAuthCheck", () => {
     });
   });
 
+  test("summariseAuthCheck preserves reauth login link and message", () => {
+    const out = summariseAuthCheck(
+      {
+        status: "needs_reauth",
+        authenticated: false,
+        message: "Reconnect the connector.",
+        login: {
+          verificationUri: "https://gateway.example.com/connect/mcp-token",
+          verificationUriComplete:
+            "https://gateway.example.com/connect/mcp-token",
+          expiresIn: 900,
+        },
+        reason: "upstream_rejected",
+        upstreamError: "invalid_grant",
+      },
+      "lobu",
+      "raw"
+    );
+
+    expect(JSON.parse(out)).toEqual({
+      status: "needs_reauth",
+      mcp_id: "lobu",
+      authenticated: false,
+      message: "Reconnect the connector.",
+      login: {
+        verificationUri: "https://gateway.example.com/connect/mcp-token",
+        verificationUriComplete:
+          "https://gateway.example.com/connect/mcp-token",
+        expiresIn: 900,
+      },
+      verification_url: "https://gateway.example.com/connect/mcp-token",
+      verification_uri: "https://gateway.example.com/connect/mcp-token",
+      reason: "upstream_rejected",
+      upstream_error: "invalid_grant",
+    });
+  });
+
   test("summariseAuthCheck falls back to raw text when parse fails", () => {
     expect(summariseAuthCheck(null, "lobu", "raw text")).toBe("raw text");
   });

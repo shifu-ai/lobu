@@ -307,8 +307,13 @@ function buildMcpInstructions(
     return "";
   }
 
+  const degradedAuthentication = mcpStatus.filter(
+    (mcp) =>
+      mcp.requiresAuth && !mcp.authenticated && mcp.authStatus === "degraded"
+  );
   const needsAuthentication = mcpStatus.filter(
-    (mcp) => mcp.requiresAuth && !mcp.authenticated
+    (mcp) =>
+      mcp.requiresAuth && !mcp.authenticated && mcp.authStatus !== "degraded"
   );
   const needsConfiguration = mcpStatus.filter(
     (mcp) => mcp.requiresInput && !mcp.configured
@@ -317,6 +322,7 @@ function buildMcpInstructions(
 
   if (
     needsAuthentication.length === 0 &&
+    degradedAuthentication.length === 0 &&
     needsConfiguration.length === 0 &&
     undiscoveredMcps.length === 0
   ) {
@@ -340,6 +346,12 @@ function buildMcpInstructions(
         : `call \`${authToolNames.loginCheck}\``;
     lines.push(
       `- ⚠️ **${mcp.name}** (id: ${mcp.id}): Authentication is required. To start login, ${loginCmd}. After the user completes login, ${checkCmd}. Newly available MCP tools will refresh on the next message.`
+    );
+  }
+
+  for (const mcp of degradedAuthentication) {
+    lines.push(
+      `- ⚠️ **${mcp.name}** (id: ${mcp.id}): The connection cannot be confirmed right now and is temporarily degraded; try again later before asking the user to reconnect.`
     );
   }
 

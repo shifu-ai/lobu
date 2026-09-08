@@ -195,7 +195,6 @@ mock.module("../../gateway/routes/internal/device-auth.js", () => {
 		await putSecretCredential(secretStore, agentId, userId, mcpId, refreshed);
 		return refreshed;
 	};
-
 	return {
 		createDeviceAuthRoutes: () => new Hono(),
 		getStableCredentialBindingId,
@@ -221,6 +220,11 @@ mock.module("../../gateway/routes/internal/device-auth.js", () => {
 						failure: { reason: "upstream_rejected", permanent: true },
 					};
 		},
+		resolveStoredCredentialAuthState: async () => ({
+			authenticated: false,
+			status: "not_authenticated",
+			credential: null,
+		}),
 		startDeviceAuth: async () => null,
 		storeCredentialForScope: async (
 			secretStore: ReturnType<typeof createMemorySecretStore>,

@@ -124,6 +124,36 @@ function mockFetch(handler: (url: string) => Response) {
     );
 }
 
+const OPEN_SSE_WATCHDOG_MS = 500;
+
+function createSignal() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+async function withOpenSseWatchdog<T>(
+  promise: Promise<T>,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(message)),
+          OPEN_SSE_WATCHDOG_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function successFetch(
   body: object = { jsonrpc: "2.0", id: 1, result: { tools: [] } },
 ) {
@@ -199,6 +229,48 @@ beforeEach(() => {
   delete process.env.SHIFU_AGENT_OBS_TOKEN;
   delete process.env.TOOLBOX_AGENT_OBSERVABILITY_URL;
   delete process.env.TOOLBOX_INTERNAL_SECRET;
+});
+
+test("SSE boundary scanning stays linear across highly fragmented input", async () => {
+  const proxyModule = await import("../auth/mcp/proxy.js");
+  const scan = (
+    proxyModule as typeof proxyModule & {
+      scanSseEventBoundary?: (
+        text: string,
+        state: { offset: number; consecutiveLineEndings: number },
+      ) => {
+        eventEnd: number;
+        inspectedCharacters: number;
+        state: { offset: number; consecutiveLineEndings: number };
+      };
+    }
+  ).scanSseEventBoundary;
+  expect(scan).toBeFunction();
+  if (!scan) return;
+
+  const event = `data: ${"x".repeat(64 * 1024 - 16)}\r\n\r\n`;
+  let buffered = "";
+  let state = { offset: 0, consecutiveLineEndings: 0 };
+  let inspectedCharacters = 0;
+  let eventEnd = -1;
+  for (const character of event) {
+    buffered += character;
+    const result = scan(buffered, state);
+    state = result.state;
+    inspectedCharacters += result.inspectedCharacters;
+    eventEnd = result.eventEnd;
+  }
+
+  expect(eventEnd).toBe(event.length);
+  expect(inspectedCharacters).toBeLessThanOrEqual(event.length + 2);
+  for (const delimiter of ["\n\n", "\r\r", "\r\n\r\n"]) {
+    expect(
+      scan(`data: ok${delimiter}`, {
+        offset: 0,
+        consecutiveLineEndings: 0,
+      }).eventEnd,
+    ).toBe(`data: ok${delimiter}`.length);
+  }
 });
 
 describe("trusted course memory tool policy", () => {
@@ -901,6 +973,213 @@ describe("durable observability for tools/list", () => {
     });
   });
 
+  test("keeps concurrent discovery refresh telemetry request-local", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const secretStore = new InMemoryWritableStore();
+    const mcpId = "discovery-refresh-attribution";
+    const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://discovery.example.test/mcp",
+          oauth: { resource: "https://discovery.example.test/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    const noFailureUpstreamStarted = createSignal();
+    const releaseNoFailureUpstream = createSignal();
+    let upstreamCalls = 0;
+
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+        if (url === "https://auth.example.com/oauth/token") {
+          return new Response(JSON.stringify({ error: "server_error" }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        upstreamCalls += 1;
+        noFailureUpstreamStarted.resolve();
+        await releaseNoFailureUpstream.promise;
+        return new Response("forbidden", { status: 403 });
+      },
+    ) as unknown as typeof fetch;
+
+    const noFailureTrace = {
+      traceId: "tr_discovery_no_failure_123",
+      journeyId: "discovery_test",
+      actor: "worker",
+      traceSource: "incoming" as const,
+    };
+    const localFailureTrace = {
+      traceId: "tr_discovery_local_failure_123",
+      journeyId: "discovery_test",
+      actor: "worker",
+      traceSource: "incoming" as const,
+    };
+    const noFailureRequest = inTestOrg(() =>
+      proxy.fetchToolsForMcp(
+        mcpId,
+        "agent1",
+        { userId: "user1", channelId: "ch1" },
+        undefined,
+        { trace: noFailureTrace },
+      ),
+    );
+    await noFailureUpstreamStarted.promise;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://discovery.example.test/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+
+    const localFailureRequest = inTestOrg(() =>
+      proxy.fetchToolsForMcp(
+        mcpId,
+        "agent1",
+        { userId: "user1", channelId: "ch1" },
+        undefined,
+        { trace: localFailureTrace },
+      ),
+    );
+    await localFailureRequest;
+    releaseNoFailureUpstream.resolve();
+    await noFailureRequest;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const completionFor = (traceId: string) =>
+      obsBodies.find(
+        (body) =>
+          body.traceId === traceId &&
+          body.eventName === "mcp.tools_list.completed" &&
+          body.status === "failed",
+      );
+    const noFailureCompletion = completionFor(noFailureTrace.traceId);
+    const localFailureCompletion = completionFor(localFailureTrace.traceId);
+
+    expect(noFailureCompletion?.metadata.refresh_failure_reason).toBeUndefined();
+    expect(localFailureCompletion?.metadata).toMatchObject({
+      refresh_failure_reason: "upstream_error",
+      refresh_failure_permanent: false,
+      refresh_upstream_status: 503,
+    });
+    expect(upstreamCalls).toBe(1);
+  });
+
+  test("does not retain response-local refresh telemetry for a later discovery", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const secretStore = new InMemoryWritableStore();
+    const mcpId = "discovery-refresh-retention";
+    const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://discovery.example.test/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://discovery.example.test/mcp",
+          oauth: { resource: "https://discovery.example.test/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    let discoveryPhase = false;
+
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+        if (url === "https://auth.example.com/oauth/token") {
+          return new Response(JSON.stringify({ error: "server_error" }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(discoveryPhase ? "forbidden" : "unauthorized", {
+          status: discoveryPhase ? 403 : 401,
+        });
+      },
+    ) as unknown as typeof fetch;
+
+    const toolResult = await executeDirectInTestOrg(
+      proxy,
+      "agent1",
+      "user1",
+      mcpId,
+      "meeting_search",
+      {},
+      { organizationId: "test-org" },
+    );
+    expect(toolResult.diagnosticCode).toBe("oauth_refresh_failed");
+
+    await secretStore.delete(credentialName);
+    discoveryPhase = true;
+    const trace = {
+      traceId: "tr_discovery_after_tool_123",
+      journeyId: "discovery_test",
+      actor: "worker",
+      traceSource: "incoming" as const,
+    };
+    await inTestOrg(() =>
+      proxy.fetchToolsForMcp(
+        mcpId,
+        "agent1",
+        { userId: "user1", channelId: "ch1" },
+        undefined,
+        { trace },
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const completed = obsBodies.find(
+      (body) =>
+        body.traceId === trace.traceId &&
+        body.eventName === "mcp.tools_list.completed" &&
+        body.status === "failed",
+    );
+    expect(completed?.metadata.refresh_failure_reason).toBeUndefined();
+  });
+
   test("emits upstream host without port in auth failure metadata", async () => {
     enableObsEnv();
     const obsBodies: any[] = [];
@@ -953,14 +1232,35 @@ describe("durable observability for tools/list", () => {
   });
 
   test.each([
-    { status: 401, phase: "initialize", diagnostic: "upstream_unauthorized" },
-    { status: 403, phase: "initialize", diagnostic: "upstream_forbidden" },
-    { status: 401, phase: "tools/list", diagnostic: "upstream_unauthorized" },
-    { status: 403, phase: "tools/list", diagnostic: "upstream_forbidden" },
+    {
+      status: 401,
+      phase: "initialize",
+      diagnostic: "upstream_unauthorized",
+      errorClass: "needs_reauth",
+    },
+    {
+      status: 403,
+      phase: "initialize",
+      diagnostic: "upstream_forbidden",
+      errorClass: "upstream_forbidden",
+    },
+    {
+      status: 401,
+      phase: "tools/list",
+      diagnostic: "upstream_unauthorized",
+      errorClass: "needs_reauth",
+    },
+    {
+      status: 403,
+      phase: "tools/list",
+      diagnostic: "upstream_forbidden",
+      errorClass: "upstream_forbidden",
+    },
   ])("emits a failed completed event for $phase HTTP $status auth early return", async ({
     status,
     phase,
     diagnostic,
+    errorClass,
   }) => {
     enableObsEnv();
     const obsBodies: any[] = [];
@@ -1022,6 +1322,15 @@ describe("durable observability for tools/list", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(result.tools).toEqual([]);
+    if (diagnostic === "upstream_forbidden") {
+      expect(result.status).toBe("degraded");
+      expect(result.instructions?.toLowerCase()).not.toContain("reconnect");
+      expect(result.instructions?.toLowerCase()).not.toContain("login");
+    } else {
+      expect(result.status).toBe("needs_reauth");
+      expect(result.instructions?.toLowerCase()).toContain("reconnect");
+    }
+    expect(result.diagnosticCode).toBe(diagnostic);
     const completed = obsBodies.find(
       (body) =>
         body.eventName === "mcp.tools_list.completed" &&
@@ -1033,7 +1342,7 @@ describe("durable observability for tools/list", () => {
       metadata: expect.objectContaining({
         module: "mcp-proxy",
         mcp_id: "auth-mcp",
-        error_class: "needs_reauth",
+        error_class: errorClass,
         diagnostic_code: diagnostic,
         next_debug_hint: expect.stringContaining("MCP"),
       }),
@@ -1043,7 +1352,9 @@ describe("durable observability for tools/list", () => {
 
 describe("durable observability for forwarded JSON-RPC tools/call", () => {
   async function requestForwardedToolCall(
-    upstreamToolCallResult: object,
+    upstreamToolCallResult: object | string | ReadableStream<Uint8Array>,
+    responseContentType: string | null = "application/json",
+    upstreamHeaders: Record<string, string> = {},
   ): Promise<{ response: Response; obsBodies: any[] }> {
     enableObsEnv();
     const obsBodies: any[] = [];
@@ -1079,10 +1390,26 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
           );
         }
         if (body.method === "tools/call") {
-          return new Response(JSON.stringify(upstreamToolCallResult), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
+          const responseBody =
+            upstreamToolCallResult instanceof ReadableStream
+              ? upstreamToolCallResult
+              : typeof upstreamToolCallResult === "string"
+              ? upstreamToolCallResult
+              : JSON.stringify(upstreamToolCallResult);
+          return new Response(
+            responseContentType === null && typeof responseBody === "string"
+              ? new TextEncoder().encode(responseBody)
+              : responseBody,
+            {
+              status: 200,
+              headers: {
+                ...upstreamHeaders,
+                ...(responseContentType === null
+                  ? {}
+                  : { "Content-Type": responseContentType }),
+              },
+            },
+          );
         }
         return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
           status: 200,
@@ -1108,6 +1435,141 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     return { response, obsBodies };
   }
+
+  function expectSingleUnverifiedCompletion(obsBodies: any[]) {
+    const completedEvents = obsBodies.filter(
+      (body) => body.eventName === "mcp.tool_call.completed",
+    );
+    expect(completedEvents).toHaveLength(1);
+    expect(completedEvents[0]).toMatchObject({
+      status: "failed",
+      metadata: expect.objectContaining({
+        classification: "unknown_error",
+        inspection_status: "unavailable",
+        result_preview: expect.objectContaining({
+          inspection_unavailable: true,
+          matching_terminal: false,
+          http_status: 200,
+        }),
+      }),
+    });
+    expect(completedEvents.some((event) => event.status === "ok")).toBe(false);
+  }
+
+  test("passes through mismatched-id JSON auth errors with one unverified failed completion", async () => {
+    const upstreamResponse = {
+      jsonrpc: "2.0",
+      id: 999,
+      error: { code: -32001, message: "Unauthorized: unrelated request" },
+    };
+    const { response, obsBodies } =
+      await requestForwardedToolCall(upstreamResponse);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(JSON.stringify(upstreamResponse));
+    expectSingleUnverifiedCompletion(obsBodies);
+  });
+
+  test("preserves end-to-end headers on an unchanged JSON response", async () => {
+    const upstreamResponse = {
+      jsonrpc: "2.0",
+      id: 7,
+      result: { content: [{ type: "text", text: "ok" }], isError: false },
+    };
+    const { response } = await requestForwardedToolCall(
+      upstreamResponse,
+      "Application/JSON; Charset=UTF-8",
+      {
+        "Cache-Control": "private, max-age=30",
+        Vary: "Accept-Encoding, Origin",
+        "Retry-After": "12",
+        "X-Upstream-Request-Id": "vendor-request-123",
+        "Set-Cookie": "upstream_session=secret; HttpOnly; Secure",
+        "Set-Cookie2": "upstream_legacy=secret; Version=1",
+        ETag: '"unchanged-json"',
+        "Content-Digest": "sha-256=:dGVzdA==:",
+        Digest: "sha-256=dGVzdA==",
+        "Content-MD5": "dGVzdA==",
+        Connection: "keep-alive",
+        "Keep-Alive": "timeout=5",
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe(
+      "Application/JSON; Charset=UTF-8",
+    );
+    expect(response.headers.get("cache-control")).toBe("private, max-age=30");
+    expect(response.headers.get("vary")).toBe("Accept-Encoding, Origin");
+    expect(response.headers.get("retry-after")).toBe("12");
+    expect(response.headers.get("x-upstream-request-id")).toBe(
+      "vendor-request-123",
+    );
+    expect(response.headers.get("set-cookie")).toBeNull();
+    expect(response.headers.get("set-cookie2")).toBeNull();
+    expect(response.headers.get("etag")).toBe('"unchanged-json"');
+    expect(response.headers.get("content-digest")).toBe("sha-256=:dGVzdA==:");
+    expect(response.headers.get("digest")).toBe("sha-256=dGVzdA==");
+    expect(response.headers.get("content-md5")).toBe("dGVzdA==");
+    expect(response.headers.get("connection")).toBeNull();
+    expect(response.headers.get("keep-alive")).toBeNull();
+    expect(await response.json()).toEqual(upstreamResponse);
+  });
+
+  test("passes through malformed JSON with one unverified failed completion", async () => {
+    const malformedResponse = '{"jsonrpc":"2.0","id":7,"result":';
+    const { response, obsBodies } =
+      await requestForwardedToolCall(malformedResponse);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(malformedResponse);
+    expectSingleUnverifiedCompletion(obsBodies);
+  });
+
+  test("passes through unsupported non-SSE responses with one unverified failed completion", async () => {
+    const upstreamBody = "upstream plaintext response";
+    const cases = [
+      { contentType: "text/plain", expectedContentType: "text/plain" },
+      { contentType: null, expectedContentType: null },
+    ];
+
+    for (const testCase of cases) {
+      const { response, obsBodies } = await requestForwardedToolCall(
+        upstreamBody,
+        testCase.contentType,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe(
+        testCase.expectedContentType,
+      );
+      expect(await response.text()).toBe(upstreamBody);
+      expectSingleUnverifiedCompletion(obsBodies);
+    }
+  });
+
+  test("passes through missing-id JSON bodies and notifications with one unverified failed completion", async () => {
+    const upstreamResponses = [
+      {
+        jsonrpc: "2.0",
+        error: { code: -32001, message: "Unauthorized: missing id" },
+      },
+      {
+        jsonrpc: "2.0",
+        method: "notifications/progress",
+        params: { progress: 1 },
+      },
+    ];
+
+    for (const upstreamResponse of upstreamResponses) {
+      const { response, obsBodies } =
+        await requestForwardedToolCall(upstreamResponse);
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(JSON.stringify(upstreamResponse));
+      expectSingleUnverifiedCompletion(obsBodies);
+    }
+  });
 
   test("emits failed completed event when HTTP 200 contains JSON-RPC error", async () => {
     const { response, obsBodies } = await requestForwardedToolCall({
@@ -1365,6 +1827,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
     });
     const app = proxy.getApp();
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const toolsCallReady = createSignal();
 
     globalThis.fetch = mock(
       async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1392,10 +1855,12 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
               controller = streamController;
             },
           });
-          return new Response(stream, {
+          const response = new Response(stream, {
             status: 200,
             headers: { "Content-Type": "text/event-stream" },
           });
+          toolsCallReady.resolve();
+          return response;
         }
         return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
           status: 200,
@@ -1418,41 +1883,285 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
         params: { name: "meeting_search", arguments: { query: "course" } },
       }),
     });
+    await toolsCallReady.promise;
 
-    const response = await requestPromise;
-    expect(response.status).toBe(200);
-    controller?.enqueue(
-      new TextEncoder().encode(
-        `data: ${JSON.stringify({
-          jsonrpc: "2.0",
-          id: 7,
-          result: {
-            content: [{ type: "text", text: "eventual" }],
-            isError: false,
-          },
-        })}\n\n`,
-      ),
+    let response: Response | undefined;
+    try {
+      response = await withOpenSseWatchdog(
+        requestPromise,
+        "forwarded SSE response was buffered",
+      );
+      expect(response.status).toBe(200);
+      expect(
+        obsBodies.filter(
+          (body) => body.eventName === "mcp.tool_call.completed",
+        ),
+      ).toHaveLength(0);
+      const event = `data: ${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        result: {
+          content: [{ type: "text", text: "eventual" }],
+          isError: false,
+        },
+      })}\n\n`;
+      controller?.enqueue(new TextEncoder().encode(event));
+      controller?.close();
+      controller = undefined;
+      expect(await response.text()).toBe(event);
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const completedEvents = obsBodies.filter(
+        (body) => body.eventName === "mcp.tool_call.completed",
+      );
+      expect(completedEvents).toHaveLength(1);
+      expect(completedEvents[0]).toMatchObject({
+        eventName: "mcp.tool_call.completed",
+        status: "ok",
+        metadata: expect.objectContaining({
+          module: "mcp-proxy",
+          mcp_id: "sse-forwarded-mcp",
+          tool_name: "meeting_search",
+          classification: "ok",
+          result_preview: expect.objectContaining({
+            streamed_response: true,
+            http_status: 200,
+          }),
+        }),
+      });
+    } finally {
+      try {
+        controller?.close();
+      } catch {
+        // The response consumer may already have canceled the upstream stream.
+      }
+      await response?.body?.cancel().catch(() => {
+        /* noop */
+      });
+    }
+  });
+
+  test("passes through unmatched SSE and emits one unverified failed completion at stream end", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const mcpId = "sse-unmatched-telemetry-mcp";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://sse-unmatched.example.test/mcp",
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
     );
-    controller?.close();
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
 
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (body.method === "initialize") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
+            { headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (body.method === "notifications/initialized") {
+          return new Response(null, { status: 202 });
+        }
+        if (body.method === "tools/call") {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(streamController) {
+                controller = streamController;
+              },
+            }),
+            { headers: { "Content-Type": "text/event-stream" } },
+          );
+        }
+        return new Response("{}", { status: 404 });
+      },
+    ) as unknown as typeof fetch;
+
+    const response = await proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 8,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    expect(
+      obsBodies.filter(
+        (body) => body.eventName === "mcp.tool_call.completed",
+      ),
+    ).toHaveLength(0);
+
+    const mismatchedEvent = `data: ${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 999,
+      result: { content: [], isError: false },
+    })}\n\n`;
+    controller?.enqueue(new TextEncoder().encode(mismatchedEvent));
+    controller?.close();
+    controller = undefined;
+    expect(await response.text()).toBe(mismatchedEvent);
     await new Promise((resolve) => setTimeout(resolve, 0));
+
     const completedEvents = obsBodies.filter(
       (body) => body.eventName === "mcp.tool_call.completed",
     );
     expect(completedEvents).toHaveLength(1);
     expect(completedEvents[0]).toMatchObject({
-      eventName: "mcp.tool_call.completed",
-      status: "ok",
+      status: "failed",
       metadata: expect.objectContaining({
-        module: "mcp-proxy",
-        mcp_id: "sse-forwarded-mcp",
-        tool_name: "meeting_search",
-        classification: "ok",
+        classification: "unknown_error",
+        inspection_status: "unavailable",
         result_preview: expect.objectContaining({
+          inspection_unavailable: true,
+          matching_terminal: false,
           streamed_response: true,
           http_status: 200,
         }),
       }),
+    });
+    expect(completedEvents.some((event) => event.status === "ok")).toBe(false);
+  });
+
+  test("preserves an upstream SSE error and emits one unverified failed completion", async () => {
+    const streamError = new Error("upstream SSE failed");
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const { response, obsBodies } = await requestForwardedToolCall(
+      new ReadableStream<Uint8Array>({
+        start(streamController) {
+          controller = streamController;
+        },
+      }),
+      "text/event-stream",
+    );
+    const reader = response.body?.getReader();
+    const readPromise = reader?.read();
+
+    controller?.error(streamError);
+
+    await expect(readPromise).rejects.toBe(streamError);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expectSingleUnverifiedCompletion(obsBodies);
+  });
+
+  test("propagates downstream SSE cancellation and emits one unverified failed completion", async () => {
+    const cancelReason = new Error("client canceled SSE response");
+    let upstreamCancelReason: unknown;
+    const { response, obsBodies } = await requestForwardedToolCall(
+      new ReadableStream<Uint8Array>({
+        cancel(reason) {
+          upstreamCancelReason = reason;
+        },
+      }),
+      "text/event-stream",
+    );
+
+    await response.body?.cancel(cancelReason);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(upstreamCancelReason).toBe(cancelReason);
+    expectSingleUnverifiedCompletion(obsBodies);
+  });
+
+  test("emits failed needs_reauth telemetry only after matching SSE auth error", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const mcpId = "sse-auth-telemetry-mcp";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://sse-auth-telemetry.example.test/mcp",
+          oauth: { resource: "https://sse-auth-telemetry.example.test/mcp" },
+        },
+      }),
+      {
+        secretStore: new InMemoryWritableStore(),
+        publicGatewayUrl: "https://gateway.example.com",
+      },
+    );
+
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (body.method === "initialize") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
+            { headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (body.method === "notifications/initialized") {
+          return new Response(null, { status: 202 });
+        }
+        if (body.method === "tools/call") {
+          return new Response(
+            `data: ${JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              error: { code: -32001, message: "Unauthorized: token expired" },
+            })}\n\n`,
+            { headers: { "Content-Type": "text/event-stream" } },
+          );
+        }
+        return new Response("{}", { status: 404 });
+      },
+    ) as unknown as typeof fetch;
+
+    const response = await proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 8,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+
+    await response.text();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const completedEvents = obsBodies.filter(
+      (body) => body.eventName === "mcp.tool_call.completed",
+    );
+    expect(completedEvents).toHaveLength(1);
+    expect(completedEvents[0]).toMatchObject({
+      status: "failed",
+      metadata: expect.objectContaining({ classification: "needs_reauth" }),
     });
   });
 });
@@ -2391,6 +3100,2148 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     );
   });
 
+  test("does not send stale access token upstream after refresh lock contention", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-race/credential",
+      JSON.stringify({
+        accessToken: "stale-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+
+    const configSource = createConfigSource({
+      "toolbox-race": {
+        id: "toolbox-race",
+        upstreamUrl: "https://toolbox.example.com/mcp",
+        oauth: { resource: "https://toolbox.example.com/mcp" },
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore,
+      grantStore: new GrantStore(),
+    });
+
+    const upstreamAuthorizations: string[] = [];
+    let refreshCount = 0;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+
+      if (url === "https://auth.example.com/oauth/token") {
+        refreshCount++;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return new Response(
+          JSON.stringify({
+            access_token: "fresh-access-token",
+            refresh_token: "rotated-refresh-token",
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      upstreamAuthorizations.push(
+        String((init?.headers as Record<string, string>)?.Authorization || ""),
+      );
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { tools: [{ name: "meeting_search" }] },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const [first, second] = await Promise.all([
+      inTestOrg(() =>
+        proxy.fetchToolsForMcp(
+          "toolbox-race",
+          "agent1",
+          { userId: "user1", channelId: "ch1" },
+          agent1Token,
+          { surfaceErrors: true },
+        ),
+      ),
+      inTestOrg(() =>
+        proxy.fetchToolsForMcp(
+          "toolbox-race",
+          "agent1",
+          { userId: "user1", channelId: "ch1" },
+          agent1Token,
+          { surfaceErrors: true },
+        ),
+      ),
+    ]);
+
+    expect(refreshCount).toBe(1);
+    expect([...first.tools, ...second.tools].map((tool) => tool.name)).toEqual([
+      "meeting_search",
+      "meeting_search",
+    ]);
+    expect(upstreamAuthorizations).not.toContain("Bearer stale-access-token");
+    expect(upstreamAuthorizations.length).toBeGreaterThan(0);
+    expect(upstreamAuthorizations).toEqual(
+      upstreamAuthorizations.map(() => "Bearer fresh-access-token"),
+    );
+  });
+
+  test("keeps a refresh failure on its request before a later credential succeeds", async () => {
+    const secretStore = new InMemoryWritableStore();
+    const mcpId = "toolbox-refresh-runtime-truth";
+    const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    let toolCallCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+
+      toolCallCount += 1;
+      const callNumber = toolCallCount;
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            content: [{ type: "text", text: `success-${callNumber}` }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const callRequest = {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: {} },
+      }),
+    };
+    const failedResponse = await proxy
+      .getApp()
+      .request(`/${mcpId}`, callRequest);
+    const failedBody = await failedResponse.json();
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        accessToken: "valid-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+
+    const successfulResponse = await proxy
+      .getApp()
+      .request(`/${mcpId}`, callRequest);
+    const successfulBody = await successfulResponse.json();
+    const successfulText = successfulBody.result.content
+      .map((part: { text: string }) => part.text)
+      .join(" ")
+      .toLowerCase();
+
+    expect(successfulResponse.status).toBe(200);
+    expect(successfulBody.result.isError).toBe(false);
+    expect(successfulBody.result.diagnosticCode).toBeUndefined();
+    expect(successfulText).toContain("success-1");
+    expect(successfulText).not.toContain("oauth_refresh_failed");
+    expect(successfulText).not.toContain("reconnect");
+    expect(failedResponse.status).toBe(200);
+    expect(failedBody.result.isError).toBe(true);
+    expect(failedBody.result.diagnosticCode).toBe("oauth_refresh_failed");
+  });
+
+  test("does not apply a later concurrent refresh failure to an in-flight successful request", async () => {
+    const secretStore = new InMemoryWritableStore();
+    const mcpId = "toolbox-refresh-opposite-order";
+    const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+    const credential = {
+      accessToken: "valid-access-token",
+      refreshToken: "refresh-token",
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      clientId: "client-id",
+      tokenUrl: "https://auth.example.com/oauth/token",
+      resource: "https://toolbox.example.com/mcp",
+      tokenEndpointAuthMethod: "none",
+    };
+    await secretStore.put(credentialName, JSON.stringify(credential));
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    const firstToolCallStarted = createSignal();
+    const releaseFirstToolCall = createSignal();
+    let toolCallCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+
+      toolCallCount += 1;
+      const callNumber = toolCallCount;
+      if (callNumber === 1) {
+        firstToolCallStarted.resolve();
+        await releaseFirstToolCall.promise;
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [{ type: "text", text: `success-${callNumber}` }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const callRequest = {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: {} },
+      }),
+    };
+    const successfulRequest = proxy.getApp().request(`/${mcpId}`, callRequest);
+    await firstToolCallStarted.promise;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        ...credential,
+        accessToken: "expired-access-token",
+        expiresAt: Date.now() - 60_000,
+      }),
+    );
+
+    const failedResponse = await proxy.getApp().request(`/${mcpId}`, callRequest);
+    const failedBody = await failedResponse.json();
+    releaseFirstToolCall.resolve();
+    const successfulResponse = await successfulRequest;
+    const successfulBody = await successfulResponse.json();
+
+    expect(failedBody.result.isError).toBe(true);
+    expect(failedBody.result.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(successfulResponse.status).toBe(200);
+    expect(successfulBody).toMatchObject({
+      jsonrpc: "2.0",
+      id: 2,
+      result: {
+        content: [{ type: "text", text: "success-1" }],
+        isError: false,
+      },
+    });
+    expect(JSON.stringify(successfulBody)).not.toContain("oauth_refresh_failed");
+  });
+
+  test("does not attribute a concurrent refresh failure to a request with no local failure", async () => {
+    const pendingLookupStarted = createSignal();
+    const releasePendingLookup = createSignal();
+    let delayNextPendingLookup = true;
+    class DelayedPendingLookupStore extends InMemoryWritableStore {
+      override async get(ref: SecretRef): Promise<string | null> {
+        const name = decodeURIComponent(ref.slice("secret://".length));
+        if (delayNextPendingLookup && name.endsWith("/device-auth")) {
+          delayNextPendingLookup = false;
+          pendingLookupStarted.resolve();
+          await releasePendingLookup.promise;
+        }
+        return super.get(ref);
+      }
+    }
+
+    const secretStore = new DelayedPendingLookupStore();
+    const mcpId = "toolbox-refresh-no-local-failure";
+    const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    let toolCallCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+
+      toolCallCount += 1;
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [{ type: "text", text: `success-${toolCallCount}` }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const callRequest = {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: {} },
+      }),
+    };
+    const noLocalFailureRequest = proxy
+      .getApp()
+      .request(`/${mcpId}`, callRequest);
+    await pendingLookupStarted.promise;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+
+    const failedResponse = await proxy.getApp().request(`/${mcpId}`, callRequest);
+    const failedBody = await failedResponse.json();
+    await secretStore.delete(credentialName);
+    releasePendingLookup.resolve();
+    const noLocalFailureResponse = await noLocalFailureRequest;
+    const noLocalFailureBody = await noLocalFailureResponse.json();
+
+    expect(failedBody.result.isError).toBe(true);
+    expect(failedBody.result.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(noLocalFailureResponse.status).toBe(200);
+    expect(noLocalFailureBody).toMatchObject({
+      jsonrpc: "2.0",
+      id: 3,
+      result: {
+        content: [{ type: "text", text: "success-1" }],
+        isError: false,
+      },
+    });
+    expect(JSON.stringify(noLocalFailureBody)).not.toContain(
+      "oauth_refresh_failed",
+    );
+  });
+
+  test("does not attribute a concurrent refresh failure to a synthesized 401 response", async () => {
+    const secretStore = new InMemoryWritableStore();
+    const mcpId = "toolbox-refresh-401-no-local-failure";
+    const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    const firstToolCallStarted = createSignal();
+    const releaseFirstToolCall = createSignal();
+    let toolCallCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+
+      toolCallCount += 1;
+      if (toolCallCount === 1) {
+        firstToolCallStarted.resolve();
+        await releaseFirstToolCall.promise;
+        return new Response("upstream requires authorization", { status: 401 });
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [{ type: "text", text: "concurrent failure request" }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const noLocalFailureRequest = executeDirectInTestOrg(
+      proxy,
+      "agent1",
+      "user1",
+      mcpId,
+      "meeting_search",
+      {},
+      { organizationId: "test-org" },
+    );
+    await firstToolCallStarted.promise;
+    await secretStore.put(
+      credentialName,
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+
+    await executeDirectInTestOrg(
+      proxy,
+      "agent1",
+      "user1",
+      mcpId,
+      "meeting_search",
+      {},
+      { organizationId: "test-org" },
+    );
+    await secretStore.delete(credentialName);
+    releaseFirstToolCall.resolve();
+    const noLocalFailureResult = await noLocalFailureRequest;
+
+    expect(noLocalFailureResult.isError).toBe(true);
+    expect(noLocalFailureResult.diagnosticCode).toBe("needs_reauth");
+    expect(JSON.stringify(noLocalFailureResult)).not.toContain(
+      "oauth_refresh_failed",
+    );
+  });
+
+  test("classifies a 401 after refresh failure without consuming the response body error", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-expired/credential",
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "revoked-refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+
+    const configSource = createConfigSource({
+      "toolbox-expired": {
+        id: "toolbox-expired",
+        upstreamUrl: "https://toolbox.example.com/mcp",
+        oauth: { resource: "https://toolbox.example.com/mcp" },
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore,
+      grantStore: new GrantStore(),
+    });
+
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(
+          JSON.stringify({
+            error: "invalid_grant",
+            error_description: "Token has been expired or revoked.",
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response("upstream says token expired", {
+        status: 401,
+        headers: { "Content-Type": "text/plain" },
+      });
+    };
+
+    const result = await executeDirectInTestOrg(
+      proxy,
+      "agent1",
+      "user1",
+      "toolbox-expired",
+      "meeting_search",
+      {},
+      { organizationId: "test-org" },
+    );
+    const text = result.content.map((part) => part.text).join(" ");
+
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("needs_reauth");
+    expect(text).toContain("toolbox-expired");
+    expect(text).toContain("reconnect");
+    expect(text).toContain("upstream_rejected");
+    expect(text).toContain("invalid_grant");
+    expect(text).toContain("400");
+    expect(text).not.toContain("Body is unusable");
+    expect(text).not.toContain("Tool execution error");
+  });
+
+  test("classifies a transient refresh failure as unavailable instead of reauth", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-refresh-transient/credential",
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-refresh-transient": {
+          id: "toolbox-refresh-transient",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore, grantStore: new GrantStore() },
+    );
+
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("upstream says token expired", { status: 401 });
+    };
+
+    const result = await executeDirectInTestOrg(
+      proxy,
+      "agent1",
+      "user1",
+      "toolbox-refresh-transient",
+      "meeting_search",
+      {},
+      { organizationId: "test-org" },
+    );
+    const text = result.content.map((part) => part.text).join(" ").toLowerCase();
+
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(text).not.toContain("reconnect");
+    expect(text).not.toContain("login");
+  });
+
+  test.each([
+    { path: "executeToolDirect", failure: "transient" },
+    { path: "executeToolDirect", failure: "permanent" },
+    { path: "REST tools/call", failure: "transient" },
+    { path: "REST tools/call", failure: "permanent" },
+    { path: "streamable JSON-RPC", failure: "transient" },
+    { path: "streamable JSON-RPC", failure: "permanent" },
+  ] as const)(
+    "$path keeps $failure refresh failure authoritative over HTTP 403",
+    async ({ path, failure }) => {
+      const secretStore = new InMemoryWritableStore();
+      const mcpId = `refresh-authority-${path.replaceAll(/[^a-z]/gi, "-").toLowerCase()}-${failure}`;
+      await secretStore.put(
+        `mcp-auth/agent1/user1/${mcpId}/credential`,
+        JSON.stringify({
+          accessToken: "expired-access-token",
+          refreshToken: "refresh-token",
+          expiresAt: Date.now() - 60_000,
+          clientId: "client-id",
+          tokenUrl: "https://auth.example.com/oauth/token",
+          resource: "https://toolbox.example.com/mcp",
+          tokenEndpointAuthMethod: "none",
+        }),
+      );
+      const proxy = new McpProxy(
+        createConfigSource({
+          [mcpId]: {
+            id: mcpId,
+            upstreamUrl: "https://toolbox.example.com/mcp",
+            oauth: { resource: "https://toolbox.example.com/mcp" },
+          },
+        }),
+        {
+          secretStore,
+          grantStore: new OrgAwareGrantStore(),
+          publicGatewayUrl: "https://gateway.example.com",
+        },
+      );
+      let upstreamCalls = 0;
+
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://auth.example.com/oauth/token") {
+          return failure === "permanent"
+            ? new Response(
+                JSON.stringify({
+                  error: "invalid_grant",
+                  error_description: "Refresh token was revoked.",
+                }),
+                {
+                  status: 400,
+                  headers: { "Content-Type": "application/json" },
+                },
+              )
+            : new Response(JSON.stringify({ error: "server_error" }), {
+                status: 503,
+                headers: { "Content-Type": "application/json" },
+              });
+        }
+        if (url === "https://toolbox.example.com/mcp") {
+          upstreamCalls += 1;
+        }
+        return new Response("forbidden", { status: 403 });
+      };
+
+      let result: {
+        content: { text: string }[];
+        isError?: boolean;
+        diagnosticCode?: string;
+      };
+      if (path === "executeToolDirect") {
+        result = await executeDirectInTestOrg(
+          proxy,
+          "agent1",
+          "user1",
+          mcpId,
+          "meeting_search",
+          {},
+          { organizationId: "test-org" },
+        );
+      } else if (path === "REST tools/call") {
+        const response = await proxy.getApp().request(
+          `/${mcpId}/tools/meeting_search`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${agent1Token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ query: "course" }),
+          },
+        );
+        expect(response.status).toBe(200);
+        result = await response.json();
+      } else {
+        const response = await proxy.getApp().request(`/${mcpId}`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${agent1Token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 91,
+            method: "tools/call",
+            params: { name: "meeting_search", arguments: { query: "course" } },
+          }),
+        });
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body.id).toBe(91);
+        result = body.result;
+      }
+
+      const text = result.content.map((part) => part.text).join(" ");
+      expect(upstreamCalls).toBe(0);
+      expect(result.isError).toBe(true);
+      expect(result.diagnosticCode).toBe(
+        failure === "permanent" ? "needs_reauth" : "oauth_refresh_failed",
+      );
+      if (failure === "permanent") {
+        expect(text).toContain(
+          "https://gateway.example.com/mcp/oauth/start?token=",
+        );
+        expect(text).toContain("invalid_grant");
+      } else {
+        expect(text.toLowerCase()).not.toContain("reconnect");
+        expect(text.toLowerCase()).not.toContain("login");
+      }
+    },
+  );
+
+  test.each(["transient", "permanent"] as const)(
+    "REST stale-session retry keeps its %s refresh failure authoritative",
+    async (failure) => {
+      const secretStore = new InMemoryWritableStore();
+      const mcpId = `rest-stale-retry-refresh-${failure}`;
+      const credentialName = `mcp-auth/agent1/user1/${mcpId}/credential`;
+      const credential = {
+        accessToken: "initial-valid-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      };
+      await secretStore.put(credentialName, JSON.stringify(credential));
+      const proxy = new McpProxy(
+        createConfigSource({
+          [mcpId]: {
+            id: mcpId,
+            upstreamUrl: "https://toolbox.example.com/mcp",
+            oauth: { resource: "https://toolbox.example.com/mcp" },
+          },
+        }),
+        {
+          secretStore,
+          grantStore: new OrgAwareGrantStore(),
+          publicGatewayUrl: "https://gateway.example.com",
+        },
+      );
+      let upstreamToolCalls = 0;
+      let staleToolCallReturned = false;
+
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://auth.example.com/oauth/token") {
+          return failure === "permanent"
+            ? new Response(
+                JSON.stringify({
+                  error: "invalid_grant",
+                  error_description: "Refresh token was revoked.",
+                }),
+                {
+                  status: 400,
+                  headers: { "Content-Type": "application/json" },
+                },
+              )
+            : new Response(JSON.stringify({ error: "server_error" }), {
+                status: 503,
+                headers: { "Content-Type": "application/json" },
+              });
+        }
+
+        const request = JSON.parse(String(init?.body ?? "{}")) as {
+          id?: number;
+          method?: string;
+        };
+        if (request.method === "tools/call") {
+          upstreamToolCalls += 1;
+          staleToolCallReturned = true;
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: request.id,
+              error: { code: -32000, message: "Session not found" },
+            }),
+            {
+              status: 404,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+        if (request.method === "tools/list") {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: {
+                tools: [
+                  {
+                    name: "meeting_search",
+                    inputSchema: { type: "object" },
+                    annotations: { readOnlyHint: true },
+                  },
+                ],
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (request.method === "initialize") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (request.method === "notifications/initialized") {
+          if (staleToolCallReturned) {
+            await secretStore.put(
+              credentialName,
+              JSON.stringify({ ...credential, expiresAt: Date.now() - 60_000 }),
+            );
+          }
+          return new Response(null, { status: 202 });
+        }
+        return new Response("forbidden", { status: 403 });
+      };
+
+      const response = await proxy.getApp().request(
+        `/${mcpId}/tools/meeting_search`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${agent1Token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ query: "course" }),
+        },
+      );
+      const result = await response.json();
+      const text = result.content
+        .map((part: { text: string }) => part.text)
+        .join(" ");
+
+      expect(response.status).toBe(200);
+      expect(upstreamToolCalls).toBe(1);
+      expect(result.isError).toBe(true);
+      expect(result.diagnosticCode).toBe(
+        failure === "permanent" ? "needs_reauth" : "oauth_refresh_failed",
+      );
+      if (failure === "permanent") {
+        expect(text).toContain(
+          "https://gateway.example.com/mcp/oauth/start?token=",
+        );
+        expect(text).toContain("invalid_grant");
+      } else {
+        expect(text.toLowerCase()).not.toContain("reconnect");
+        expect(text.toLowerCase()).not.toContain("login");
+      }
+    },
+  );
+
+  test("REST tool calls keep transient refresh truth ahead of HTTP 403", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-refresh-then-forbidden/credential",
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-refresh-then-forbidden": {
+          id: "toolbox-refresh-then-forbidden",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore, grantStore: new OrgAwareGrantStore() },
+    );
+
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("forbidden", { status: 403 });
+    };
+
+    const response = await proxy.getApp().request(
+      "/toolbox-refresh-then-forbidden/tools/meeting_search",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${agent1Token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query: "course" }),
+      },
+    );
+    const result = await response.json();
+    const text = result.content
+      .map((part: { text: string }) => part.text)
+      .join(" ")
+      .toLowerCase();
+
+    expect(response.status).toBe(200);
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(text).toContain("temporarily unavailable");
+    expect(text).not.toContain("login");
+    expect(text).not.toContain("reconnect");
+  });
+
+  test("forwarded JSON-RPC keeps transient refresh truth ahead of HTTP 403", async () => {
+    const secretStore = new InMemoryWritableStore();
+    const mcpId = "toolbox-forward-refresh-then-forbidden";
+    await secretStore.put(
+      `mcp-auth/agent1/user1/${mcpId}/credential`,
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+    const forbidden = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 9,
+      error: { code: -32003, message: "Forbidden" },
+    });
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      return new Response(forbidden, {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const response = await proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 9,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      jsonrpc: "2.0",
+      id: 9,
+      result: { isError: true, diagnosticCode: "oauth_refresh_failed" },
+    });
+    expect(JSON.stringify(body).toLowerCase()).not.toContain("login");
+    expect(JSON.stringify(body).toLowerCase()).not.toContain("reconnect");
+  });
+
+  test("worker tool calls surface a transient refresh failure without login guidance", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-worker-refresh-transient/credential",
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-worker-refresh-transient": {
+          id: "toolbox-worker-refresh-transient",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("upstream says token expired", { status: 401 });
+    };
+
+    const response = await proxy.getApp().request(
+      "/toolbox-worker-refresh-transient/tools/meeting_search",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${agent1Token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query: "course" }),
+      },
+    );
+    const body = await response.json();
+    const text = body.content.map((part: { text: string }) => part.text).join(" ").toLowerCase();
+
+    expect(response.status).toBe(200);
+    expect(body.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(text).not.toContain("login_required");
+    expect(text).not.toContain("_login");
+    expect(text).not.toContain("reconnect");
+  });
+
+  test("streamable worker calls surface a transient refresh failure without reconnect guidance", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-stream-refresh-transient/credential",
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-stream-refresh-transient": {
+          id: "toolbox-stream-refresh-transient",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore },
+    );
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const request = JSON.parse(String(init?.body ?? "{}")) as { method?: string; id?: number };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("upstream says token expired", { status: 401 });
+    };
+
+    const response = await proxy.getApp().request("/toolbox-stream-refresh-transient", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    const body = await response.json();
+    const result = body.result as {
+      diagnosticCode?: string;
+      content: { text: string }[];
+    };
+    const text = result.content.map((part) => part.text).join(" ").toLowerCase();
+
+    expect(response.status).toBe(200);
+    expect(body.id).toBe(1);
+    expect(result.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(text).not.toContain("login_required");
+    expect(text).not.toContain("reconnect");
+  });
+
+  test("streamable HTTP 401 synthetic reauth response preserves the tools/call request id", async () => {
+    const mcpId = "toolbox-stream-http-unauthorized";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          internal: true,
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      return new Response("upstream says token expired", { status: 401 });
+    };
+
+    const response = await proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 47,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      jsonrpc: "2.0",
+      id: 47,
+      result: { isError: true, diagnosticCode: "needs_reauth" },
+    });
+  });
+
+  test("streamable HTTP 200 Unauthorized JSON-RPC returns actionable reauthorization", async () => {
+    const mcpId = "toolbox-stream-jsonrpc-unauthorized";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      {
+        secretStore: new InMemoryWritableStore(),
+        publicGatewayUrl: "https://gateway.example.com",
+      },
+    );
+
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          error: { code: -32001, message: "Unauthorized: token expired" },
+        }),
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "Mcp-Session-Id": "upstream-session-123",
+            "Cache-Control": "private, no-store",
+            "X-Upstream-Request-Id": "vendor-json-request-123",
+            "Set-Cookie": "upstream_session=secret; HttpOnly; Secure",
+            "Set-Cookie2": "upstream_legacy=secret; Version=1",
+            ETag: '"upstream-json"',
+            "Content-Digest": "sha-256=:dGVzdA==:",
+            Digest: "sha-256=dGVzdA==",
+            "Content-MD5": "dGVzdA==",
+          },
+        },
+      );
+    };
+
+    const response = await proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    const body = (await response.json()) as {
+      jsonrpc?: string;
+      id?: number | null;
+      result?: {
+        diagnosticCode?: string;
+        content?: { text: string }[];
+        isError?: boolean;
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Mcp-Session-Id")).toBe(
+      "upstream-session-123",
+    );
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("x-upstream-request-id")).toBe(
+      "vendor-json-request-123",
+    );
+    for (const header of [
+      "set-cookie",
+      "set-cookie2",
+      "etag",
+      "content-digest",
+      "digest",
+      "content-md5",
+    ]) {
+      expect(response.headers.get(header)).toBeNull();
+    }
+    expect(body).toMatchObject({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { isError: true, diagnosticCode: "needs_reauth" },
+    });
+    const loginPayload = JSON.parse(body.result?.content?.[0]?.text ?? "{}");
+    expect(loginPayload).toMatchObject({
+      status: "login_required",
+      url: expect.stringContaining(
+        "https://gateway.example.com/mcp/oauth/start?token=",
+      ),
+      message: expect.stringContaining("show the user this login link"),
+    });
+  });
+
+  test("streamable mixed-case SSE HTTP 200 Unauthorized JSON-RPC returns actionable reauthorization", async () => {
+    const mcpId = "toolbox-stream-sse-unauthorized";
+    const mismatchedAuthResponse = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 999,
+      error: { code: -32001, message: "Unauthorized: unrelated request" },
+    });
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      {
+        secretStore: new InMemoryWritableStore(),
+        publicGatewayUrl: "https://gateway.example.com",
+      },
+    );
+
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      const matchingAuthResponse = JSON.stringify({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: -32001, message: "Unauthorized: token expired" },
+      });
+      const errorFieldStart = matchingAuthResponse.indexOf('"error"');
+      const sseBody = `${[
+        "event: message",
+        `data: ${mismatchedAuthResponse}`,
+        "",
+        "event: message",
+        ": preserve-comment",
+        "id: auth-event-2",
+        `data: ${matchingAuthResponse.slice(0, errorFieldStart)}`,
+        "retry: 1500",
+        "x-extension: preserve-me",
+        `data: ${matchingAuthResponse.slice(errorFieldStart)}`,
+        "",
+        "",
+      ].join("\r\n")}`;
+      return new Response(sseBody, {
+        headers: {
+          "Content-Type": "Text/Event-Stream; Charset=UTF-8",
+          "Mcp-Session-Id": "upstream-sse-session-123",
+          "Content-Encoding": "identity",
+          "Content-Length": String(sseBody.length),
+          "Transfer-Encoding": "chunked",
+          Connection: "keep-alive",
+          "Keep-Alive": "timeout=5",
+          "Proxy-Authenticate": "Basic realm=upstream",
+          "Proxy-Authorization": "Basic dGVzdA==",
+          TE: "trailers",
+          Trailer: "Expires",
+          Upgrade: "websocket",
+          "Cache-Control": "no-cache, private",
+          Vary: "Accept-Encoding, Origin",
+          "Retry-After": "7",
+          "X-Upstream-Request-Id": "vendor-sse-request-123",
+          "Set-Cookie": "upstream_session=secret; HttpOnly; Secure",
+          "Set-Cookie2": "upstream_legacy=secret; Version=1",
+          ETag: '"upstream-sse"',
+          "Content-Digest": "sha-256=:dGVzdA==:",
+          Digest: "sha-256=dGVzdA==",
+          "Content-MD5": "dGVzdA==",
+        },
+      });
+    };
+
+    const response = await proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    const bodyText = await response.text();
+    const transformedEvent =
+      bodyText.split("\r\n\r\n").filter(Boolean).at(-1) ?? "";
+    const transformedData = transformedEvent
+      .split(/\r\n|\r|\n/)
+      .filter((line) => line === "data" || line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    const body = JSON.parse(transformedData || "{}") as {
+      jsonrpc?: string;
+      id?: number | null;
+      result?: {
+        diagnosticCode?: string;
+        content?: { text: string }[];
+        isError?: boolean;
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe(
+      "Text/Event-Stream; Charset=UTF-8",
+    );
+    expect(response.headers.get("Mcp-Session-Id")).toBe(
+      "upstream-sse-session-123",
+    );
+    expect(response.headers.get("cache-control")).toBe("no-cache, private");
+    expect(response.headers.get("vary")).toBe("Accept-Encoding, Origin");
+    expect(response.headers.get("retry-after")).toBe("7");
+    expect(response.headers.get("x-upstream-request-id")).toBe(
+      "vendor-sse-request-123",
+    );
+    expect(bodyText).toContain(`data: ${mismatchedAuthResponse}\r\n\r\n`);
+    expect(transformedEvent).toContain("event: message\r\n");
+    expect(transformedEvent).toContain(": preserve-comment\r\n");
+    expect(transformedEvent).toContain("id: auth-event-2\r\n");
+    expect(transformedEvent).toContain("retry: 1500\r\n");
+    expect(transformedEvent).toContain("x-extension: preserve-me\r\n");
+    expect(bodyText.endsWith("\r\n\r\n")).toBe(true);
+    for (const header of [
+      "content-encoding",
+      "content-length",
+      "set-cookie",
+      "set-cookie2",
+      "etag",
+      "content-digest",
+      "digest",
+      "content-md5",
+      "transfer-encoding",
+      "connection",
+      "keep-alive",
+      "proxy-authenticate",
+      "proxy-authorization",
+      "te",
+      "trailer",
+      "upgrade",
+    ]) {
+      expect(response.headers.get(header)).toBeNull();
+    }
+    expect(body).toMatchObject({
+      jsonrpc: "2.0",
+      id: 2,
+      result: { isError: true, diagnosticCode: "needs_reauth" },
+    });
+    const loginPayload = JSON.parse(body.result?.content?.[0]?.text ?? "{}");
+    expect(loginPayload).toMatchObject({
+      status: "login_required",
+      url: expect.stringContaining(
+        "https://gateway.example.com/mcp/oauth/start?token=",
+      ),
+      message: expect.stringContaining("show the user this login link"),
+    });
+  });
+
+  test("resumes SSE auth inspection after an oversized comment event", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const mcpId = "toolbox-stream-sse-oversized-comment";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      {
+        secretStore: new InMemoryWritableStore(),
+        publicGatewayUrl: "https://gateway.example.com",
+      },
+    );
+    const oversizedEvent = `:${"x".repeat(65 * 1024)}\n\n`;
+    let upstreamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const toolsCallReady = createSignal();
+
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+
+        const request = JSON.parse(String(init?.body ?? "{}")) as {
+          id?: number;
+          method?: string;
+        };
+        if (request.method === "initialize") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+            { headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (request.method === "notifications/initialized") {
+          return new Response(null, { status: 202 });
+        }
+        if (request.method === "tools/call") {
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              upstreamController = controller;
+            },
+          });
+          const response = new Response(stream, {
+            headers: { "Content-Type": "text/event-stream" },
+          });
+          toolsCallReady.resolve();
+          return response;
+        }
+        return new Response("{}", { status: 404 });
+      },
+    ) as unknown as typeof fetch;
+
+    const requestPromise = proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+        "X-Shifu-Trace-Id": "trace-oversized-sse-auth",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    await toolsCallReady.promise;
+
+    let response: Response | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      response = await withOpenSseWatchdog(
+        requestPromise,
+        "oversized SSE response was buffered",
+      );
+      reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      if (!reader) return;
+
+      const encoder = new TextEncoder();
+      upstreamController?.enqueue(
+        encoder.encode(oversizedEvent.slice(0, -2)),
+      );
+      const authEvent = `data: ${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 4,
+        error: { code: -32001, message: "Unauthorized: token expired" },
+      })}\n\n`;
+      upstreamController?.enqueue(encoder.encode(`\n\n${authEvent}`));
+
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.slice(oversizedEvent.length).includes("\n\n")) {
+        const chunk = await withOpenSseWatchdog(
+          reader.read(),
+          "later SSE auth terminal was not emitted",
+        );
+        expect(chunk.done).toBe(false);
+        output += decoder.decode(chunk.value, { stream: true });
+      }
+
+      expect(output.slice(0, oversizedEvent.length)).toBe(oversizedEvent);
+      expect(output.lastIndexOf(oversizedEvent)).toBe(0);
+      const transformedEvent = output.slice(oversizedEvent.length);
+      const transformedData = transformedEvent
+        .split(/\r\n|\r|\n/)
+        .filter((line) => line === "data" || line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      const body = JSON.parse(transformedData || "{}") as {
+        result?: {
+          diagnosticCode?: string;
+          content?: { text: string }[];
+        };
+      };
+      expect(body.result?.diagnosticCode).toBe("needs_reauth");
+      expect(
+        JSON.parse(body.result?.content?.[0]?.text ?? "{}"),
+      ).toMatchObject({
+        status: "login_required",
+        url: expect.stringContaining(
+          "https://gateway.example.com/mcp/oauth/start?token=",
+        ),
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const completedEvents = obsBodies.filter(
+        (event) => event.eventName === "mcp.tool_call.completed",
+      );
+      expect(completedEvents).toHaveLength(1);
+      expect(completedEvents[0]).toMatchObject({
+        status: "failed",
+        metadata: expect.objectContaining({ classification: "needs_reauth" }),
+      });
+    } finally {
+      try {
+        upstreamController?.close();
+      } catch {
+        // The response consumer may already have canceled the upstream stream.
+      }
+      await reader?.cancel().catch(() => {
+        /* noop */
+      });
+      await response?.body?.cancel().catch(() => {
+        /* noop */
+      });
+    }
+  });
+
+  test("streamable SSE emits reauthorization before the upstream stream closes", async () => {
+    const mcpId = "toolbox-stream-sse-open-unauthorized";
+    const proxy = new McpProxy(
+      createConfigSource({
+        [mcpId]: {
+          id: mcpId,
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      {
+        secretStore: new InMemoryWritableStore(),
+        publicGatewayUrl: "https://gateway.example.com",
+      },
+    );
+    let upstreamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const toolsCallReady = createSignal();
+
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      if (request.method === "tools/call") {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            upstreamController = controller;
+            controller.enqueue(
+              new TextEncoder().encode(
+                `event: message\ndata: ${JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: request.id,
+                  error: {
+                    code: -32001,
+                    message: "Unauthorized: token expired",
+                  },
+                })}\n\n`,
+              ),
+            );
+          },
+        });
+        const response = new Response(stream, {
+          headers: { "Content-Type": "text/event-stream" },
+        });
+        toolsCallReady.resolve();
+        return response;
+      }
+      return new Response("{}", {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const requestPromise = proxy.getApp().request(`/${mcpId}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    await toolsCallReady.promise;
+
+    let response: Response | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      response = await withOpenSseWatchdog(
+        requestPromise,
+        "open SSE response was buffered",
+      );
+      reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      if (!reader) return;
+      const readResult = await withOpenSseWatchdog(
+        reader.read(),
+        "open SSE auth event was buffered",
+      );
+
+      const eventText = new TextDecoder().decode(readResult.value);
+      const dataLine = eventText
+        .split(/\r?\n/)
+        .find((line) => line.startsWith("data:"));
+      const body = JSON.parse(dataLine?.slice(5).trimStart() ?? "{}") as {
+        result?: {
+          diagnosticCode?: string;
+          content?: { text: string }[];
+        };
+      };
+      expect(body.result?.diagnosticCode).toBe("needs_reauth");
+      expect(
+        JSON.parse(body.result?.content?.[0]?.text ?? "{}"),
+      ).toMatchObject({
+        status: "login_required",
+        url: expect.stringContaining(
+          "https://gateway.example.com/mcp/oauth/start?token=",
+        ),
+      });
+    } finally {
+      try {
+        upstreamController?.close();
+      } catch {
+        // The response consumer may already have canceled the upstream stream.
+      }
+      await reader?.cancel().catch(() => {
+        /* noop */
+      });
+      await response?.body?.cancel().catch(() => {
+        /* noop */
+      });
+    }
+  });
+
+  test("worker tool calls preserve upstream JSON-RPC forbidden responses", async () => {
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-worker-jsonrpc-forbidden": {
+          id: "toolbox-worker-jsonrpc-forbidden",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32003, message: "Forbidden" },
+        }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      );
+
+    const response = await proxy.getApp().request(
+      "/toolbox-worker-jsonrpc-forbidden/tools/meeting_search",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${agent1Token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query: "course" }),
+      },
+    );
+    const body = await response.json();
+    const text = body.content.map((part: { text: string }) => part.text).join(" ").toLowerCase();
+
+    expect(response.status).toBe(200);
+    expect(body.diagnosticCode).toBe("upstream_forbidden");
+    expect(text).toContain("403");
+    expect(text).not.toContain("login");
+    expect(text).not.toContain("reconnect");
+  });
+
+  test("worker tool calls preserve plain upstream forbidden responses", async () => {
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-worker-plain-forbidden": {
+          id: "toolbox-worker-plain-forbidden",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+    globalThis.fetch = async () => new Response("Forbidden", { status: 403 });
+
+    const response = await proxy.getApp().request(
+      "/toolbox-worker-plain-forbidden/tools/meeting_search",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${agent1Token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query: "course" }),
+      },
+    );
+    const body = await response.json();
+    const text = body.content.map((part: { text: string }) => part.text).join(" ").toLowerCase();
+
+    expect(response.status).toBe(200);
+    expect(body.diagnosticCode).toBe("upstream_forbidden");
+    expect(text).toContain("403");
+    expect(text).not.toContain("login");
+    expect(text).not.toContain("reconnect");
+  });
+
+  test("surfaces transient tools/list refresh failure as degraded without reconnect guidance", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox-discovery-refresh-transient/credential",
+      JSON.stringify({
+        accessToken: "expired-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() - 60_000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      }),
+    );
+    const proxy = new McpProxy(
+      createConfigSource({
+        "toolbox-discovery-refresh-transient": {
+          id: "toolbox-discovery-refresh-transient",
+          upstreamUrl: "https://toolbox.example.com/mcp",
+          oauth: { resource: "https://toolbox.example.com/mcp" },
+        },
+      }),
+      { secretStore, grantStore: new GrantStore() },
+    );
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://auth.example.com/oauth/token") {
+        return new Response(JSON.stringify({ error: "server_error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const request = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+      };
+      if (request.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            result: { protocolVersion: "2025-03-26" },
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response("", { status: 202 });
+      }
+      return new Response("upstream says token expired", { status: 401 });
+    };
+
+    const result = await inTestOrg(() =>
+      proxy.fetchToolsForMcp(
+        "toolbox-discovery-refresh-transient",
+        "agent1",
+        { userId: "user1", channelId: "ch1" },
+      ),
+    );
+    const instructions = result.instructions?.toLowerCase() ?? "";
+
+    expect(result.tools).toEqual([]);
+    expect(result.status).toBe("degraded");
+    expect(result.diagnosticCode).toBe("oauth_refresh_failed");
+    expect(instructions).not.toContain("reconnect");
+    expect(instructions).not.toContain("login");
+  });
+
+  test("surfaces zero discovered tools for an auth-required MCP as degraded", async () => {
+    const configSource = createConfigSource({
+      "empty-oauth-mcp": {
+        id: "empty-oauth-mcp",
+        upstreamUrl: "https://empty.example.com/mcp",
+        oauth: { resource: "https://empty.example.com/mcp" },
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+      grantStore: new GrantStore(),
+    });
+
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { tools: [] },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+
+    const result = await inTestOrg(() =>
+      proxy.fetchToolsForMcp("empty-oauth-mcp", "agent1", {
+        userId: "user1",
+        channelId: "ch1",
+      }),
+    );
+
+    expect(result.tools).toEqual([]);
+    expect(result.status).toBe("degraded");
+    expect(result.diagnosticCode).toBe("auth_required_zero_tools");
+    expect(result.instructions).toContain("empty-oauth-mcp");
+    expect(result.instructions?.toLowerCase()).toContain("degraded");
+    expect(result.instructions?.toLowerCase()).toContain("reauthorization");
+  });
+
+  test("surfaces zero discovered tools after retry success for an auth-required MCP as degraded", async () => {
+    const configSource = createConfigSource({
+      "empty-oauth-retry-mcp": {
+        id: "empty-oauth-retry-mcp",
+        upstreamUrl: "https://empty-retry.example.com/mcp",
+        oauth: { resource: "https://empty-retry.example.com/mcp" },
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+      grantStore: new GrantStore(),
+    });
+
+    let toolsListCalls = 0;
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { method?: string };
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { protocolVersion: "2025-03-26" },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response("", { status: 202 });
+      }
+
+      toolsListCalls++;
+      if (toolsListCalls === 1) {
+        return new Response("temporary failure", { status: 503 });
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { tools: [] },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const result = await inTestOrg(() =>
+      proxy.fetchToolsForMcp("empty-oauth-retry-mcp", "agent1", {
+        userId: "user1",
+        channelId: "ch1",
+      }),
+    );
+
+    expect(toolsListCalls).toBe(2);
+    expect(result.tools).toEqual([]);
+    expect(result.status).toBe("degraded");
+    expect(result.diagnosticCode).toBe("auth_required_zero_tools");
+    expect(result.instructions).toContain("empty-oauth-retry-mcp");
+    expect(result.instructions?.toLowerCase()).toContain("degraded");
+    expect(result.instructions?.toLowerCase()).toContain("reauthorization");
+  });
+
   test("onToolBlocked receives correct agentId and tool metadata", async () => {
     const toolCache = new McpToolCache();
     const grantStore = new GrantStore();
@@ -3143,6 +5994,45 @@ describe("executeToolDirect", () => {
 
     expect(result.isError).toBe(true);
     expect(result.diagnosticCode).toBe("upstream_forbidden");
+    expect(result.content[0].text).toContain("403");
+    expect(result.content[0].text).not.toContain("Authorization for");
+    expect(result.content[0].text).not.toContain("reconnect");
+  });
+
+  test("executeToolDirect returns needs_reauth for HTTP 200 Unauthorized JSON-RPC auth errors", async () => {
+    const configSource = createConfigSource({
+      "jsonrpc-auth-mcp": {
+        id: "jsonrpc-auth-mcp",
+        upstreamUrl: "http://jsonrpc-auth.example.com/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
+
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32001, message: "Unauthorized: token expired" },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+
+    const result = await executeDirectInTestOrg(
+      proxy,
+      "agent1",
+      "user1",
+      "jsonrpc-auth-mcp",
+      "any_tool",
+      {},
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("needs_reauth");
+    expect(result.content[0].text).toContain("jsonrpc-auth-mcp");
+    expect(result.content[0].text.toLowerCase()).toContain("reconnect");
   });
 
   test("executeToolDirect preserves safe JSON-RPC result diagnostic code", async () => {

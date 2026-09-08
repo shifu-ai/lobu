@@ -117,6 +117,23 @@ describe("tool call surfaces an expired authorization", () => {
     expect(text.toLowerCase()).toContain("reconnect");
   });
 
+  test("reports upstream_forbidden instead of needs_reauth on a 403", async () => {
+    const proxy = makeProxy();
+    globalThis.fetch = upstream(() => new Response("forbidden", { status: 403 }));
+
+    const result = (await runTool(proxy)) as {
+      isError: boolean;
+      diagnosticCode?: string;
+      content: { type: string; text: string }[];
+    };
+
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("upstream_forbidden");
+    const text = result.content.map((c) => c.text).join(" ");
+    expect(text).toContain("403");
+    expect(text.toLowerCase()).not.toContain("reconnect");
+  });
+
   test("a 401 body stays readable after a failed refresh", async () => {
     // Regression: the 401 branch cancelled the body then fell through, so the
     // caller's `.text()` threw `Body is unusable` and the authorization signal
@@ -147,7 +164,35 @@ describe("tool call surfaces an expired authorization", () => {
     expect(text.toLowerCase()).not.toContain("reconnect");
   });
 
-  test("a JSON-RPC error no longer returns empty content", async () => {
+  test("reports needs_reauth on a JSON-RPC unauthorized token-expired error over HTTP 200", async () => {
+    const proxy = makeProxy();
+    globalThis.fetch = upstream(
+      () =>
+        new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            error: { code: -32001, message: "Unauthorized: token expired" },
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+    );
+
+    const result = (await runTool(proxy)) as {
+      isError: boolean;
+      diagnosticCode?: string;
+      content: { text: string }[];
+    };
+
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("needs_reauth");
+    const text = result.content.map((c) => c.text).join(" ");
+    expect(text).toContain("google_workspace");
+    expect(text.toLowerCase()).toContain("expired");
+    expect(text.toLowerCase()).toContain("reconnect");
+  });
+
+  test("a non-auth JSON-RPC error remains connector_unavailable", async () => {
     const proxy = makeProxy();
     globalThis.fetch = upstream(
       () =>
@@ -163,14 +208,16 @@ describe("tool call surfaces an expired authorization", () => {
 
     const result = (await runTool(proxy)) as {
       isError: boolean;
+      diagnosticCode?: string;
       content: { text: string }[];
     };
 
     expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("connector_unavailable");
     expect(result.content.length).toBeGreaterThan(0);
-    expect(result.content.map((c) => c.text).join(" ")).toContain(
-      "upstream exploded",
-    );
+    const text = result.content.map((c) => c.text).join(" ");
+    expect(text).toContain("upstream exploded");
+    expect(text.toLowerCase()).not.toContain("reconnect");
   });
 });
 
@@ -200,6 +247,27 @@ describe("discovery distinguishes a broken connector from a missing one", () => 
     expect(instructions.toLowerCase()).toContain("expired");
     // The whole point: the agent must not report this as a missing capability.
     expect(instructions.toLowerCase()).toContain("not the same");
+  });
+
+  test("explains upstream forbidden discovery without reconnect guidance", async () => {
+    const proxy = makeProxy();
+    globalThis.fetch = upstream(() => new Response("forbidden", { status: 403 }));
+
+    const result = (await discover(proxy)) as {
+      tools: unknown[];
+      status?: string;
+      diagnosticCode?: string;
+      instructions?: string;
+    };
+
+    expect(result.tools).toEqual([]);
+    expect(result.status).toBe("degraded");
+    expect(result.diagnosticCode).toBe("upstream_forbidden");
+    const instructions = result.instructions ?? "";
+    expect(instructions).toContain("google_workspace");
+    expect(instructions.toLowerCase()).toContain("forbidden");
+    expect(instructions.toLowerCase()).not.toContain("reconnect");
+    expect(instructions.toLowerCase()).not.toContain("login");
   });
 
   test("carries no connect link, whose token would outlive its 15 minute TTL", async () => {

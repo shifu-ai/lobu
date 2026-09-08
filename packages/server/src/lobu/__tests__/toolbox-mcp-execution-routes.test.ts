@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { generateWorkerToken } from '@lobu/core';
+import { __resetEncryptionKeyCacheForTests, generateWorkerToken } from '@lobu/core';
 import { Type } from '@sinclair/typebox';
 import { Hono } from 'hono';
 
@@ -10,6 +10,7 @@ import { Hono } from 'hono';
 process.env.ENCRYPTION_KEY =
   process.env.ENCRYPTION_KEY ??
   '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+__resetEncryptionKeyCacheForTests();
 
 import { verifyConnectLinkToken } from '../../gateway/auth/mcp/connect-link-token';
 import { McpProxy } from '../../gateway/auth/mcp/proxy';
@@ -899,7 +900,7 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
-  test('POST /mcp/tools/call returns safe diagnostic code and classifies upstream_forbidden isError result as needs_reauth', async () => {
+  test('POST /mcp/tools/call returns safe diagnostic code and classifies upstream_forbidden isError result as forbidden', async () => {
     executeToolDirectMock.mockResolvedValueOnce({
       content: [{ type: 'text', text: 'private upstream body must not leak' }],
       isError: true,
@@ -930,7 +931,7 @@ describe('Toolbox MCP execution routes', () => {
       errorCode: 'lobu_mcp_tool_error',
       errorMessage: 'MCP tool execution failed',
       diagnosticCode: 'upstream_forbidden',
-      classification: 'needs_reauth',
+      classification: 'upstream_forbidden',
     });
     expect(executeToolDirectMock).toHaveBeenCalledWith(
       AGENT_ID,
@@ -981,6 +982,45 @@ describe('Toolbox MCP execution routes', () => {
       'gws_drive_search',
       { query: 'test', limit: 1 }
     );
+  });
+
+  test('POST /mcp/tools/call classifies transient refresh failures without a connectUrl', async () => {
+    coreServicesStash.services = {
+      ...coreServicesStash.services,
+      getPublicGatewayUrl: () => 'https://gateway.example.test/lobu',
+    };
+    executeToolDirectMock.mockResolvedValueOnce({
+      content: [{ type: 'text', text: 'Tool call failed: HTTP 401' }],
+      isError: true,
+      diagnosticCode: 'oauth_refresh_failed',
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'google_workspace_drive_search',
+        args: { query: 'test', limit: 1 },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: false,
+      content: null,
+      errorCode: 'lobu_mcp_tool_error',
+      errorMessage: 'MCP tool execution failed',
+      diagnosticCode: 'oauth_refresh_failed',
+      classification: 'transient_error',
+    });
   });
 
   test('POST /mcp/tools/call omits non-whitelisted diagnostic codes', async () => {
@@ -1539,6 +1579,7 @@ describe('Toolbox MCP execution routes', () => {
     process.env.ENCRYPTION_KEY =
       priorEncryptionKey ??
       '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    __resetEncryptionKeyCacheForTests();
     authStash.rejectMcpAuth = true;
     try {
       const workerToken = generateWorkerToken('toolbox-user', 'conversation-1', 'api-agent', {
@@ -1572,6 +1613,7 @@ describe('Toolbox MCP execution routes', () => {
       } else {
         process.env.ENCRYPTION_KEY = priorEncryptionKey;
       }
+      __resetEncryptionKeyCacheForTests();
     }
   });
 
@@ -2027,6 +2069,53 @@ describe('Toolbox MCP execution routes', () => {
     await expect(res.json()).resolves.toEqual({
       status: 'needs_reauth',
       toolsDiscovered: [],
+      errorCode: 'upstream_unauthorized',
+    });
+  });
+
+  test('GET /mcp/connections/status maps transient refresh failures to degraded', async () => {
+    listToolsDirectMock.mockRejectedValueOnce(
+      Object.assign(new Error('MCP credential refresh is temporarily unavailable'), {
+        diagnosticCode: 'oauth_refresh_failed',
+      })
+    );
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request(
+      `/lobu/api/v1/mcp/connections/status?agentId=${AGENT_ID}&ownerUserId=${OWNER_USER_ID}&connectorKey=google_workspace&connectionRef=${CONNECTION_REF}`,
+      {
+        headers: { Authorization: 'Bearer admin-token' },
+      }
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'degraded',
+      toolsDiscovered: [],
+      errorCode: 'oauth_refresh_failed',
+    });
+  });
+
+  test('GET /mcp/connections/status maps auth-required zero discovered tools to degraded', async () => {
+    listToolsDirectMock.mockResolvedValueOnce({
+      tools: [],
+      status: 'degraded',
+      diagnosticCode: 'auth_required_zero_tools',
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request(
+      `/lobu/api/v1/mcp/connections/status?agentId=${AGENT_ID}&ownerUserId=${OWNER_USER_ID}&connectorKey=google_workspace&connectionRef=${CONNECTION_REF}`,
+      {
+        headers: { Authorization: 'Bearer admin-token' },
+      }
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'degraded',
+      toolsDiscovered: [],
+      errorCode: 'auth_required_zero_tools',
     });
   });
 
@@ -2359,7 +2448,7 @@ describe('Toolbox MCP execution routes', () => {
     });
   });
 
-  test('POST /mcp/connections/materialize maps tools/list auth failures to needs_reauth', async () => {
+  test('POST /mcp/connections/materialize maps upstream_forbidden tools/list failures to degraded', async () => {
     seedSourceConnectionForMaterialize();
     listToolsDirectMock.mockRejectedValueOnce(
       Object.assign(new Error('MCP tools/list requires authentication'), {
@@ -2383,10 +2472,41 @@ describe('Toolbox MCP execution routes', () => {
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({
-      status: 'needs_reauth',
+      status: 'degraded',
       lobuConnectionRef: null,
       toolsDiscovered: [],
       errorCode: 'upstream_forbidden',
+    });
+  });
+
+  test('POST /mcp/connections/materialize maps auth-required zero discovered tools to degraded', async () => {
+    seedSourceConnectionForMaterialize();
+    listToolsDirectMock.mockResolvedValueOnce({
+      tools: [],
+      status: 'degraded',
+      diagnosticCode: 'auth_required_zero_tools',
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'degraded',
+      lobuConnectionRef: null,
+      toolsDiscovered: [],
+      errorCode: 'auth_required_zero_tools',
     });
   });
 

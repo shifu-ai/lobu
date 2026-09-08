@@ -518,11 +518,42 @@ export function summariseAuthCheck(
   fallback: string
 ): string {
   if (!parsed) return fallback;
-  return JSON.stringify({
+  const summary: Record<string, unknown> = {
     status: parsed.status ?? "unknown",
     mcp_id: mcpId,
     authenticated: parsed.authenticated ?? false,
-  });
+  };
+
+  if (parsed.status === "needs_reauth" || parsed.status === "degraded") {
+    copyStringField(parsed, summary, "message", "message");
+    copyStringField(parsed, summary, "reason", "reason");
+    copyStringField(parsed, summary, "upstreamError", "upstream_error");
+    copyStringField(parsed, summary, "upstream_error", "upstream_error");
+    copyStringField(parsed, summary, "user_code", "user_code");
+
+    const login =
+      parsed.login &&
+      typeof parsed.login === "object" &&
+      !Array.isArray(parsed.login)
+        ? (parsed.login as Record<string, unknown>)
+        : null;
+    if (login) {
+      summary.login = login;
+    }
+
+    const verificationUrl =
+      stringValue(parsed.verification_url) ??
+      stringValue(parsed.verificationUri) ??
+      stringValue(parsed.verificationUriComplete) ??
+      stringValue(login?.verificationUri) ??
+      stringValue(login?.verificationUriComplete);
+    if (verificationUrl) {
+      summary.verification_url = verificationUrl;
+      summary.verification_uri = verificationUrl;
+    }
+  }
+
+  return JSON.stringify(summary);
 }
 
 function tryJson(text: string): Record<string, unknown> | null {
@@ -534,6 +565,20 @@ function tryJson(text: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function copyStringField(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  from: string,
+  to: string
+): void {
+  const value = stringValue(source[from]);
+  if (value) target[to] = value;
 }
 
 /**

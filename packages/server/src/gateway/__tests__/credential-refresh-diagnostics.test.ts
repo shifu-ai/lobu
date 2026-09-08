@@ -6,8 +6,10 @@ import {
   expect,
   test,
 } from "bun:test";
+import { __resetEncryptionKeyCacheForTests } from "@lobu/core";
 import type { SecretPutOptions, SecretRef } from "@lobu/core";
 import {
+  createDeviceAuthRoutes,
   refreshCredentialDetailed,
   type StoredCredential,
   storeCredentialForScope,
@@ -88,6 +90,7 @@ let userSeq = 0;
 beforeAll(() => {
   originalEncryptionKey = process.env.ENCRYPTION_KEY;
   process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
+  __resetEncryptionKeyCacheForTests();
   originalFetch = globalThis.fetch;
 });
 
@@ -97,6 +100,7 @@ afterAll(() => {
   } else {
     delete process.env.ENCRYPTION_KEY;
   }
+  __resetEncryptionKeyCacheForTests();
   globalThis.fetch = originalFetch;
 });
 
@@ -227,13 +231,13 @@ describe("refreshCredentialDetailed failure diagnosis", () => {
   });
 
   test("flags a lost refresh race distinctly from a revoked grant", async () => {
-    // The holder takes longer than the 150ms the waiter sleeps — the real
-    // shape of the bug, since a token endpoint round trip is 200-800ms.
+    // The holder takes longer than the waiter's bounded polling window. The
+    // waiter must diagnose contention without handing the stale credential back.
     const stale = staleCredential();
     await storeCredentialForScope(secretStore, AGENT, user, MCP, stale);
 
     globalThis.fetch = async () => {
-      await new Promise((r) => setTimeout(r, 600));
+      await new Promise((r) => setTimeout(r, 1_300));
       return new Response(
         JSON.stringify({ access_token: "fresh-token", expires_in: 3600 }),
         { status: 200, headers: { "Content-Type": "application/json" } },
@@ -263,8 +267,10 @@ describe("refreshCredentialDetailed failure diagnosis", () => {
     expect(holderResult.failure).toBeUndefined();
 
     // The waiter re-read before the holder finished, so it saw the same stale
-    // credential. It must be reported as contention, never as needing re-auth.
+    // credential. It must be reported as contention, never as needing re-auth,
+    // and it must not return the token a caller would send upstream.
     expect(waiterResult.contended).toBe(true);
+    expect(waiterResult.credential).toBeNull();
     expect(waiterResult.failure?.reason).toBe("lock_contended_stale");
     expect(waiterResult.failure?.permanent).toBe(false);
   });
@@ -304,5 +310,158 @@ describe("refreshCredentialDetailed failure diagnosis", () => {
     expect(waiterResult.contended).toBe(true);
     expect(waiterResult.failure).toBeUndefined();
     expect(waiterResult.credential?.accessToken).toBe("fresh-token");
+  });
+
+  test("uses a concurrently stored fresh credential instead of returning permanent reauth", async () => {
+    const stale = staleCredential();
+    globalThis.fetch = async () => {
+      await storeCredentialForScope(
+        secretStore,
+        AGENT,
+        user,
+        MCP,
+        staleCredential({
+          accessToken: "fresh-from-another-replica",
+          expiresAt: Date.now() + 3_600_000,
+        }),
+      );
+      return new Response(
+        JSON.stringify({
+          error: "invalid_grant",
+          error_description: "Token has been expired or revoked.",
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const result = await refreshCredentialDetailed(
+      secretStore,
+      AGENT,
+      user,
+      MCP,
+      stale,
+    );
+
+    expect(result.failure).toBeUndefined();
+    expect(result.credential?.accessToken).toBe("fresh-from-another-replica");
+  });
+});
+
+describe("device-auth status runtime auth truth", () => {
+  let secretStore: InMemoryWritableStore;
+  let user: string;
+
+  beforeEach(() => {
+    secretStore = new InMemoryWritableStore("secret");
+    userSeq += 1;
+    user = `user-${userSeq}`;
+  });
+
+  test("transient refresh failure reports degraded without a login payload", async () => {
+    await storeCredentialForScope(
+      secretStore,
+      AGENT,
+      user,
+      MCP,
+      staleCredential({ expiresAt: Date.now() - 60_000 }),
+    );
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ error: "server_error" }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      });
+
+    const routes = createDeviceAuthRoutes({
+      secretStore,
+      publicGatewayUrl: "https://gateway.example.com",
+      mcpConfigService: {
+        getHttpServer: async () => ({
+          id: MCP,
+          upstreamUrl: "https://mcp.example.com/mcp",
+        }),
+        getAllHttpServers: async () => new Map(),
+      },
+    });
+    const workerToken = await import("@lobu/core").then(
+      ({ generateWorkerToken }) =>
+        generateWorkerToken(user, "conv-1", "test-deployment", {
+          agentId: AGENT,
+          channelId: "channel-1",
+          organizationId: "org-1",
+        }),
+    );
+
+    const response = await routes.request(
+      `/internal/device-auth/status?mcpId=${encodeURIComponent(MCP)}`,
+      { headers: { Authorization: `Bearer ${workerToken}` } },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      authenticated: false,
+      status: "degraded",
+      reason: "upstream_error",
+      refreshStatus: 503,
+    });
+    expect(body).not.toHaveProperty("login");
+    expect(body).not.toHaveProperty("connectUrl");
+  });
+
+  test("expired stored credential with invalid_grant refresh reports reauth needed, not authenticated", async () => {
+    await storeCredentialForScope(
+      secretStore,
+      AGENT,
+      user,
+      MCP,
+      staleCredential({ expiresAt: Date.now() - 60_000 }),
+    );
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          error: "invalid_grant",
+          error_description: "Token has been expired or revoked.",
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+
+    const routes = createDeviceAuthRoutes({
+      secretStore,
+      publicGatewayUrl: "https://gateway.example.com",
+      mcpConfigService: {
+        getHttpServer: async () => ({
+          id: MCP,
+          upstreamUrl: "https://mcp.example.com/mcp",
+        }),
+        getAllHttpServers: async () => new Map(),
+      },
+    });
+    const workerToken = await import("@lobu/core").then(
+      ({ generateWorkerToken }) =>
+        generateWorkerToken(user, "conv-1", "test-deployment", {
+          agentId: AGENT,
+          channelId: "channel-1",
+          organizationId: "org-1",
+        }),
+    );
+
+    const response = await routes.request(
+      `/internal/device-auth/status?mcpId=${encodeURIComponent(MCP)}`,
+      { headers: { Authorization: `Bearer ${workerToken}` } },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      authenticated: false,
+      status: "needs_reauth",
+      reason: "upstream_rejected",
+      upstreamError: "invalid_grant",
+    });
+    expect(body.login).toMatchObject({
+      flow: "auth_code",
+      verificationUri: expect.stringContaining("/mcp/oauth/start"),
+      verificationUriComplete: expect.stringContaining("/mcp/oauth/start"),
+    });
   });
 });

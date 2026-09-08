@@ -27,7 +27,7 @@ import type { McpConfigService } from "../auth/mcp/config-service.js";
 import type { McpProxy } from "../auth/mcp/proxy.js";
 import type { McpTool } from "../auth/mcp/tool-cache.js";
 import type { ProviderCatalogService } from "../auth/provider-catalog.js";
-import { getStoredCredential } from "../routes/internal/device-auth.js";
+import { resolveStoredCredentialAuthState } from "../routes/internal/device-auth.js";
 import type { WritableSecretStore } from "../secrets/index.js";
 import type { ShifuTraceContext } from "../../observability/trace-context.js";
 import { resolveEffectiveModelRef } from "../auth/settings/model-selection.js";
@@ -716,6 +716,15 @@ export class WorkerGateway {
 			requiresAuth: boolean;
 			requiresInput: boolean;
 			authenticated: boolean;
+			authStatus?:
+				| "not_authenticated"
+				| "authenticated"
+				| "needs_reauth"
+				| "degraded";
+			authFailureReason?: string;
+			authRefreshStatus?: number;
+			authRefreshUpstreamError?: string;
+			diagnosticCode?: string;
 			configured: boolean;
 			upstreamOrigin: string;
 			configSource: "global" | "agent" | "derived";
@@ -741,9 +750,11 @@ export class WorkerGateway {
 					};
 				}
 
-				let credential: Awaited<ReturnType<typeof getStoredCredential>> = null;
+				let authState: Awaited<
+					ReturnType<typeof resolveStoredCredentialAuthState>
+				> | null = null;
 				try {
-					credential = await getStoredCredential(
+					authState = await resolveStoredCredentialAuthState(
 						secretStore,
 						agentId,
 						userId,
@@ -760,7 +771,17 @@ export class WorkerGateway {
 
 				return {
 					...mcp,
-					authenticated: !!credential,
+					authenticated: authState?.authenticated ?? false,
+					...(authState ? { authStatus: authState.status } : {}),
+					...(authState?.failure?.reason
+						? { authFailureReason: authState.failure.reason }
+						: {}),
+					...(authState?.failure?.status
+						? { authRefreshStatus: authState.failure.status }
+						: {}),
+					...(authState?.failure?.upstreamError
+						? { authRefreshUpstreamError: authState.failure.upstreamError }
+						: {}),
 					configured: !mcp.requiresInput,
 				};
 			}),
@@ -1494,6 +1515,13 @@ export class WorkerGateway {
 						configDigest: string;
 					}
 				>();
+				const discoveryAuthDiagnostics = new Map<
+					string,
+					{
+						authStatus: "needs_reauth" | "degraded";
+						diagnosticCode?: string;
+					}
+				>();
 				if (this.mcpProxy && enrichedMcpStatus.length > 0) {
 					const toolResults = await Promise.allSettled(
 						enrichedMcpStatus.map(async (mcp) => {
@@ -1516,6 +1544,18 @@ export class WorkerGateway {
 									result.value.provenance,
 								);
 							}
+							if (
+								result.value.status === "needs_reauth" ||
+								result.value.status === "degraded"
+							) {
+								discoveryAuthDiagnostics.set(result.value.mcpId, {
+									authStatus: result.value.status,
+									diagnosticCode:
+										typeof result.value.diagnosticCode === "string"
+											? result.value.diagnosticCode
+											: undefined,
+								});
+							}
 							if (result.value.tools && result.value.tools.length > 0) {
 								mcpTools[result.value.mcpId] = result.value.tools;
 							}
@@ -1537,8 +1577,9 @@ export class WorkerGateway {
 					// can be stale if an agent config changes during session bootstrap.
 					runtimeMcpStatus = enrichedMcpStatus.map((mcp) => {
 						const provenance = discoveryProvenance.get(mcp.id);
+						const discoveryAuth = discoveryAuthDiagnostics.get(mcp.id);
 						const { upstreamOrigin, configSource, configDigest, ...status } = mcp;
-						return provenance
+						const runtimeStatus = provenance
 							? { ...status, ...provenance }
 							: {
 									...status,
@@ -1546,6 +1587,16 @@ export class WorkerGateway {
 									configSource: "derived" as const,
 									configDigest: "",
 								};
+						return discoveryAuth
+							? {
+									...runtimeStatus,
+									authenticated: false,
+									authStatus: discoveryAuth.authStatus,
+									...(discoveryAuth.diagnosticCode
+										? { diagnosticCode: discoveryAuth.diagnosticCode }
+										: {}),
+								}
+							: runtimeStatus;
 					});
 				}
 
