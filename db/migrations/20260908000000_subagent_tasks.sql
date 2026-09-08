@@ -30,7 +30,7 @@ CREATE TABLE public.subagent_tasks (
   delivery_lease_until timestamptz,
   delivered_at timestamptz,
   observed_execution_id text,
-  FOREIGN KEY (organization_id, agent_id) REFERENCES agents (organization_id, id),
+  FOREIGN KEY (organization_id, agent_id) REFERENCES agents (organization_id, id) ON DELETE CASCADE,
   UNIQUE (organization_id, user_id, agent_id, parent_conversation_id, parent_run_id, idempotency_key),
   CHECK (length(title) BETWEEN 1 AND 200),
   CHECK (octet_length(prompt) BETWEEN 1 AND 65536),

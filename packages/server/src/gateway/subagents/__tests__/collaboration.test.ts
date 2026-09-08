@@ -56,9 +56,9 @@ afterAll(async () => {
   if (oldEncryptionKey === undefined) delete process.env.ENCRYPTION_KEY; else process.env.ENCRYPTION_KEY = oldEncryptionKey;
 });
 
-function token(userId = "user-1", active = true, tokenKind: "run" | "session" = "run") {
+function token(userId = "user-1", active = true, tokenKind: "run" | "session" = "run", messageId = "parent-message") {
   return generateWorkerToken(userId, "parent-1", "deployment-1", {
-    organizationId: "org-1", agentId: "agent-1", channelId: "api_user-1", runId: 100, messageId: "parent-message", tokenKind,
+    organizationId: "org-1", agentId: "agent-1", channelId: "api_user-1", runId: 100, messageId, tokenKind,
     releaseState: tokenKind === "session" ? undefined : active ? { status: "active", claim: {
       environment: "staging", toolboxUserId: userId, agentId: "agent-1", releaseId: "release-1",
       releaseSequence: 1, snapshotDigest: `sha256:${"a".repeat(64)}`,
@@ -274,6 +274,42 @@ test("等待結果後 parent crash 仍有通知；parent 成功才消除背景�
     if (status === "completed") expect(delivery).toBeNull();
     else expect(delivery).not.toBeNull();
   }
+});
+
+test("status 讀取結果只有原父執行成功才抑制背景重送", async () => {
+  const app = createSubagentRoutes(store);
+  for (const outcome of ["completed", "failed", "wrong-user"]) {
+    const messageId = `status-observe-${outcome}`;
+    const owner = { ...scope, parentRunId: messageId, parentMessageId: messageId };
+    const task = await store.spawn(owner, input());
+    const claim = (await store.claim(task.id))!;
+    await dispatchSubagent(store, claim, { codex: async () => ({ summary: "已整理", artifacts: [] }) }, async () => true);
+    const response = await app.request(`/internal/subagents/${task.id}`, {
+      headers: { authorization: `Bearer ${token("user-1", true, "run", messageId)}` },
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json()).task.result.summary).toBe("已整理");
+    await sql`INSERT INTO execution_tasks VALUES (${`exec:${messageId}`}, ${owner.agentId},
+      ${outcome === "wrong-user" ? "other-user" : owner.userId}, ${owner.parentConversationId},
+      ${outcome === "failed" ? "failed" : "completed"})`;
+    const delivery = await store.claimDelivery(task.id);
+    if (outcome === "completed") expect(delivery).toBeNull();
+    else expect(delivery).not.toBeNull();
+  }
+});
+
+test("刪除 agent 清理其子任務與產物，不影響同 org 的其他 agent", async () => {
+  const owner = { ...scope, agentId: "agent-delete-fixture", parentRunId: "delete-fixture" };
+  await sql`INSERT INTO agents (organization_id,id) VALUES (${owner.organizationId},${owner.agentId})`;
+  const task = await store.spawn(owner, input());
+  const claim = (await store.claim(task.id))!;
+  await sql`INSERT INTO subagent_artifacts (id,task_id,generation,path,media_type,content,sha256)
+    VALUES (${crypto.randomUUID()},${task.id},${claim.generation},'result.md','text/plain',decode('','base64'),'empty')`;
+  await sql`DELETE FROM agents WHERE organization_id=${owner.organizationId} AND id=${owner.agentId}`;
+  expect(await store.get(owner, task.id)).toBeNull();
+  expect(await sql`SELECT id FROM subagent_artifacts WHERE task_id=${task.id}`).toHaveLength(0);
+  expect(await store.complete(claim, { summary: "stale result", artifacts: [] })).toBe(false);
+  expect(await sql`SELECT id FROM agents WHERE organization_id=${scope.organizationId} AND id=${scope.agentId}`).toHaveLength(1);
 });
 
 test("執行前撤回 capability 不會啟動 executor；錯誤不洩漏 stderr", async () => {

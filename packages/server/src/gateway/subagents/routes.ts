@@ -79,7 +79,9 @@ export function createSubagentRoutes(store: SubagentStore, onCreated?: (id: stri
     const id = taskIdSchema.safeParse(c.req.param("taskId"));
     if (!id.success) return c.json({ error: "invalid_task_id" }, 400);
     const task = await store.get(scope, id.data);
-    return task ? c.json({ task: subagentTaskView(task) }) : c.json({ error: "task_not_found" }, 404);
+    if (!task) return c.json({ error: "task_not_found" }, 404);
+    if (!["queued", "running"].includes(task.status)) await store.observeCompletion(scope, task.id);
+    return c.json({ task: subagentTaskView(task) });
   });
   app.post("/internal/subagents/:taskId/cancel", async (c) => {
     const scope = scopeFromWorker(c.get("worker") as WorkerTokenData);
