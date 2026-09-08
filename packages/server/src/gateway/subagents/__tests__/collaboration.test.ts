@@ -6,6 +6,7 @@ import postgres from "postgres";
 import { generateWorkerToken } from "@lobu/core";
 import { startEmbeddedBackend, type EmbeddedBackend } from "../../../__tests__/setup/embedded-postgres-backend";
 import { closeDbSingleton, PROD_PG_VALUE_OPTIONS, type DbClient } from "../../../db/client";
+import { randomBytes } from "node:crypto";
 import { SubagentStore } from "../store";
 import { createSubagentParentDelivery } from "../parent-delivery";
 import type { ISessionManager } from "../../session";
@@ -15,6 +16,7 @@ import type { SubagentScope } from "../types";
 import { createSubagentRoutes } from "../routes";
 import { createSubagentTools } from "../../../../../agent-worker/src/openclaw/subagent-tools";
 import { CodexAuthStore } from "../codex-auth-store";
+import { runCodexLogin } from "../codex-auth-runner";
 import { CodexCredentialStore } from "../codex-credentials";
 import { Hono } from "hono";
 import { createSubagentProvisioningRoutes } from "../provisioning-routes";
@@ -38,7 +40,7 @@ const input = () => ({ backend: "codex" as const, title: "整理課程資料", p
 beforeAll(async () => {
   backend = await startEmbeddedBackend();
   process.env.DATABASE_URL = backend.url;
-  process.env.ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  process.env.ENCRYPTION_KEY = randomBytes(32).toString("hex");
   sql = postgres(backend.url, { max: 8, onnotice: () => {}, ...PROD_PG_VALUE_OPTIONS });
   await sql`CREATE TABLE agents (organization_id text, id text, owner_platform text DEFAULT 'toolbox', owner_user_id text DEFAULT 'user-1', PRIMARY KEY (organization_id, id))`;
   await sql`INSERT INTO agents (organization_id,id) VALUES ('org-1', 'agent-1')`;
@@ -89,7 +91,9 @@ describe("子代理的持久化協作路徑", () => {
 
   test("完成通知經實際 enqueue 回到原對話，拒絕入隊前 session 被替換", async () => {
     const parent = { ...scope, conversationId: scope.parentConversationId,
-      messageId: "parent-enqueue-message" };
+      messageId: "parent-enqueue-message", platform: "slack", channelId: "C-parent", teamId: "T-parent", botId: "B-parent",
+      platformMetadata: { connectionId: "conn-parent", responseThreadId: "slack:C-parent:thread",
+        automationModificationContext: { mustNotInherit: true } } };
     await sql`INSERT INTO runs (id,status,queue_name,action_input,organization_id)
       VALUES (910001,'completed','message',${sql.json(parent)},'org-1')`;
     const task = await store.spawn({ ...scope, parentRunId: "910001" }, input());
@@ -124,7 +128,9 @@ describe("子代理的持久化協作路徑", () => {
     const { payload, options } = enqueued[0]!;
     expect(payload).toMatchObject({ agentId: scope.agentId, userId: scope.userId,
       organizationId: scope.organizationId, conversationId: scope.parentConversationId,
-      platformMetadata: { source: "subagent-completion" } });
+      platform: "slack", channelId: "C-parent", teamId: "T-parent", botId: "B-parent",
+      platformMetadata: { source: "subagent-completion", connectionId: "conn-parent", responseThreadId: "slack:C-parent:thread" } });
+    expect(payload.platformMetadata.automationModificationContext).toBeUndefined();
     expect(options).toEqual({ singletonKey: payload.messageId, durableSingleton: true });
     expect(payload.messageText).toContain(task.id);
     expect(payload.messageText).not.toContain("UNTRUSTED_CHILD_RESULT");
@@ -524,3 +530,57 @@ test("Toolbox 管理端驗證 PAT、org 與 personal-agent owner，沒有憑證�
   expect((await app.request('/agents/agent-1/subagents/codex?userId=victim')).status).toBe(404);
   expect((await app.request('/agents/agent-1/subagents/codex?userId=user-1', { headers: { 'x-test-org': 'other-org' } })).status).toBe(404);
 });
+
+
+// Explicit opt-in only: user completes the official device login during this test.
+// This proves the Codex adapter, not applied release claims or LINE delivery.
+test.skipIf(process.env.SUBAGENT_TEST_INTERACTIVE_LOGIN !== "1")("真實官方登入與兩個 Codex 子任務並行、產物及解除連接", async () => {
+  const binary = process.env.SUBAGENT_TEST_CODEX_BINARY;
+  if (!binary) throw new Error("SUBAGENT_TEST_CODEX_BINARY required");
+  const directory = await mkdtemp(join(tmpdir(), "shifu-codex-live-"));
+  const owner = { ...scope, agentId: "live-codex-fixture", userId: "live-codex-fixture", parentRunId: "live-fixture" };
+  const credentials = new CodexCredentialStore(sql as unknown as DbClient);
+  try {
+    await sql`INSERT INTO agents (organization_id,id,owner_user_id) VALUES (${owner.organizationId},${owner.agentId},${owner.userId})`;
+    const auth = new CodexAuthStore(sql as unknown as DbClient);
+    const flow = (await auth.claim((await auth.start(owner)).id))!;
+    const artifacts = new SubagentArtifactStore(sql as unknown as DbClient);
+    const options = { binary, stateRoot: directory, path: "/usr/bin:/bin:/opt/homebrew/bin", credentials, artifacts };
+    const login = runCodexLogin(auth, flow, options);
+    let announced = false;
+    while (true) {
+      const current = await auth.get(owner, flow.id);
+      if (current?.status === "awaiting_user" && current.verificationUrl && current.userCode && !announced) {
+        console.log(JSON.stringify({ event: "official_device_login", verificationUrl: current.verificationUrl,
+          userCode: current.userCode, expiresAt: current.expiresAt }));
+        announced = true;
+      }
+      if (!current || !["queued", "awaiting_user"].includes(current.status)) break;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    await login;
+    expect((await auth.get(owner, flow.id))?.status).toBe("connected");
+    const execute = createCodexExecutor(options);
+    const tasks = await Promise.all(["A", "B"].map(label => store.spawn(owner, {
+      ...input(), title: `真實 Codex 連接測試 ${label}`, timeoutSeconds: 180,
+      prompt: `這是課程PM助理的連接測試。請只回覆「測試完成${label}」，不需呼叫工具或外部服務。`,
+    })));
+    const claims = await Promise.all(tasks.map(task => store.claim(task.id)));
+    expect(claims.every(Boolean)).toBe(true);
+    await Promise.all(claims.map(claim => dispatchSubagent(store, claim!, { codex: execute }, async () => true)));
+    for (const task of tasks) {
+      const completed = (await store.get(owner, task.id))!;
+      expect(completed.status).toBe("completed");
+      expect(completed.result?.summary).toContain("測試完成");
+      const artifact = await artifacts.get(completed, completed.result!.artifacts[0]!.id!);
+      expect(Buffer.from(artifact!.contentBase64, "base64").toString()).toBe(completed.result!.summary);
+    }
+    await credentials.disconnect(owner);
+    expect(await credentials.load(owner)).toBeNull();
+    await expect(execute(claims[0]!, new AbortController().signal)).rejects.toThrow("codex_needs_connection");
+    console.log(JSON.stringify({ event: "codex_live_adapter_verified", taskCount: tasks.length, disconnected: true }));
+  } finally {
+    await credentials.disconnect(owner);
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 850_000);
