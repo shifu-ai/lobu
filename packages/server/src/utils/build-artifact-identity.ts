@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalize } from "json-canonicalize";
 
-export const LOBU_BUILD_CAPABILITIES = ["agent-release.readiness.v1"] as const;
+export const LOBU_BUILD_CAPABILITIES = ["agent-release.readiness.v1", "agent.subagents.v1"] as const;
 
 /** Canonical contract shared with Toolbox build-artifact receipt verification. */
 export function computeLobuBuildIdentityDigest(input: {

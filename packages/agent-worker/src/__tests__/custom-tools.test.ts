@@ -47,6 +47,10 @@ describe("createOpenClawCustomTools", () => {
     });
 
     expect(tools.map((tool) => tool.name)).toEqual([
+      "spawn_subagent",
+      "subagent_status",
+      "wait_subagents",
+      "cancel_subagent",
       "upload_file",
       "artifact_read",
       "generate_image",

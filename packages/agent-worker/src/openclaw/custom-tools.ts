@@ -51,6 +51,7 @@ import {
   statusRuntimeToolCatalog,
 } from "./tool-catalog-dispatcher";
 import type { TurnExecutionIntent } from "./turn-execution-intent";
+import { createSubagentTools } from "./subagent-tools";
 
 type ToolResult = AgentToolResult<Record<string, unknown>>;
 
@@ -410,6 +411,7 @@ export function createOpenClawCustomTools(params: {
   };
 
   const tools: ToolDefinition[] = [
+    ...createSubagentTools(params),
     defineTool({
       name: "upload_file",
       description: getCustomToolDescription("upload_file"),

@@ -1064,6 +1064,21 @@ function extractSessionToken(c: Context): string | null {
 }
 
 export class McpProxy {
+  /** 委派不沿用寫入 grant；以目前設定、拒絕清單及 MCP 唯讀政策重新核對。 */
+  async describeDelegatedReadTool(agentId: string, userId: string, mcpId: string, toolName: string,
+    worker: import("@lobu/core").WorkerTokenData, token: string) {
+    if (!this.agentSettingsStore || !this.globalToolPolicyResolver || !this.grantStore ||
+      !worker.organizationId || worker.agentId !== agentId || worker.userId !== userId) return null;
+    const settings = await this.agentSettingsStore.getSettings(agentId);
+    if (!settings || !isToolNameAllowedByToolsConfig(toolName, settings.toolsConfig, this.globalToolPolicyResolver()) ||
+      await this.grantStore.isDenied(agentId, `/mcp/${mcpId}/tools/${toolName}`, worker.organizationId)) return null;
+    const discovery = await this.fetchToolsForMcp(mcpId, agentId, worker, token, { surfaceErrors: true, bypassCache: true });
+    const tool = discovery.tools.find((candidate) => candidate.name === toolName);
+    if (!tool || requiresToolApproval(tool.annotations) || tool.annotations?.destructiveHint === true || !discovery.provenance) return null;
+    return { mcpId, name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
+      identity: discovery.provenance };
+  }
+
   async revalidatePendingToolEligibility(
     pending: import("./pending-tool-store.js").PendingToolInvocation,
   ): Promise<boolean> {

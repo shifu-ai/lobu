@@ -315,7 +315,7 @@ export async function readRuntimeReleaseAssurance(
     buildIdentityStatus: runtime.build_identity_status,
     buildIdentityDigest: runtime.build_identity_digest,
     buildSource: "github:shifu-ai/lobu",
-    capabilities: ["agent-release.readiness.v1"],
+    capabilities: ["agent-release.readiness.v1", "agent.subagents.v1"],
     queueConsumer,
     migration,
     observedAt: now.toISOString(),

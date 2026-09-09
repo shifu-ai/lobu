@@ -148,6 +148,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV PATH="/usr/local/bin:${PATH}"
 
+# Install in the final image; builder-global packages are not copied below.
+RUN npm install --global @openai/codex@0.153.4 \
+    && test "$(codex --version)" = "codex-cli 0.153.4"
+ENV CODEX_BINARY=/usr/local/bin/codex
+ENV CODEX_STATE_ROOT=/app/workspaces/.codex-accounts
+
 # Copy installed deps + source from builder
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./

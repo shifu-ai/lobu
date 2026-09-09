@@ -101,7 +101,7 @@ export interface IMessageQueue {
   work<T>(
     queueName: string,
     handler: JobHandler<T>,
-    options?: { startPaused?: boolean }
+    options?: { startPaused?: boolean; concurrency?: number }
   ): Promise<void>;
 
   /**

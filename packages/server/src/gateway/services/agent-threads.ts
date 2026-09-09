@@ -123,6 +123,10 @@ export interface EnqueueAgentMessageArgs {
 	messageId?: string;
 	queueSingletonKey?: string;
 	durableQueueSingleton?: boolean;
+	/** Trusted caller scope, checked against the exact session used to build the payload. */
+	expectedSessionScope?: { agentId: string; userId: string; organizationId: string };
+	/** Routing only, supplied by a verified persisted parent run. */
+	deliveryRouting?: Pick<MessagePayload, "platform" | "channelId" | "teamId" | "botId" | "platformMetadata">;
 	/** Free-form source tag for log lines / platformMetadata. */
 	source?: string;
 	scheduledCourseContext?: MessagePayload["scheduledCourseContext"];
@@ -155,10 +159,17 @@ export async function enqueueAgentMessage(
 		throw new Error(`Thread ${threadId} not found`);
 	}
 
+	const expected = args.expectedSessionScope;
+	if (expected && (session.agentId !== expected.agentId ||
+		session.userId !== expected.userId || session.organizationId !== expected.organizationId ||
+		(session.conversationId || threadId) !== threadId)) {
+		throw new Error("Thread scope changed");
+	}
+
 	await sessionManager.touchSession(threadId);
 
 	const realAgentId = session.agentId || threadId;
-	const channelId = session.channelId || `api_${session.userId}`;
+	const channelId = args.deliveryRouting?.channelId || session.channelId || `api_${session.userId}`;
 
 	const jobId = await queueProducer.enqueueMessage(
 		{
@@ -166,17 +177,18 @@ export async function enqueueAgentMessage(
 			conversationId: session.conversationId || threadId,
 			messageId,
 			channelId,
-			teamId: "api",
+			teamId: args.deliveryRouting?.teamId ?? "api",
 			agentId: realAgentId,
 			...(session.organizationId
 				? { organizationId: session.organizationId }
 				: {}),
-			botId: "lobu-api",
-			platform: "api",
+			botId: args.deliveryRouting?.botId ?? "lobu-api",
+			platform: args.deliveryRouting?.platform ?? "api",
 			messageText,
 			scheduledCourseContext: args.scheduledCourseContext,
 			resolvedCourseContext: args.resolvedCourseContext,
 			platformMetadata: {
+				...args.deliveryRouting?.platformMetadata,
 				agentId: realAgentId,
 				source: args.source || "internal",
 				dryRun: session.dryRun || false,

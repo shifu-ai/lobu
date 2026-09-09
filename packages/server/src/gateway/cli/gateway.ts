@@ -25,6 +25,11 @@ import { getModelProviderModules } from "../modules/module-system.js";
 import { createAudioRoutes } from "../routes/internal/audio.js";
 import { createDeviceAuthRoutes } from "../routes/internal/device-auth.js";
 import { createExecutionEventRoutes } from "../routes/internal/execution-events.js";
+import { createSubagentRoutes } from "../subagents/routes.js";
+import { createSubagentToolDelegate } from "../subagents/delegated-tools.js";
+import { enqueueSubagentDispatch } from "../subagents/scheduler";
+import { SubagentStore } from "../subagents/store.js";
+import { getDb } from "../../db/client.js";
 import { createFileRoutes } from "../routes/internal/files.js";
 import { createHistoryRoutes } from "../routes/internal/history.js";
 import { createImageRoutes } from "../routes/internal/images.js";
@@ -295,6 +300,9 @@ export function createGatewayApp(
 
   if (coreServices) {
     app.route("", createExecutionEventRoutes());
+    const subagentMcp = coreServices.getMcpProxy();
+    app.route("", createSubagentRoutes(new SubagentStore(getDb()), (id) => enqueueSubagentDispatch(coreServices.getQueue(), id),
+      subagentMcp ? createSubagentToolDelegate(subagentMcp) : undefined));
     logger.debug("Internal execution event routes enabled");
 
     app.route(

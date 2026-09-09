@@ -48,6 +48,17 @@ import {
 	resolveWakeAgentId,
 } from "./scheduled-jobs-service";
 import { TaskScheduler } from "./task-scheduler";
+import { resolve } from "node:path";
+import { SubagentStore } from "../gateway/subagents/store";
+import { CodexCredentialStore } from "../gateway/subagents/codex-credentials";
+import { createCodexExecutor } from "../gateway/subagents/codex-executor";
+import { isSubagentAuthorizationActive } from "../gateway/subagents/authorization";
+import { createSubagentParentDelivery } from "../gateway/subagents/parent-delivery";
+import { registerSubagentTasks } from "../gateway/subagents/scheduler";
+import { createLobuExecutor } from "../gateway/subagents/lobu-executor";
+import { SubagentArtifactStore } from "../gateway/subagents/artifacts";
+import { CodexAuthStore } from "../gateway/subagents/codex-auth-store";
+import { registerCodexAuthTasks } from "../gateway/subagents/codex-auth-scheduler";
 import { triggerEmbedBackfill } from "./trigger-embed-backfill";
 import {
 	buildScheduledWakeMessage,
@@ -65,6 +76,25 @@ export async function bootTaskScheduler(
 ): Promise<TaskScheduler> {
 	const scheduler = new TaskScheduler(coreServices.getQueue());
 	registerMaintenanceTasks(scheduler, env, coreServices);
+	const codexOptions = process.env.CODEX_BINARY ? {
+		binary: process.env.CODEX_BINARY, credentials: new CodexCredentialStore(getDb()),
+		artifacts: new SubagentArtifactStore(getDb()),
+		stateRoot: resolve(process.env.CODEX_STATE_ROOT || "workspaces/.codex-accounts"),
+		path: process.env.CODEX_EXEC_PATH || "/usr/local/bin:/usr/bin:/bin",
+	} : null;
+	await registerCodexAuthTasks(scheduler, coreServices.getQueue(), new CodexAuthStore(getDb()), codexOptions);
+	await registerSubagentTasks(scheduler, {
+		queue: coreServices.getQueue(), store: new SubagentStore(getDb()),
+		executors: {
+			lobu: createLobuExecutor({ stateRoot: resolve("workspaces/.lobu-subagents"),
+				artifacts: new SubagentArtifactStore(getDb()),
+				dispatcherUrl: coreServices.getPublicGatewayUrl(), sessionManager: coreServices.getSessionManager() }),
+			...(codexOptions ? { codex: createCodexExecutor(codexOptions) } : {}),
+		},
+		authorize: isSubagentAuthorizationActive,
+		deliver: createSubagentParentDelivery({ sql: getDb(),
+			sessionManager: coreServices.getSessionManager(), queueProducer: coreServices.getQueueProducer() }),
+	});
 	await scheduler.start();
 
 	// AuthProfilesManager.ensureFreshCredential is a no-op until these hooks
