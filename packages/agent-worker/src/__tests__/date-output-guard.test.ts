@@ -5,13 +5,98 @@ import {
   resolveRelativeWeekday,
 } from "../openclaw/date-context";
 import {
+  guardDateOutput as applyDateOutputGuard,
   extractTrustedTemporalCandidates,
   extractTrustedTemporalEvidence,
-  guardDateOutput,
   isDateSensitiveTurn,
 } from "../openclaw/date-output-guard";
 
 const NOW = new Date("2026-07-13T10:15:00.000Z");
+const guardDateOutput = (input: Parameters<typeof applyDateOutputGuard>[0]) =>
+  applyDateOutputGuard(input, { strictFullDateConsistency: true });
+
+test("calendar calculation and recording-source dates are not event-existence evidence", () => {
+  const result = {
+    calendar: { isoDate: "2026-08-25", dateLabel: "2026/8/25（二）" },
+    sourceSalesTalkDate: "2026-08-25",
+  };
+  const candidates = extractTrustedTemporalCandidates(result);
+  expect(candidates).toEqual([]);
+  expect(extractTrustedTemporalEvidence(result)).toEqual([]);
+  expect(
+    guardDateOutput({
+      userMessage: "下一場銷講何時",
+      finalText: "下一場銷講是2026-08-25",
+      now: NOW,
+      trustedTemporalCandidates: candidates,
+    }).status
+  ).toBe("blocked");
+});
+
+test("bare M/D stays unchanged when trusted dates do not identify a unique year", () => {
+  const finalText = "8/25（二）";
+  expect(
+    guardDateOutput({
+      userMessage: "核對日期",
+      finalText,
+      now: NOW,
+      trustedTemporalCandidates: ["2025-08-25", "2026-08-25"],
+    })
+  ).toEqual({ status: "unchanged", text: finalText });
+});
+
+describe("legacy date output strategy", () => {
+  test("defaults to HEAD intent gating, including invalid dates outside date intent", () => {
+    for (const finalText of [
+      "2026-08-25（星期一）",
+      "2026-02-29（星期日）",
+      "2026/8/25 是星期一",
+    ]) {
+      expect(
+        applyDateOutputGuard({ userMessage: "整理資料", finalText, now: NOW })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+  test("retains HEAD short-date window and quoted ISO correction on date-intent turns", () => {
+    expect(
+      applyDateOutputGuard({
+        userMessage: "核對日期",
+        finalText: "7/14（星期一）",
+        now: NOW,
+      }).text
+    ).toBe("7/14（星期二）");
+    expect(
+      applyDateOutputGuard({
+        userMessage: "核對日期",
+        finalText: "「2026-08-25（星期一）」",
+        now: NOW,
+      }).text
+    ).toBe("「2026-08-25（星期二）」");
+    expect(
+      applyDateOutputGuard({
+        userMessage: "核對日期",
+        finalText: "2026/8/25 是星期一",
+        now: NOW,
+      }).text
+    ).toBe("2026/8/25 是星期一");
+  });
+  test("retains HEAD invalid-calendar and relative-evidence guards", () => {
+    expect(
+      applyDateOutputGuard({
+        userMessage: "核對日期",
+        finalText: "2026-02-29",
+        now: NOW,
+      }).status
+    ).toBe("blocked");
+    expect(
+      applyDateOutputGuard({
+        userMessage: "下一場銷講何時",
+        finalText: "下一場銷講是2026-08-25",
+        now: NOW,
+      }).status
+    ).toBe("blocked");
+  });
+});
 
 describe("isDateSensitiveTurn", () => {
   test("detects Chinese relative and explicit date requests", () => {
@@ -197,7 +282,7 @@ describe("guardDateOutput", () => {
     }
   });
 
-  test("does not mutate an already-streamed answer for a non-date turn", () => {
+  test("blocks impossible dates even in a non-date turn", () => {
     const finalText = "資料列內容為 2026-02-30 (星期一)";
 
     expect(
@@ -206,7 +291,7 @@ describe("guardDateOutput", () => {
         finalText,
         now: NOW,
       })
-    ).toEqual({ status: "unchanged", text: finalText });
+    ).toMatchObject({ status: "blocked", reason: "invalid_calendar_date" });
 
     expect(
       guardDateOutput({
@@ -221,7 +306,7 @@ describe("guardDateOutput", () => {
     });
   });
 
-  test("does not correct a weekday in an already-streamed non-date turn", () => {
+  test("corrects an explicit weekday even in a non-date turn", () => {
     const finalText = "資料列內容為 2026-07-16 (星期三)";
 
     expect(
@@ -230,7 +315,86 @@ describe("guardDateOutput", () => {
         finalText,
         now: NOW,
       })
+    ).toMatchObject({
+      status: "corrected",
+      text: "資料列內容為 2026-07-16 (星期四)",
+    });
+  });
+
+  test.each([
+    ["2026-08-25（星期一）", "2026-08-25（星期二）"],
+    ["2026/8/25（星期一）", "2026/8/25（星期二）"],
+    ["2026/08/25 (週一)", "2026/08/25 (週二)"],
+    ["2026-08-25 為星期一", "2026-08-25 為星期二"],
+    ["2026/8/25 是周一。", "2026/8/25 是周二。"],
+    ["2026-08-25 星期一", "2026-08-25 星期二"],
+    ["2026-08-25（星期一，Asia/Taipei）", "2026-08-25（星期二，Asia/Taipei）"],
+    ["2000/2/29（星期一）", "2000/2/29（星期二）"],
+  ])("checks full date pairs without changing dates or formatting: %s", (finalText, expected) => {
+    expect(
+      guardDateOutput({ userMessage: "請整理這份資料", finalText, now: NOW })
+    ).toMatchObject({ status: "corrected", text: expected });
+  });
+
+  test.each([
+    "2026/2/29 星期一",
+    "2026/13/25（週一）",
+    "2026/8/32 是星期一",
+  ])("blocks impossible full slash dates: %s", (finalText) => {
+    expect(
+      guardDateOutput({ userMessage: "請整理", finalText, now: NOW })
+    ).toMatchObject({ status: "blocked", reason: "invalid_calendar_date" });
+  });
+
+  test.each([
+    "8/25（二）",
+    "8/25（星期一）",
+    "7/16（三）",
+    "日期：（7/16（三））",
+    "2026/8-25（星期一）",
+    "version_2026/8/25（星期一）",
+    "https://example.test/2026/8/25（星期一）",
+    "2026-08-25 的報表；星期一再處理。",
+  ])("does not infer missing years or ambiguous associations: %s", (finalText) => {
+    expect(
+      guardDateOutput({ userMessage: "核對日期", finalText, now: NOW })
     ).toEqual({ status: "unchanged", text: finalText });
+  });
+
+  test.each([
+    "「2026-08-25（星期一）」",
+    "『2026/8/25 是星期一』",
+    '"2026-08-25（星期一）"',
+    "“2026-08-25（星期一）”",
+    "`2026-08-25（星期一）`",
+    "``2026-08-25（星期一）``",
+    "'2026-08-25（星期一）'",
+    "‘2026-08-25（星期一）’",
+    "> 2026-08-25（星期一）",
+    "```text\n2026-02-30（星期一）\n```",
+    "~~~text\n2026-02-30（星期一）\n~~~",
+    "「下週三是 7/22（週二）」",
+  ])("preserves marked quotations/code without treating them as assertions: %s", (quoted) => {
+    const finalText = `${quoted}\n核對結果：2026-08-25（星期一）。`;
+    expect(
+      guardDateOutput({ userMessage: "核對日期", finalText, now: NOW })
+    ).toMatchObject({
+      status: "corrected",
+      text: `${quoted}\n核對結果：2026-08-25（星期二）。`,
+    });
+  });
+
+  test("a quoted event name does not bypass next-occurrence evidence", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "下一場銷講是哪天？",
+        finalText: "下一場「銷講」是 2026-08-25（星期二）。",
+        now: NOW,
+      })
+    ).toMatchObject({
+      status: "blocked",
+      reason: "next_occurrence_without_temporal_evidence",
+    });
   });
 
   test("blocks an unsupported next-occurrence date claim", () => {
@@ -1384,7 +1548,7 @@ describe("guardDateOutput", () => {
     }
   });
 
-  test("corrects a short date weekday within the relative calendar window", () => {
+  test("does not infer a year merely from the relative calendar window", () => {
     const finalText = "7/16（三）";
     const result = guardDateOutput({
       userMessage: finalText,
@@ -1392,8 +1556,7 @@ describe("guardDateOutput", () => {
       now: NOW,
     });
 
-    expect(result.status).toBe("corrected");
-    expect(result.text).toBe("7/16（四）");
+    expect(result).toEqual({ status: "unchanged", text: finalText });
   });
 
   test("preserves 星期天 on a correct short Sunday date", () => {
@@ -1424,9 +1587,8 @@ describe("guardDateOutput", () => {
       now: NOW,
     });
 
-    // The standalone short date remains in-window and gets only its weekday fixed;
-    // it must not be changed to this Wednesday's date.
-    expect(result.text).toBe("這週三再確認。7/9（四）是歷史資料");
+    // No relative association or explicit year for the historical date.
+    expect(result.text).toBe(finalText);
   });
 
   test("associates a date with the nearest relative claim", () => {
@@ -1457,7 +1619,7 @@ describe("guardDateOutput", () => {
   test("corrects a wrong 週X short-form weekday and keeps the 週 style (2026-07-28 incident shape)", () => {
     // 7/16 是週四；agent 慣用「週X」短寫，舊 guard 只認「星期X」而零攔截。
     // userMessage 取自事故原文：不含日期詞、只有 HH:MM，靠時刻變更判定觸發 guard。
-    const finalText = "7/16（週三）銷講 → 7/17 00:05 初版";
+    const finalText = "2026-07-16（週三）銷講 → 7/17 00:05 初版";
     const result = guardDateOutput({
       userMessage: "只改正式版，改成 18:00",
       finalText,
@@ -1465,11 +1627,11 @@ describe("guardDateOutput", () => {
     });
 
     expect(result.status).toBe("corrected");
-    expect(result.text).toBe("7/16（週四）銷講 → 7/17 00:05 初版");
+    expect(result.text).toBe("2026-07-16（週四）銷講 → 7/17 00:05 初版");
   });
 
   test("corrects a wrong 周X simplified-prefix weekday and keeps the 周 style", () => {
-    const finalText = "7/16（周三）";
+    const finalText = "2026-07-16（周三）";
     const result = guardDateOutput({
       userMessage: finalText,
       finalText,
@@ -1477,7 +1639,7 @@ describe("guardDateOutput", () => {
     });
 
     expect(result.status).toBe("corrected");
-    expect(result.text).toBe("7/16（周四）");
+    expect(result.text).toBe("2026-07-16（周四）");
   });
 
   test("leaves a correct 週X short-form weekday unchanged", () => {
@@ -1554,14 +1716,14 @@ describe("guardDateOutput", () => {
     }
   });
 
-  test("still corrects a punctuated natural-language short date claim", () => {
+  test("does not infer a year for a punctuated short date claim", () => {
     expect(
       guardDateOutput({
         userMessage: "請核對日期",
         finalText: "日期：（7/16（三））",
         now: NOW,
       }).text
-    ).toBe("日期：（7/16（四））");
+    ).toBe("日期：（7/16（三））");
   });
 
   test("preserves the 星期天 spelling for a correct Sunday", () => {
