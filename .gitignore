@@ -102,3 +102,6 @@ packages/*/~/
 .managed-e2e-run/
 .cli-smoke-run/
 examples/lobu-crm/evals/tool-surface/last-run.json
+
+# Private build-time dependency checkout; supplied by CI.
+.build/
