@@ -35,7 +35,7 @@ interface ToolExecutionEvidenceInput {
 }
 
 const DONE_CLAIM_PATTERNS = [
-  /已(?:經)?(?:幫(?:你|我|忙)?\s*)?(?:完成|產生|生成|建立|新增|暫停|停止|更新|修改|調整|執行|跑完|排好|發送|送出)/i,
+  /已(?:經)?(?:幫(?:你|我|忙)?\s*)?(?:完成|產生|生成|建立|新增|暫停|停止|更新|修改|改成|恢復|調整|執行|跑完|排好|發送|送出)/i,
   /(?:完成|產生|生成|建立|新增|暫停|停止|更新|修改|調整|執行|跑完|排好|發送|送出)了/i,
   /\b(?:done|completed|created|scheduled|paused|updated|ran|generated|sent)\b/i,
 ];
@@ -125,20 +125,30 @@ export function getRequiredBattleReportMutationTools(
       /(?:例外|覆寫|覆写|覆蓋|覆盖|\b(?:override|exception)\b)/i.test(
         normalized
       ));
+  const restoreSingleDefault =
+    restoreDefault &&
+    /(?:恢復|恢复|還原|还原|取消|移除|刪除|删除|\b(?:restore|reset|revert|inherit|remove|clear|cancel)\b)/i.test(
+      normalized
+    ) &&
+    !/(?:從|从|開始|开始|\b(?:starting|from)\b)/i.test(normalized);
   const changeMode =
     /(?:直播|錄播|录播|\b(?:recorded|live)\b)/i.test(normalized) &&
-    /(?:改|切換|切换|調整|调整|設定|设定|設為|设为|\b(?:change|switch|update|set)\b)/i.test(
+    /(?:改|更新|切換|切换|調整|调整|設定|设定|設為|设为|\b(?:change|switch|update|set)\b)/i.test(
       normalized
     );
   // A weekly default can be the destination of a single-session reset.
   // A date alone can instead be the start date of a recurring edit.
   if (
-    ((explicitSession || datedSession) && restoreDefault) ||
+    ((explicitSession || (datedSession && !recurring)) && restoreDefault) ||
+    (datedSession && restoreSingleDefault) ||
     (changeMode && (explicitSession || (datedSession && !recurring)))
   ) {
     return ["sales_battle_report_session_mode_set"];
   }
-  if (/(?:更新|修改|調整|改成|change|update|reschedule)/i.test(normalized)) {
+  if (
+    changeMode ||
+    /(?:更新|修改|調整|改成|change|update|reschedule)/i.test(normalized)
+  ) {
     return ["sales_battle_report_schedule_update"];
   }
   if (/(?:排程|定期|每週|每月|schedule|weekly|monthly)/i.test(normalized)) {

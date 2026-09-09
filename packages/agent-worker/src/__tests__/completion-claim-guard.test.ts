@@ -7,6 +7,7 @@ import {
 describe("checkCompletionClaim", () => {
   test.each([
     "這一場戰報改成錄播",
+    "更新這場戰報為錄播",
     "这一场戰報切换成录播",
     "本場戰報設定為直播",
     "該場戰報調整成錄播",
@@ -46,6 +47,8 @@ describe("checkCompletionClaim", () => {
 
   test.each([
     "戰報從9/10開始每週四改成錄播",
+    "戰報從9/10開始每週四改成預設錄播",
+    "Set weekly battle report default to recorded starting 2026-09-10",
     "Change weekly battle report to recorded starting 2026-09-10",
     "戰報每週四改成直播",
   ])("preserves recurring edits for %s", (userMessage) => {
@@ -62,6 +65,30 @@ describe("checkCompletionClaim", () => {
         executedTools: ["sales_battle_report_session_mode_set"],
       }).allowed
     ).toBe(false);
+  });
+
+  test.each([
+    ["這場戰報改成錄播", "已改成錄播。"],
+    ["9/10戰報恢復每週預設", "已恢復每週預設。"],
+  ])("requires a receipt for natural mode confirmations: %s", (userMessage, finalText) => {
+    expect(
+      checkCompletionClaim({ userMessage, finalText, executedTools: [] })
+        .allowed
+    ).toBe(false);
+    expect(
+      checkCompletionClaim({
+        userMessage,
+        finalText,
+        executedTools: ["sales_battle_report_schedule_update"],
+      }).allowed
+    ).toBe(false);
+    expect(
+      checkCompletionClaim({
+        userMessage,
+        finalText,
+        executedTools: ["sales_battle_report_session_mode_set"],
+      }).allowed
+    ).toBe(true);
   });
 
   test("accepts the single-session mode receipt rather than a weekly workaround", () => {
