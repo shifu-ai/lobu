@@ -48,7 +48,7 @@ describe("checkCompletionClaim", () => {
   test.each([
     "戰報從9/10開始每週四改成錄播",
     "戰報從9/10開始每週四改成預設錄播",
-    "Set weekly battle report default to recorded starting 2026-09-10",
+    "Update weekly battle report default to recorded starting 2026-09-10",
     "Change weekly battle report to recorded starting 2026-09-10",
     "戰報每週四改成直播",
   ])("preserves recurring edits for %s", (userMessage) => {
@@ -63,6 +63,25 @@ describe("checkCompletionClaim", () => {
       checkCompletionClaim({
         ...input,
         executedTools: ["sales_battle_report_session_mode_set"],
+      }).allowed
+    ).toBe(false);
+  });
+
+  test.each([
+    "幫我設定每週戰報為直播",
+    "建立每週四的戰報排程，設定為錄播",
+  ])("preserves schedule creation for %s", (userMessage) => {
+    const input = { userMessage, finalText: "已建立。" };
+    expect(
+      checkCompletionClaim({
+        ...input,
+        executedTools: ["sales_battle_report_schedule_create"],
+      }).allowed
+    ).toBe(true);
+    expect(
+      checkCompletionClaim({
+        ...input,
+        executedTools: ["sales_battle_report_schedule_update"],
       }).allowed
     ).toBe(false);
   });

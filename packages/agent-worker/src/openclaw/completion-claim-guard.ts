@@ -145,10 +145,7 @@ export function getRequiredBattleReportMutationTools(
   ) {
     return ["sales_battle_report_session_mode_set"];
   }
-  if (
-    changeMode ||
-    /(?:更新|修改|調整|改成|change|update|reschedule)/i.test(normalized)
-  ) {
+  if (/(?:更新|修改|調整|改成|change|update|reschedule)/i.test(normalized)) {
     return ["sales_battle_report_schedule_update"];
   }
   if (/(?:排程|定期|每週|每月|schedule|weekly|monthly)/i.test(normalized)) {
