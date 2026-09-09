@@ -6,6 +6,14 @@ on:
       - main
   workflow_dispatch:
     inputs:
+      mode:
+        description: "Run the image build or export the existing protected build-receipt public key."
+        type: choice
+        options:
+          - build
+          - export_build_public_key
+        default: build
+        required: true
       platforms:
         description: "Target platforms for the docker builds. Defaults to amd64 only — bump to linux/amd64,linux/arm64 when you need the multi-arch image (rare)."
         type: string
@@ -35,6 +43,7 @@ env:
 
 jobs:
   generate-tag:
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build') }}
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.timestamp.outputs.tag }}
@@ -58,6 +67,7 @@ jobs:
   # amd64-only (no QEMU/arm64): a smoke gate, not a release. Reuses the same GHA
   # buildx cache scope as `build-worker` so this doesn't double the build cost.
   connector-parity-smoke:
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     # Builds + runs the image locally (push: false), so it never needs the
@@ -89,6 +99,7 @@ jobs:
             bun src/bin.ts self-check --json
 
   build-app:
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build') }}
     runs-on: ubuntu-latest
     environment: production
     # Push the app image LAST. Flux's ImageUpdateAutomation only watches
@@ -227,6 +238,7 @@ jobs:
           retention-days: 1
 
   sign-lobu-build-receipt:
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build') }}
     needs: [build-app]
     runs-on: ubuntu-latest
     environment: production
@@ -303,6 +315,7 @@ jobs:
           retention-days: 1
 
   publish-lobu-build-receipt:
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build') }}
     needs: [sign-lobu-build-receipt]
     runs-on: ubuntu-latest
     environment: production
@@ -327,7 +340,61 @@ jobs:
           done
           exit 1
 
+  export-lobu-build-public-key:
+    if: ${{ github.repository == 'shifu-ai/lobu' && github.event_name == 'workflow_dispatch' && inputs.mode == 'export_build_public_key' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/build-receipt-public-key') }}
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: none
+    steps:
+      - name: Export protected Lobu build receipt public key
+        env:
+          EXPORT_MODE: ${{ inputs.mode }}
+          RECEIPT_PRIVATE_KEY_PKCS8: ${{ secrets.AGENT_RELEASE_LOBU_BUILD_RECEIPT_PRIVATE_KEY_PKCS8 }}
+          RECEIPT_KEY_ID: ${{ secrets.AGENT_RELEASE_LOBU_BUILD_RECEIPT_KEY_ID }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { createHash, createPrivateKey, createPublicKey } = require('node:crypto');
+          const repository = process.env.GITHUB_REPOSITORY;
+          const ref = process.env.GITHUB_REF;
+          const allowedRefs = new Set(['refs/heads/main', 'refs/heads/codex/build-receipt-public-key']);
+          const expectedWorkflowRef = `${repository}/.github/workflows/build-images.yml@${ref}`;
+          if (repository !== 'shifu-ai/lobu') throw new Error('public-key export repository mismatch');
+          if (!allowedRefs.has(ref)) throw new Error('public-key export ref mismatch');
+          if (process.env.GITHUB_WORKFLOW_REF !== expectedWorkflowRef) throw new Error('public-key export workflow mismatch');
+          if (process.env.GITHUB_EVENT_NAME !== 'workflow_dispatch') throw new Error('public-key export event mismatch');
+          if (process.env.EXPORT_MODE !== 'export_build_public_key') throw new Error('public-key export mode mismatch');
+          const keyId = process.env.RECEIPT_KEY_ID;
+          if (!keyId || !/^[A-Za-z0-9._:-]{1,128}$/.test(keyId)) throw new Error('invalid protected signing key id');
+          const encodedPrivateKey = process.env.RECEIPT_PRIVATE_KEY_PKCS8;
+          if (!encodedPrivateKey) throw new Error('protected signing key is required');
+          const privateKey = createPrivateKey({ key: Buffer.from(encodedPrivateKey, 'base64'), format: 'der', type: 'pkcs8' });
+          if (privateKey.asymmetricKeyType !== 'ed25519') throw new Error('protected signing key must be Ed25519');
+          const publicKey = createPublicKey(privateKey);
+          if (publicKey.asymmetricKeyType !== 'ed25519') throw new Error('exported public key must be Ed25519');
+          const publicKeySpki = publicKey.export({ format: 'der', type: 'spki' });
+          const artifact = {
+            schemaVersion: 1,
+            algorithm: 'Ed25519',
+            purpose: 'lobu_build_artifact_receipt',
+            keyId,
+            publicKeySpkiBase64: publicKeySpki.toString('base64'),
+            fingerprint: `sha256:${createHash('sha256').update(publicKeySpki).digest('hex')}`,
+          };
+          fs.writeFileSync('lobu-build-public-key.json', `${JSON.stringify(artifact)}\n`, { flag: 'wx' });
+          NODE
+
+      - name: Upload Lobu build receipt public key
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lobu-build-public-key
+          path: lobu-build-public-key.json
+          if-no-files-found: error
+          retention-days: 90
+
   build-worker:
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build') }}
     runs-on: ubuntu-latest
     # Gate the worker push (and transitively the app push, which `needs:
     # build-worker`) on the parity smoke passing.
@@ -386,6 +453,7 @@ jobs:
             -d '{"visibility":"public"}' || true
 
   build-embeddings-service:
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build') }}
     runs-on: ubuntu-latest
     needs: [generate-tag]
     permissions:
@@ -461,7 +529,7 @@ jobs:
         build-embeddings-service,
         build-app,
       ]
-    if: failure() && github.ref == 'refs/heads/main'
+    if: ${{ failure() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'build')) }}
     permissions:
       contents: read
     steps:
