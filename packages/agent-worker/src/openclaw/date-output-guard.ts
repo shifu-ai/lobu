@@ -1,10 +1,10 @@
 import {
   buildRelativeWeekCalendar,
-  resolveRelativeDay,
-  resolveRelativeWeekday,
   type CalendarDate,
   type RelativeDayReference,
   type RelativeWeekReference,
+  resolveRelativeDay,
+  resolveRelativeWeekday,
 } from "./date-context";
 
 const WEEKDAYS_ZH = [
@@ -271,7 +271,32 @@ export function isDateSensitiveTurn(promptText: string): boolean {
 }
 
 const EXPLICIT_DATE_WITH_WEEKDAY_RE =
+  /(?<![A-Za-z0-9_./-])(\d{4})([-/])(\d{1,2})\2(\d{1,2})([ \t]*(?:[(（][ \t]*|(?:為|为|是)[ \t]*)?)((?:星期|週|周)[日天一二三四五六])(?![日天一二三四五六])/g;
+const LEGACY_EXPLICIT_DATE_WITH_WEEKDAY_RE =
   /(?<![A-Za-z0-9_./-])(\d{4})-(\d{2})-(\d{2})(\s*[(（])((?:星期|週|周)[日天一二三四五六])([)）])/g;
+const SHORT_DATE_WITH_WEEKDAY_RE =
+  /(?<![A-Za-z0-9_./-])(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期|週|周)?[日天一二三四五六])([)）])/g;
+// Only marked quotations/code are excluded; unmarked reported speech cannot
+// reliably be distinguished from the assistant's assertions without semantics.
+const QUOTED_DATE_TEXT_RE =
+  /```[^\n]*\n[\s\S]*?(?:```|(?![\s\S]))|~~~[^\n]*\n[\s\S]*?(?:~~~|(?![\s\S]))|(`+)[^\n]*?\1|「[^」]*」|『[^』]*』|“[^”]*”|‘[^’]*’|"(?:\\.|[^"\\\n])*"|(?<![\p{L}\p{N}])'(?:\\.|[^'\\\n])*'|^[ \t]*>[^\n]*(?:\n|$)/gmu;
+
+type QuotedRange = { start: number; end: number };
+
+function quotedRanges(text: string): QuotedRange[] {
+  return Array.from(text.matchAll(QUOTED_DATE_TEXT_RE), (match) => ({
+    start: match.index,
+    end: match.index + match[0].length,
+  }));
+}
+
+function overlapsQuotation(
+  ranges: QuotedRange[],
+  start: number,
+  end = start + 1
+): boolean {
+  return ranges.some((range) => start < range.end && end > range.start);
+}
 const EXPLICIT_ISO_DATE_CLAIM_RE =
   /(?<![A-Za-z0-9_./-])(\d{4})-(\d{2})-(\d{2})(?:T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_])/g;
 const INVALID_CALENDAR_DATE_BLOCK_TEXT =
@@ -281,8 +306,6 @@ const RELATIVE_WEEK_DATE_RE =
   /(?<![上下本這大小前後])((上週|本週|這週|下週)\s*(?:(星期)([日天一二三四五六])|([日天一二三四五六])))((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期|週|周)?[日天一二三四五六])([)）])/g;
 const RELATIVE_DAY_DATE_RE =
   /((今天|昨天|明天))((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期|週|周)?[日天一二三四五六])([)）])/g;
-const SHORT_DATE_WITH_WEEKDAY_RE =
-  /(?<![A-Za-z0-9_./-])(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期|週|周)?[日天一二三四五六])([)）])/g;
 
 const RELATIVE_WEEK_REFERENCE: Record<string, RelativeWeekReference> = {
   上週: "previous",
@@ -316,10 +339,6 @@ function weekdayWithStyle(original: string, expectedIndex: number): string {
   if (prefix === "星期") return expected;
   if (prefix) return `${prefix}${expected.slice(2)}`;
   return expected.slice(2);
-}
-
-function sameShortDate(parts: CalendarDate, month: number, day: number) {
-  return parts.month === month && parts.day === day;
 }
 
 function isSupportedRelativeDateConnector(continuation: string): boolean {
@@ -440,12 +459,15 @@ function isExplicitNextOccurrenceForwardBridge(
 
 function findNextOccurrenceDateClaims(
   text: string,
-  requestedTarget: string | null
+  requestedTarget: string | null,
+  protectQuotations: boolean
 ): LocatedDateClaim[] {
   const linkedClaims = new Map<number, LocatedDateClaim>();
+  const quotations = protectQuotations ? quotedRanges(text) : [];
   const occurrenceRegex = new RegExp(NEXT_OCCURRENCE_RE.source, "gi");
   for (const occurrence of text.matchAll(occurrenceRegex)) {
     const occurrenceIndex = occurrence.index ?? 0;
+    if (overlapsQuotation(quotations, occurrenceIndex)) continue;
     const occurrenceEnd = occurrenceIndex + occurrence[0].length;
     const forwardRemainder = text.slice(
       occurrenceEnd,
@@ -460,6 +482,14 @@ function findNextOccurrenceDateClaims(
         : forwardRemainder.slice(0, forwardBoundary);
     const forwardClaims = allDateClaimsIn(forwardScope, occurrenceEnd);
     for (const claim of forwardClaims) {
+      if (
+        overlapsQuotation(
+          quotations,
+          claim.index,
+          claim.index + claim.match[0].length
+        )
+      )
+        continue;
       const bridge = text.slice(occurrenceEnd, claim.index);
       if (isExplicitNextOccurrenceForwardBridge(bridge, requestedTarget)) {
         linkedClaims.set(claim.index, { ...claim, associationText: bridge });
@@ -483,6 +513,14 @@ function findNextOccurrenceDateClaims(
     for (let index = backwardClaims.length - 1; index >= 0; index -= 1) {
       const claim = backwardClaims[index];
       if (!claim) continue;
+      if (
+        overlapsQuotation(
+          quotations,
+          claim.index,
+          claim.index + claim.match[0].length
+        )
+      )
+        continue;
       const bridge = text.slice(
         claim.index + claim.match[0].length,
         occurrenceIndex
@@ -969,12 +1007,20 @@ function correctNextOccurrenceClaim(
   return text;
 }
 
-export function guardDateOutput(input: DateGuardInput): DateGuardResult {
-  if (!isDateSensitiveTurn(input.userMessage)) {
+export function guardDateOutput(
+  input: DateGuardInput,
+  options: { strictFullDateConsistency?: boolean } = {}
+): DateGuardResult {
+  const strict = options.strictFullDateConsistency === true;
+  if (!strict && !isDateSensitiveTurn(input.userMessage)) {
     return { status: "unchanged", text: input.finalText };
   }
-
+  let quotations = strict ? quotedRanges(input.finalText) : [];
   for (const match of input.finalText.matchAll(EXPLICIT_ISO_DATE_CLAIM_RE)) {
+    if (
+      overlapsQuotation(quotations, match.index, match.index + match[0].length)
+    )
+      continue;
     if (!validUtcDate(Number(match[1]), Number(match[2]), Number(match[3]))) {
       return {
         status: "blocked",
@@ -986,6 +1032,42 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
 
   const corrections: DateCorrection[] = [];
   let text = input.finalText;
+  let invalidPair = false;
+  if (strict)
+    text = text.replace(
+      EXPLICIT_DATE_WITH_WEEKDAY_RE,
+      (match, year, separator, month, day, bridge, weekday, offset) => {
+        if (overlapsQuotation(quotations, offset, offset + match.length))
+          return match;
+        const date = validUtcDate(Number(year), Number(month), Number(day));
+        if (!date) {
+          invalidPair = true;
+          return match;
+        }
+        const expected = weekdayWithStyle(weekday, date.getUTCDay());
+        if (weekday === expected) return match;
+        corrections.push({
+          reason: "weekday_mismatch",
+          original: weekday,
+          replacement: expected,
+        });
+        return `${year}${separator}${month}${separator}${day}${bridge}${expected}`;
+      }
+    );
+  if (invalidPair) {
+    return {
+      status: "blocked",
+      text: INVALID_CALENDAR_DATE_BLOCK_TEXT,
+      reason: "invalid_calendar_date",
+    };
+  }
+  // Strict full-date checks run independently of intent. The default retains
+  // HEAD's date-intent, quotation and short-date-window behavior.
+  if (!isDateSensitiveTurn(input.userMessage)) {
+    return corrections.length > 0
+      ? { status: "corrected", text, corrections }
+      : { status: "unchanged", text };
+  }
   const isNextOccurrence = NEXT_OCCURRENCE_RE.test(input.userMessage);
   const requestedTargetState = requestedOccurrenceTargetState(
     input.userMessage
@@ -993,7 +1075,7 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
   const requestedTarget =
     requestedTargetState.kind === "unique" ? requestedTargetState.target : null;
   const nextOccurrenceDateClaims = isNextOccurrence
-    ? findNextOccurrenceDateClaims(text, requestedTarget)
+    ? findNextOccurrenceDateClaims(text, requestedTarget, strict)
     : [];
   if (nextOccurrenceDateClaims.length > 0) {
     const recurrence = explicitRecurrence(input.userMessage);
@@ -1133,6 +1215,7 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
     }
   }
 
+  quotations = strict ? quotedRanges(text) : [];
   text = text.replace(
     RELATIVE_WEEK_DATE_RE,
     (
@@ -1147,8 +1230,11 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
       dayText,
       beforeWeekday,
       weekday,
-      closing
+      closing,
+      offset
     ) => {
+      if (overlapsQuotation(quotations, offset, offset + match.length))
+        return match;
       const weekdayText = explicitWeekdayText ?? bareWeekdayText;
       if (
         !explicitWeekdayMarker &&
@@ -1182,6 +1268,7 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
     }
   );
 
+  quotations = strict ? quotedRanges(text) : [];
   text = text.replace(
     RELATIVE_DAY_DATE_RE,
     (
@@ -1193,8 +1280,11 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
       dayText,
       beforeWeekday,
       weekday,
-      closing
+      closing,
+      offset
     ) => {
+      if (overlapsQuotation(quotations, offset, offset + match.length))
+        return match;
       const reference = RELATIVE_DAY_REFERENCE[dayTextReference];
       if (!reference) return match;
       if (!isSupportedRelativeDateConnector(between)) return match;
@@ -1216,54 +1306,61 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
     }
   );
 
-  const calendar = buildRelativeWeekCalendar(input.now);
-  const datesInWindow = [
-    ...calendar.previous,
-    ...calendar.current,
-    ...calendar.next,
-  ];
-  text = text.replace(
-    SHORT_DATE_WITH_WEEKDAY_RE,
-    (match, monthText, dayText, beforeWeekday, weekday, closing) => {
-      const date = datesInWindow.find((candidate) =>
-        sameShortDate(candidate, Number(monthText), Number(dayText))
-      );
-      if (!date) return match;
-      const expectedWeekday = weekdayWithStyle(weekday, weekdayFor(date));
-      if (weekday === expectedWeekday) return match;
-
-      corrections.push({
-        reason: "weekday_mismatch",
-        original: weekday,
-        replacement: expectedWeekday,
-      });
-      return `${monthText}/${dayText}${beforeWeekday}${expectedWeekday}${closing}`;
-    }
-  );
-
-  text = text.replace(
-    EXPLICIT_DATE_WITH_WEEKDAY_RE,
-    (match, yearText, monthText, dayText, beforeWeekday, weekday, closing) => {
-      const date = validUtcDate(
-        Number(yearText),
-        Number(monthText),
-        Number(dayText)
-      );
-      if (!date) return match;
-
-      const expectedWeekdayIndex = date.getUTCDay();
-      if (weekdayIndexOf(weekday) === expectedWeekdayIndex) return match;
-      const expectedWeekday = weekdayWithStyle(weekday, expectedWeekdayIndex);
-
-      corrections.push({
-        reason: "weekday_mismatch",
-        original: weekday,
-        replacement: expectedWeekday,
-      });
-      return `${yearText}-${monthText}-${dayText}${beforeWeekday}${expectedWeekday}${closing}`;
-    }
-  );
-
+  if (!strict) {
+    const calendar = buildRelativeWeekCalendar(input.now);
+    const datesInWindow = [
+      ...calendar.previous,
+      ...calendar.current,
+      ...calendar.next,
+    ];
+    text = text.replace(
+      SHORT_DATE_WITH_WEEKDAY_RE,
+      (match, monthText, dayText, beforeWeekday, weekday, closing) => {
+        const date = datesInWindow.find(
+          (candidate) =>
+            candidate.month === Number(monthText) &&
+            candidate.day === Number(dayText)
+        );
+        if (!date) return match;
+        const expectedWeekday = weekdayWithStyle(weekday, weekdayFor(date));
+        if (weekday === expectedWeekday) return match;
+        corrections.push({
+          reason: "weekday_mismatch",
+          original: weekday,
+          replacement: expectedWeekday,
+        });
+        return `${monthText}/${dayText}${beforeWeekday}${expectedWeekday}${closing}`;
+      }
+    );
+    text = text.replace(
+      LEGACY_EXPLICIT_DATE_WITH_WEEKDAY_RE,
+      (
+        match,
+        yearText,
+        monthText,
+        dayText,
+        beforeWeekday,
+        weekday,
+        closing
+      ) => {
+        const date = validUtcDate(
+          Number(yearText),
+          Number(monthText),
+          Number(dayText)
+        );
+        if (!date) return match;
+        const expectedWeekdayIndex = date.getUTCDay();
+        if (weekdayIndexOf(weekday) === expectedWeekdayIndex) return match;
+        const expectedWeekday = weekdayWithStyle(weekday, expectedWeekdayIndex);
+        corrections.push({
+          reason: "weekday_mismatch",
+          original: weekday,
+          replacement: expectedWeekday,
+        });
+        return `${yearText}-${monthText}-${dayText}${beforeWeekday}${expectedWeekday}${closing}`;
+      }
+    );
+  }
   return corrections.length > 0
     ? { status: "corrected", text, corrections }
     : { status: "unchanged", text };

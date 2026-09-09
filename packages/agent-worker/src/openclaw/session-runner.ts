@@ -2787,6 +2787,15 @@ Use it when the user references past discussions or you need context.`);
       string,
       TrustedTemporalEvidence
     >();
+    // Per-target release opt-in, never a process-wide or SBR capability flag.
+    // Candidates wait for the whole answer before first text (including plain
+    // answers); tool events/heartbeats remain live. Stable targets retain HEAD's
+    // 150ms streaming and intent-based buffering, including its known limits.
+    const strictDateOutput =
+      context.releaseState?.status === "active" &&
+      context.releaseState.claim.capabilityIds.includes(
+        "calendar.output_consistency.v2"
+      );
     let bufferCurrentTurnOutputForFinalGuards = false;
 
     // Wire events through progress processor with delta batching
@@ -2840,7 +2849,8 @@ Use it when the user references past discussions or you need context.`);
       bufferCurrentTurnOutputForFinalGuards =
         options?.silent === true
           ? false
-          : getRequiredBattleReportMutationTools(promptText).length > 0 ||
+          : strictDateOutput ||
+            getRequiredBattleReportMutationTools(promptText).length > 0 ||
             isDateSensitiveTurn(promptText);
 
       const turnDone = new Promise<void>((resolve) => {
@@ -2889,7 +2899,7 @@ Use it when the user references past discussions or you need context.`);
       }
 
       const hasUpdate = progressProcessor.processEvent(event);
-      if (hasUpdate) {
+      if (hasUpdate && !strictDateOutput) {
         const delta = progressProcessor.getDelta();
         if (delta) {
           pendingDelta += delta;
@@ -3350,24 +3360,27 @@ Use it when the user references past discussions or you need context.`);
       ctx: pluginHookContext,
     });
 
-    // Hand the fully-streamed assistant output to the progress processor so
+    // Hand the validated assistant output to the progress processor so
     // the success path's checkSandboxLeak() (worker.execute) actually runs
     // against user-facing text. Without this, getFinalResult() is always
     // null in production and the sandbox-leak redaction never fires.
     const finalText = progressProcessor.getOutputSnapshot();
     let dateGuardDecision: DateGuardResult;
     try {
-      dateGuardDecision = guardDateOutput({
-        userMessage: userPrompt,
-        finalText,
-        now: turnNow,
-        trustedTemporalCandidates: Array.from(
-          currentTurnTrustedTemporalCandidates
-        ),
-        trustedTemporalEvidence: Array.from(
-          currentTurnTrustedTemporalEvidence.values()
-        ),
-      });
+      dateGuardDecision = guardDateOutput(
+        {
+          userMessage: userPrompt,
+          finalText,
+          now: turnNow,
+          trustedTemporalCandidates: Array.from(
+            currentTurnTrustedTemporalCandidates
+          ),
+          trustedTemporalEvidence: Array.from(
+            currentTurnTrustedTemporalEvidence.values()
+          ),
+        },
+        { strictFullDateConsistency: strictDateOutput }
+      );
     } catch (error) {
       const errorType =
         error instanceof RangeError
@@ -3378,13 +3391,14 @@ Use it when the user references past discussions or you need context.`);
               ? "Error"
               : typeof error;
       logger.error(`Date output guard failed: errorType=${errorType}`);
-      dateGuardDecision = isDateSensitiveTurn(userPrompt)
-        ? {
-            status: "blocked",
-            text: "目前無法可靠確認日期，請稍後再試。",
-            reason: "date_guard_failure",
-          }
-        : { status: "unchanged", text: finalText };
+      dateGuardDecision =
+        strictDateOutput || isDateSensitiveTurn(userPrompt)
+          ? {
+              status: "blocked",
+              text: "目前無法可靠確認日期，請稍後再試。",
+              reason: "date_guard_failure",
+            }
+          : { status: "unchanged", text: finalText };
     }
     if (dateGuardDecision.status === "corrected") {
       logger.warn(

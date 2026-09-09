@@ -10,6 +10,7 @@ export const RUNTIME_CARRIER_CAPABILITIES = [
   "lobu-runtime:automation-tool-catalog.v1",
   "lobu-runtime:turn.release_context.v1",
   "lobu-runtime:course_context_projection.v2",
+  "lobu-runtime:calendar.output_consistency.v2",
 ] as const;
 
 interface RuntimeEnvLike {
